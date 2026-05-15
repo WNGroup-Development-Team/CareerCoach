@@ -72,7 +72,7 @@ function App() {
     interview_language: "Italiano",
   });
 
-  const [interviewType, setInterviewType] = useState("motivazionale");
+  const [interviewType, setInterviewType] = useState("conoscitive_motivazionali");
   const [difficulty, setDifficulty] = useState("intermedio");
 
   const [company, setCompany] = useState("Generica");
@@ -447,27 +447,27 @@ function App() {
     }
   };
 
-  const goToNextQuestion = () => {
-    resetError();
+const goToNextQuestion = () => {
+  resetError();
 
-    const nextIndex = currentQuestionIndex + 1;
+  const nextIndex = currentQuestionIndex + 1;
 
-    if (nextIndex >= questions.length) {
-      loadHistory();
-      return;
-    }
+  if (nextIndex >= questions.length) {
+    loadHistory();
+    return;
+  }
 
-    const nextQuestion = questions[nextIndex];
+  const nextQuestion = questions[nextIndex];
 
-    setCurrentQuestionIndex(nextIndex);
-    setQuestionId(nextQuestion.question_id);
-    setQuestion(nextQuestion.question);
-    setAnswer("");
-    setFeedback(null);
-    setSpeechMetrics(null);
-    setAnswerMode("text");
-    setStep("question");
-  };
+  setCurrentQuestionIndex(nextIndex);
+  setQuestionId(nextQuestion.question_id);
+  setQuestion(nextQuestion.question);
+  setAnswer("");
+  setFeedback(null);
+  setSpeechMetrics(null);
+  setAnswerMode("text");
+  setStep("question");
+};
 
   const startNewTraining = () => {
     resetError();
@@ -627,40 +627,40 @@ function App() {
 
           <h3 className="sub-title">Tipo di allenamento</h3>
 
-          <div className="choice-grid">
-            <button
-              className={interviewType === "conoscitivo" ? "choice active" : "choice"}
-              onClick={() => setInterviewType("conoscitivo")}
-            >
-              <h3>Conoscitivo</h3>
-              <p>Presentazione personale, percorso, obiettivi e punti di forza.</p>
-            </button>
+          <div className="choice-grid three-columns">
+  <button
+    className={interviewType === "conoscitive_motivazionali" ? "choice active" : "choice"}
+    onClick={() => setInterviewType("conoscitive_motivazionali")}
+  >
+    <h3>Conoscitive e motivazionali</h3>
+    <p>
+      Domande su chi sei, cosa ti aspetti, obiettivi, motivazioni,
+      lavoro di gruppo, azienda e percorso personale.
+    </p>
+  </button>
 
-            <button
-              className={interviewType === "motivazionale" ? "choice active" : "choice"}
-              onClick={() => setInterviewType("motivazionale")}
-            >
-              <h3>Motivazionale</h3>
-              <p>Perché vuoi quel ruolo, quell’azienda o quel settore.</p>
-            </button>
+  <button
+    className={interviewType === "tecniche" ? "choice active" : "choice"}
+    onClick={() => setInterviewType("tecniche")}
+  >
+    <h3>Tecniche</h3>
+    <p>
+      Domande specifiche sul ruolo scelto, sulle competenze richieste,
+      sugli strumenti e sulle capacità operative.
+    </p>
+  </button>
 
-            <button
-              className={interviewType === "comportamentale" ? "choice active" : "choice"}
-              onClick={() => setInterviewType("comportamentale")}
-            >
-              <h3>Comportamentale</h3>
-              <p>Teamwork, problemi, conflitti, errori e risultati raggiunti.</p>
-            </button>
-
-            <button
-              className={interviewType === "tecnico" ? "choice active" : "choice"}
-              onClick={() => setInterviewType("tecnico")}
-            >
-              <h3>Tecnico</h3>
-              <p>Domande legate al ruolo e alle competenze professionali.</p>
-            </button>
-          </div>
-
+  <button
+    className={interviewType === "logica" ? "choice active" : "choice"}
+    onClick={() => setInterviewType("logica")}
+  >
+    <h3>Logica e ragionamento</h3>
+    <p>
+      Domande a trabocchetto, indovinelli, casi di ragionamento,
+      problem solving e pensiero critico.
+    </p>
+  </button>
+</div>
           <label>Difficoltà</label>
           <select
             value={difficulty}
