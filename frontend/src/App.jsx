@@ -3,6 +3,60 @@ import "./App.css";
 
 const API_URL = "http://127.0.0.1:8000";
 
+async function fetchWithTimeout(url, options = {}, timeout = 30000) {
+  const controller = new AbortController();
+
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
+function analyzeSpeech(text, durationSeconds) {
+  const cleanText = text.toLowerCase();
+  const words = cleanText.split(/\s+/).filter(Boolean);
+
+  const fillerList = [
+    "ehm",
+    "mmm",
+    "cioè",
+    "allora",
+    "praticamente",
+    "tipo",
+    "diciamo",
+    "appunto",
+    "ok",
+    "quindi"
+  ];
+
+  const fillerWords = words.filter((word) =>
+    fillerList.includes(word.replace(/[.,!?;:]/g, ""))
+  );
+
+  const wordsPerMinute =
+    durationSeconds > 0 ? Math.round((words.length / durationSeconds) * 60) : 0;
+
+  return {
+    duration_seconds: durationSeconds,
+    words_count: words.length,
+    words_per_minute: wordsPerMinute,
+    filler_words_count: fillerWords.length,
+    filler_words: fillerWords
+  };
+}
+
 function App() {
   const [step, setStep] = useState("profile");
 
@@ -21,9 +75,20 @@ function App() {
   const [interviewType, setInterviewType] = useState("motivazionale");
   const [difficulty, setDifficulty] = useState("intermedio");
 
+  const [company, setCompany] = useState("Generica");
+  const [questionMode, setQuestionMode] = useState("web");
+
+  const [questions, setQuestions] = useState([]);
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [allFeedbacks, setAllFeedbacks] = useState([]);
+
   const [questionId, setQuestionId] = useState(null);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
+
+  const [answerMode, setAnswerMode] = useState("text");
+  const [isListening, setIsListening] = useState(false);
+  const [speechMetrics, setSpeechMetrics] = useState(null);
 
   const [feedback, setFeedback] = useState(null);
   const [history, setHistory] = useState([]);
@@ -69,18 +134,18 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/users`, {
+      const response = await fetchWithTimeout(`${API_URL}/users`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify(profile),
-      });
+        body: JSON.stringify(profile)
+      }, 15000);
 
       const data = await response.json();
 
       if (!response.ok) {
-        setError(data.detail || "Errore nella creazione del profilo.");
+        setError(typeof data.detail === "string" ? data.detail : "Errore nella creazione del profilo.");
         return;
       }
 
@@ -88,7 +153,12 @@ function App() {
       setStep("gym");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+
+      if (err.name === "AbortError") {
+        setError("Il backend non risponde. Controlla che FastAPI sia avviato.");
+      } else {
+        setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      }
     } finally {
       setLoading(false);
     }
@@ -97,42 +167,96 @@ function App() {
   const generateQuestion = async () => {
     resetError();
     setLoading(true);
+
     setQuestion("");
     setAnswer("");
+    setQuestionId(null);
     setFeedback(null);
+    setSpeechMetrics(null);
+
+    setQuestions([]);
+    setCurrentQuestionIndex(0);
+    setAllFeedbacks([]);
 
     try {
-      const response = await fetch(`${API_URL}/generate-question`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          user_id: userId,
-          interview_type: interviewType,
-          difficulty: difficulty,
-        }),
-      });
+      console.log("Invio richiesta a /generate-question");
 
-      const data = await response.json();
+      const response = await fetchWithTimeout(
+        `${API_URL}/generate-question`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            user_id: userId,
+            interview_type: interviewType,
+            difficulty: difficulty,
+            company: company,
+            question_mode: questionMode
+          })
+        },
+        45000
+      );
+
+      console.log("Risposta ricevuta dal backend:", response.status);
+
+      let data = null;
+
+      try {
+        data = await response.json();
+      } catch (jsonError) {
+        console.error("Errore parsing JSON:", jsonError);
+        setError("Il backend ha risposto, ma non ha restituito un JSON valido.");
+        return;
+      }
 
       if (!response.ok) {
+        console.log("Errore backend:", data);
         setError(
           typeof data.detail === "string"
             ? data.detail
             : "Errore nella generazione della domanda."
         );
-        console.log(data);
         return;
       }
 
-      setQuestionId(data.question_id);
-      setQuestion(data.question);
+      const receivedQuestions = data.questions || [
+        {
+          question_id: data.question_id,
+          question: data.question
+        }
+      ];
+
+      if (!receivedQuestions.length || !receivedQuestions[0].question) {
+        setError("Il backend non ha restituito domande valide.");
+        return;
+      }
+
+      setQuestions(receivedQuestions);
+      setCurrentQuestionIndex(0);
+      setAllFeedbacks([]);
+
+      setQuestionId(receivedQuestions[0].question_id);
+      setQuestion(receivedQuestions[0].question);
+      setAnswer("");
+      setFeedback(null);
       setStep("question");
+
     } catch (err) {
-      console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      console.error("Errore generateQuestion:", err);
+
+      if (err.name === "AbortError") {
+        setError(
+          "La generazione delle domande sta impiegando troppo tempo. Prova con 'Solo AI senza ricerca web' oppure riprova tra poco."
+        );
+      } else {
+        setError(
+          "Errore di connessione al backend. Controlla che FastAPI sia avviato su http://127.0.0.1:8000."
+        );
+      }
     } finally {
+      console.log("Fine caricamento generateQuestion");
       setLoading(false);
     }
   };
@@ -141,23 +265,24 @@ function App() {
     resetError();
 
     if (!answer.trim()) {
-      setError("Scrivi una risposta prima di inviarla.");
+      setError("Scrivi o registra una risposta prima di inviarla.");
       return;
     }
 
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/evaluate-answer`, {
+      const response = await fetchWithTimeout(`${API_URL}/evaluate-answer`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           question_id: questionId,
           answer: answer,
-        }),
-      });
+          speech_metrics: speechMetrics
+        })
+      }, 30000);
 
       const data = await response.json();
 
@@ -172,10 +297,26 @@ function App() {
       }
 
       setFeedback(data);
+
+      setAllFeedbacks((prev) => [
+        ...prev,
+        {
+          question_id: questionId,
+          question: question,
+          answer: answer,
+          feedback: data
+        }
+      ]);
+
       setStep("feedback");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+
+      if (err.name === "AbortError") {
+        setError("La valutazione sta impiegando troppo tempo. Riprova.");
+      } else {
+        setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      }
     } finally {
       setLoading(false);
     }
@@ -186,7 +327,7 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/history/${userId}`);
+      const response = await fetchWithTimeout(`${API_URL}/history/${userId}`, {}, 15000);
       const data = await response.json();
 
       if (!response.ok) {
@@ -199,7 +340,12 @@ function App() {
       setStep("history");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+
+      if (err.name === "AbortError") {
+        setError("Il caricamento dello storico sta impiegando troppo tempo.");
+      } else {
+        setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      }
     } finally {
       setLoading(false);
     }
@@ -210,7 +356,7 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/progress/${userId}`);
+      const response = await fetchWithTimeout(`${API_URL}/progress/${userId}`, {}, 15000);
       const data = await response.json();
 
       if (!response.ok) {
@@ -223,10 +369,104 @@ function App() {
       setStep("progress");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+
+      if (err.name === "AbortError") {
+        setError("Il caricamento dei progressi sta impiegando troppo tempo.");
+      } else {
+        setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      }
     } finally {
       setLoading(false);
     }
+  };
+
+  const startVoiceAnswer = () => {
+    resetError();
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setError("Il riconoscimento vocale non è supportato da questo browser. Prova con Chrome o Edge.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+
+    recognition.lang =
+      profile.interview_language === "Inglese" ? "en-US" : "it-IT";
+
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    let finalTranscript = answer;
+    const startTime = Date.now();
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onresult = (event) => {
+      let interimTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+
+        if (event.results[i].isFinal) {
+          finalTranscript += " " + transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      setAnswer((finalTranscript + " " + interimTranscript).trim());
+    };
+
+    recognition.onerror = (event) => {
+      setError(`Errore microfono: ${event.error}`);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+
+      const endTime = Date.now();
+      const duration = Math.round((endTime - startTime) / 1000);
+
+      const metrics = analyzeSpeech(finalTranscript, duration);
+      setSpeechMetrics(metrics);
+    };
+
+    recognition.start();
+    window.currentRecognition = recognition;
+  };
+
+  const stopVoiceAnswer = () => {
+    if (window.currentRecognition) {
+      window.currentRecognition.stop();
+    }
+  };
+
+  const goToNextQuestion = () => {
+    resetError();
+
+    const nextIndex = currentQuestionIndex + 1;
+
+    if (nextIndex >= questions.length) {
+      loadHistory();
+      return;
+    }
+
+    const nextQuestion = questions[nextIndex];
+
+    setCurrentQuestionIndex(nextIndex);
+    setQuestionId(nextQuestion.question_id);
+    setQuestion(nextQuestion.question);
+    setAnswer("");
+    setFeedback(null);
+    setSpeechMetrics(null);
+    setAnswerMode("text");
+    setStep("question");
   };
 
   const startNewTraining = () => {
@@ -235,6 +475,13 @@ function App() {
     setAnswer("");
     setQuestionId(null);
     setFeedback(null);
+    setSpeechMetrics(null);
+    setAnswerMode("text");
+
+    setQuestions([]);
+    setCurrentQuestionIndex(0);
+    setAllFeedbacks([]);
+
     setStep("gym");
   };
 
@@ -247,28 +494,28 @@ function App() {
 
         <div>
           <h1>CareerCoach</h1>
-          <p>La tua palestra intelligente per prepararti ai colloqui di lavoro</p>
+          <p>La palestra intelligente per simulare colloqui reali</p>
         </div>
       </header>
 
       {userId && (
         <nav className="navbar">
-          <button onClick={() => setStep("gym")}>Palestra</button>
+          <button onClick={() => setStep("gym")}>Palestra colloqui</button>
           <button onClick={loadHistory}>Storico</button>
           <button onClick={loadProgress}>Progressi</button>
         </nav>
       )}
 
       {loading && <div className="loading">Caricamento...</div>}
-
       {error && <div className="error">{error}</div>}
 
       {step === "profile" && (
         <section className="card">
-          <h2>Crea il tuo profilo candidato</h2>
+          <h2>Personalizza la tua esperienza</h2>
           <p className="section-description">
-            Queste informazioni verranno usate per generare domande di colloquio
-            personalizzate e coerenti con il tuo obiettivo professionale.
+            Inserisci il tuo profilo candidato. Queste informazioni verranno usate
+            per cercare domande online, adattarle al tuo ruolo e simulare un colloquio
+            più realistico.
           </p>
 
           <div className="form-grid">
@@ -342,7 +589,7 @@ function App() {
           </div>
 
           <button className="primary-button" onClick={createProfile} disabled={loading}>
-            Salva profilo e inizia
+            Salva profilo e continua
           </button>
         </section>
       )}
@@ -351,9 +598,34 @@ function App() {
         <section className="card">
           <h2>Palestra dei colloqui</h2>
           <p className="section-description">
-            Scegli il tipo di colloquio e il livello di difficoltà. L’app genererà
-            una domanda realistica e poi valuterà la tua risposta.
+            Scegli azienda, tipo di colloquio e origine delle domande.
+            Verranno generate 10 domande per simulare un colloquio completo.
           </p>
+
+          <div className="form-grid">
+            <div>
+              <label>Azienda target</label>
+              <input
+                value={company}
+                onChange={(e) => setCompany(e.target.value)}
+                placeholder="Es. Amazon, Google, Deloitte, Reply, TIM..."
+              />
+            </div>
+
+            <div>
+              <label>Origine domande</label>
+              <select
+                value={questionMode}
+                onChange={(e) => setQuestionMode(e.target.value)}
+              >
+                <option value="web">Cerca online domande reali/simili</option>
+                <option value="mixed">Web + personalizzazione AI</option>
+                <option value="ai">Solo AI senza ricerca web</option>
+              </select>
+            </div>
+          </div>
+
+          <h3 className="sub-title">Tipo di allenamento</h3>
 
           <div className="choice-grid">
             <button
@@ -361,7 +633,7 @@ function App() {
               onClick={() => setInterviewType("conoscitivo")}
             >
               <h3>Conoscitivo</h3>
-              <p>Domande su percorso, presentazione e obiettivi.</p>
+              <p>Presentazione personale, percorso, obiettivi e punti di forza.</p>
             </button>
 
             <button
@@ -369,7 +641,7 @@ function App() {
               onClick={() => setInterviewType("motivazionale")}
             >
               <h3>Motivazionale</h3>
-              <p>Domande su interesse per ruolo, azienda e settore.</p>
+              <p>Perché vuoi quel ruolo, quell’azienda o quel settore.</p>
             </button>
 
             <button
@@ -377,7 +649,7 @@ function App() {
               onClick={() => setInterviewType("comportamentale")}
             >
               <h3>Comportamentale</h3>
-              <p>Domande su esperienze, teamwork, problemi e risultati.</p>
+              <p>Teamwork, problemi, conflitti, errori e risultati raggiunti.</p>
             </button>
 
             <button
@@ -385,7 +657,7 @@ function App() {
               onClick={() => setInterviewType("tecnico")}
             >
               <h3>Tecnico</h3>
-              <p>Domande legate al ruolo e alle competenze richieste.</p>
+              <p>Domande legate al ruolo e alle competenze professionali.</p>
             </button>
           </div>
 
@@ -401,7 +673,7 @@ function App() {
 
           <div className="actions">
             <button className="primary-button" onClick={generateQuestion} disabled={loading}>
-              Genera domanda
+              Genera 10 domande
             </button>
 
             <button className="secondary-button" onClick={loadHistory} disabled={loading}>
@@ -413,20 +685,93 @@ function App() {
 
       {step === "question" && (
         <section className="card">
-          <h2>Domanda del colloquio</h2>
+          <h2>Simulazione colloquio</h2>
+
+          <div className="progress-question">
+            Domanda {currentQuestionIndex + 1} di {questions.length || 10}
+          </div>
 
           <div className="tag-row">
+            <span>{company}</span>
             <span>{interviewType}</span>
             <span>{difficulty}</span>
+            <span>{questionMode}</span>
           </div>
 
           <div className="question-box">{question}</div>
+
+          {questionMode !== "ai" && (
+            <div className="info-box">
+              La domanda è stata generata usando una ricerca web e personalizzata sul tuo profilo.
+              Le fonti sono state salvate nel database dell’app.
+            </div>
+          )}
+
+          <div className="mode-switch">
+            <button
+              className={answerMode === "text" ? "mode active" : "mode"}
+              onClick={() => setAnswerMode("text")}
+            >
+              Risposta scritta
+            </button>
+
+            <button
+              className={answerMode === "voice" ? "mode active" : "mode"}
+              onClick={() => setAnswerMode("voice")}
+            >
+              Risposta con microfono
+            </button>
+          </div>
+
+          {answerMode === "voice" && (
+            <div className="voice-panel">
+              <h3>Allenamento vocale</h3>
+              <p>
+                Parla come se fossi davanti a un recruiter. L’app trascrive la tua
+                risposta e calcola alcune metriche gratuite sul modo di parlare.
+              </p>
+
+              {!isListening ? (
+                <button className="primary-button" onClick={startVoiceAnswer}>
+                  Avvia microfono
+                </button>
+              ) : (
+                <button className="danger-button" onClick={stopVoiceAnswer}>
+                  Ferma registrazione
+                </button>
+              )}
+
+              {speechMetrics && (
+                <div className="speech-metrics">
+                  <div>
+                    <strong>{speechMetrics.duration_seconds}s</strong>
+                    <p>Durata</p>
+                  </div>
+
+                  <div>
+                    <strong>{speechMetrics.words_count}</strong>
+                    <p>Parole</p>
+                  </div>
+
+                  <div>
+                    <strong>{speechMetrics.words_per_minute}</strong>
+                    <p>Parole/min</p>
+                  </div>
+
+                  <div>
+                    <strong>{speechMetrics.filler_words_count}</strong>
+                    <p>Riempitivi</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <label>La tua risposta</label>
           <textarea
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
-            placeholder="Scrivi qui la tua risposta come se fossi davvero davanti a un recruiter..."
+            placeholder="Scrivi qui la tua risposta oppure usa il microfono e poi correggi la trascrizione..."
             rows={9}
           />
 
@@ -445,6 +790,10 @@ function App() {
       {step === "feedback" && feedback && (
         <section className="card">
           <h2>Feedback del coach</h2>
+
+          <div className="progress-question">
+            Feedback domanda {currentQuestionIndex + 1} di {questions.length || 10}
+          </div>
 
           <div className="score-main">
             <span>{feedback.total_score}</span>
@@ -476,12 +825,24 @@ function App() {
               <strong>{feedback.synthesis_score}</strong>
               <p>Sintesi</p>
             </div>
+
+            <div>
+              <strong>{feedback.speaking_score}</strong>
+              <p>Parlato</p>
+            </div>
           </div>
 
           <div className="feedback-block">
-            <h3>Commento</h3>
+            <h3>Valutazione del contenuto</h3>
             <p>{feedback.feedback}</p>
           </div>
+
+          {feedback.speaking_feedback && (
+            <div className="feedback-block">
+              <h3>Valutazione del modo di parlare</h3>
+              <p>{feedback.speaking_feedback}</p>
+            </div>
+          )}
 
           <div className="improved-answer">
             <h3>Risposta migliorata</h3>
@@ -489,12 +850,18 @@ function App() {
           </div>
 
           <div className="actions">
-            <button className="primary-button" onClick={startNewTraining}>
-              Nuovo allenamento
-            </button>
+            {currentQuestionIndex < questions.length - 1 ? (
+              <button className="primary-button" onClick={goToNextQuestion}>
+                Prossima domanda
+              </button>
+            ) : (
+              <button className="primary-button" onClick={loadHistory}>
+                Concludi simulazione
+              </button>
+            )}
 
-            <button className="secondary-button" onClick={loadHistory}>
-              Vedi storico
+            <button className="secondary-button" onClick={startNewTraining}>
+              Nuovo allenamento
             </button>
           </div>
         </section>
@@ -509,13 +876,21 @@ function App() {
           )}
 
           {history.map((item) => (
-            <div className="history-item" key={item.session_id}>
+            <div className="history-item" key={`${item.session_id}-${item.question}`}>
               <div className="history-header">
-                <h3>{item.interview_type}</h3>
-                <span>{item.difficulty}</span>
+                <h3>{item.company || "Azienda generica"}</h3>
+                <span>{item.interview_type}</span>
               </div>
 
               <p className="date">{item.created_at}</p>
+
+              <p>
+                <strong>Difficoltà:</strong> {item.difficulty}
+              </p>
+
+              <p>
+                <strong>Origine domanda:</strong> {item.question_mode}
+              </p>
 
               <p>
                 <strong>Punteggio:</strong>{" "}
@@ -535,6 +910,12 @@ function App() {
               {item.feedback && (
                 <p>
                   <strong>Feedback:</strong> {item.feedback}
+                </p>
+              )}
+
+              {item.speaking_feedback && (
+                <p>
+                  <strong>Feedback parlato:</strong> {item.speaking_feedback}
                 </p>
               )}
 
@@ -600,6 +981,11 @@ function App() {
                 <div>
                   <strong>{progress.average_synthesis_score}</strong>
                   <p>Sintesi media</p>
+                </div>
+
+                <div>
+                  <strong>{progress.average_speaking_score}</strong>
+                  <p>Parlato medio</p>
                 </div>
               </div>
             </>

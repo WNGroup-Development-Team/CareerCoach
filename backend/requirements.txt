@@ -3,4 +3,4 @@ uvicorn
 openai
 python-dotenv
 pydantic
-tavily-python
+requests

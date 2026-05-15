@@ -1,7 +1,8 @@
 import os
 import json
 import sqlite3
-from typing import Optional
+import requests
+from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -19,12 +20,19 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
 if not GROQ_API_KEY:
     raise RuntimeError("Manca GROQ_API_KEY nel file .env")
 
-client = OpenAI(
+if not TAVILY_API_KEY:
+    raise RuntimeError("Manca TAVILY_API_KEY nel file .env")
+
+
+groq_client = OpenAI(
     api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1"
+    base_url="https://api.groq.com/openai/v1",
+    timeout=30.0
 )
 
 
@@ -32,7 +40,7 @@ client = OpenAI(
 # APP FASTAPI
 # =========================
 
-app = FastAPI(title="CareerCoach API")
+app = FastAPI(title="CareerCoach API - Interview Gym")
 
 
 app.add_middleware(
@@ -53,6 +61,14 @@ DB_NAME = "careercoach.db"
 
 def get_connection():
     return sqlite3.connect(DB_NAME)
+
+
+def add_column_if_not_exists(cursor, table_name: str, column_name: str, column_sql: str):
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_columns = [row[1] for row in cursor.fetchall()]
+
+    if column_name not in existing_columns:
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def init_db():
@@ -78,6 +94,8 @@ def init_db():
         user_id INTEGER NOT NULL,
         interview_type TEXT,
         difficulty TEXT,
+        company TEXT,
+        question_mode TEXT,
         total_score INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id)
@@ -91,6 +109,9 @@ def init_db():
         question_text TEXT NOT NULL,
         category TEXT,
         difficulty TEXT,
+        company TEXT,
+        question_mode TEXT,
+        sources_json TEXT,
         FOREIGN KEY(session_id) REFERENCES interview_sessions(id)
     )
     """)
@@ -105,13 +126,48 @@ def init_db():
         relevance_score INTEGER,
         professionalism_score INTEGER,
         synthesis_score INTEGER,
+        speaking_score INTEGER,
         total_score INTEGER,
         feedback TEXT,
         improved_answer TEXT,
+        speaking_feedback TEXT,
+        speech_metrics_json TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(question_id) REFERENCES questions(id)
     )
     """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS web_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        url TEXT UNIQUE,
+        content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS question_web_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question_id INTEGER NOT NULL,
+        source_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(question_id) REFERENCES questions(id),
+        FOREIGN KEY(source_id) REFERENCES web_sources(id)
+    )
+    """)
+
+    add_column_if_not_exists(cursor, "interview_sessions", "company", "TEXT")
+    add_column_if_not_exists(cursor, "interview_sessions", "question_mode", "TEXT")
+
+    add_column_if_not_exists(cursor, "questions", "company", "TEXT")
+    add_column_if_not_exists(cursor, "questions", "question_mode", "TEXT")
+    add_column_if_not_exists(cursor, "questions", "sources_json", "TEXT")
+
+    add_column_if_not_exists(cursor, "answers", "speaking_score", "INTEGER")
+    add_column_if_not_exists(cursor, "answers", "speaking_feedback", "TEXT")
+    add_column_if_not_exists(cursor, "answers", "speech_metrics_json", "TEXT")
 
     conn.commit()
     conn.close()
@@ -138,28 +194,48 @@ class GenerateQuestionRequest(BaseModel):
     user_id: int
     interview_type: str
     difficulty: str = "intermedio"
+    company: Optional[str] = "Generica"
+    question_mode: Optional[str] = "web"
+
+
+class SpeechMetrics(BaseModel):
+    duration_seconds: Optional[float] = None
+    words_count: Optional[int] = None
+    words_per_minute: Optional[float] = None
+    filler_words_count: Optional[int] = None
+    filler_words: Optional[List[str]] = None
 
 
 class EvaluateAnswerRequest(BaseModel):
     question_id: int
     answer: str
+    speech_metrics: Optional[SpeechMetrics] = None
+
+
+class SearchInterviewQuestionsRequest(BaseModel):
+    company: str
+    role: str
+    interview_type: str
+    language: str = "Italiano"
 
 
 # =========================
-# FUNZIONE AI GROQCLOUD
+# FUNZIONI AI / WEB SEARCH
 # =========================
 
-def call_ai(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> str:
+def call_groq(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> str:
     try:
-        response = client.chat.completions.create(
+        print("Chiamata Groq avviata...")
+
+        response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Sei un assistente esperto nella preparazione ai colloqui "
-                        "di lavoro. Devi dare risposte utili, concrete e adatte "
-                        "a studenti, neolaureati e candidati junior."
+                        "Sei un assistente esperto nella preparazione ai colloqui di lavoro. "
+                        "Aiuti candidati junior, studenti e neolaureati a prepararsi "
+                        "in modo realistico, concreto e pratico."
                     )
                 },
                 {
@@ -168,12 +244,15 @@ def call_ai(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> st
                 }
             ],
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            timeout=25
         )
 
+        print("Chiamata Groq completata.")
         return response.choices[0].message.content.strip()
 
     except Exception as e:
+        print(f"Errore Groq: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Errore durante la chiamata a GroqCloud: {str(e)}"
@@ -181,13 +260,6 @@ def call_ai(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> st
 
 
 def extract_json(text: str):
-    """
-    Estrae un JSON valido anche se il modello lo restituisce dentro:
-    ```json
-    { ... }
-    ```
-    """
-
     text = text.strip()
 
     if text.startswith("```json"):
@@ -202,21 +274,250 @@ def extract_json(text: str):
         end = text.rfind("}") + 1
 
         if start != -1 and end != -1:
-            json_text = text[start:end]
-            return json.loads(json_text)
+            return json.loads(text[start:end])
 
         raise ValueError(f"JSON non valido restituito dal modello: {text}")
 
 
+def extract_questions_list(text: str) -> List[str]:
+    """
+    Estrae una lista di 10 domande dal testo restituito dal modello.
+    Il modello dovrebbe restituire JSON, ma gestiamo anche casi non perfetti.
+    """
+
+    text = text.strip()
+
+    if text.startswith("```json"):
+        text = text.replace("```json", "").replace("```", "").strip()
+    elif text.startswith("```"):
+        text = text.replace("```", "").strip()
+
+    questions = []
+
+    try:
+        data = json.loads(text)
+
+        if isinstance(data, dict) and "questions" in data:
+            questions = data["questions"]
+        elif isinstance(data, list):
+            questions = data
+    except Exception:
+        lines = text.split("\n")
+
+        for line in lines:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            line = line.lstrip("0123456789.-) ")
+
+            if len(line) > 10:
+                questions.append(line)
+
+    clean_questions = []
+
+    for question in questions:
+        if isinstance(question, str):
+            q = question.strip()
+            if q:
+                clean_questions.append(q)
+
+    return clean_questions[:10]
+
+
+def clamp_score(value):
+    try:
+        value = int(value)
+    except Exception:
+        value = 0
+
+    return max(0, min(100, value))
+
+
+def compute_total_score(
+    clarity_score,
+    completeness_score,
+    relevance_score,
+    professionalism_score,
+    synthesis_score,
+    speaking_score
+):
+    scores = [
+        clarity_score,
+        completeness_score,
+        relevance_score,
+        professionalism_score,
+        synthesis_score
+    ]
+
+    if speaking_score > 0:
+        scores.append(speaking_score)
+
+    return round(sum(scores) / len(scores))
+
+
+def build_search_query(company: str, role: str, interview_type: str, language: str) -> str:
+    company = company.strip()
+    role = role.strip()
+    interview_type = interview_type.strip()
+
+    if language.lower().startswith("ingles"):
+        return (
+            f"{company} {role} interview questions {interview_type} "
+            f"candidate experience recruiter questions"
+        )
+
+    return (
+        f"{company} {role} domande colloquio {interview_type} "
+        f"esperienze candidati recruiter"
+    )
+
+
+def search_web_interview_questions(
+    company: str,
+    role: str,
+    interview_type: str,
+    language: str = "Italiano"
+) -> List[Dict[str, str]]:
+    query = build_search_query(company, role, interview_type, language)
+
+    try:
+        print(f"Ricerca Tavily avviata: {query}")
+
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 3,
+                "include_answer": False,
+                "include_raw_content": False
+            },
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+        results = data.get("results", [])
+
+        clean_results = []
+
+        for item in results:
+            clean_results.append({
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "content": item.get("content", "")
+            })
+
+        print(f"Ricerca Tavily completata. Fonti trovate: {len(clean_results)}")
+        return clean_results
+
+    except Exception as e:
+        print(f"Errore Tavily, continuo senza fonti web: {e}")
+        return []
+
+
+def sources_to_prompt(sources: List[Dict[str, str]]) -> str:
+    if not sources:
+        return "Nessuna fonte web trovata."
+
+    text = ""
+
+    for index, source in enumerate(sources, start=1):
+        text += f"""
+Fonte {index}
+Titolo: {source.get("title", "")}
+URL: {source.get("url", "")}
+Estratto: {source.get("content", "")}
+"""
+
+    return text
+
+
+def save_sources_for_question(cursor, question_id: int, sources: List[Dict[str, str]]):
+    for source in sources:
+        title = source.get("title", "").strip()
+        url = source.get("url", "").strip()
+        content = source.get("content", "").strip()
+
+        if not url:
+            continue
+
+        cursor.execute("""
+        INSERT OR IGNORE INTO web_sources (
+            title,
+            url,
+            content
+        )
+        VALUES (?, ?, ?)
+        """, (
+            title,
+            url,
+            content
+        ))
+
+        cursor.execute("""
+        SELECT id
+        FROM web_sources
+        WHERE url = ?
+        """, (url,))
+
+        row = cursor.fetchone()
+
+        if not row:
+            continue
+
+        source_id = row[0]
+
+        cursor.execute("""
+        SELECT id
+        FROM question_web_sources
+        WHERE question_id = ? AND source_id = ?
+        """, (
+            question_id,
+            source_id
+        ))
+
+        already_linked = cursor.fetchone()
+
+        if already_linked:
+            continue
+
+        cursor.execute("""
+        INSERT INTO question_web_sources (
+            question_id,
+            source_id
+        )
+        VALUES (?, ?)
+        """, (
+            question_id,
+            source_id
+        ))
+
+
 # =========================
-# ENDPOINT BASE
+# ENDPOINT BASE / DEBUG
 # =========================
 
 @app.get("/")
 def home():
     return {
-        "message": "CareerCoach backend attivo con GroqCloud",
-        "model": GROQ_MODEL
+        "message": "CareerCoach backend attivo con GroqCloud + Tavily Web Search",
+        "groq_model": GROQ_MODEL
+    }
+
+
+@app.get("/debug")
+def debug():
+    return {
+        "status": "ok",
+        "message": "Backend FastAPI attivo",
+        "groq_model": GROQ_MODEL,
+        "has_groq_key": bool(GROQ_API_KEY),
+        "has_tavily_key": bool(TAVILY_API_KEY)
     }
 
 
@@ -298,11 +599,37 @@ def get_user(user_id: int):
 
 
 # =========================
-# ENDPOINT GENERA DOMANDA
+# ENDPOINT RICERCA WEB
+# =========================
+
+@app.post("/search-interview-questions")
+def search_interview_questions(data: SearchInterviewQuestionsRequest):
+    sources = search_web_interview_questions(
+        company=data.company,
+        role=data.role,
+        interview_type=data.interview_type,
+        language=data.language
+    )
+
+    return {
+        "query": build_search_query(
+            data.company,
+            data.role,
+            data.interview_type,
+            data.language
+        ),
+        "sources": sources
+    }
+
+
+# =========================
+# ENDPOINT GENERA 10 DOMANDE
 # =========================
 
 @app.post("/generate-question")
 def generate_question(data: GenerateQuestionRequest):
+    print("Endpoint /generate-question chiamato.")
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -330,8 +657,29 @@ def generate_question(data: GenerateQuestionRequest):
 
     user_id, name, education, target_role, sector, experience_level, interview_language = user
 
-    prompt = f"""
-Sei un recruiter esperto e stai aiutando una persona ad allenarsi per un colloquio di lavoro.
+    company = data.company or "Generica"
+    question_mode = data.question_mode or "web"
+
+    sources = []
+
+    if question_mode in ["web", "mixed"]:
+        sources = search_web_interview_questions(
+            company=company,
+            role=target_role,
+            interview_type=data.interview_type,
+            language=interview_language
+        )
+
+    if not sources and question_mode in ["web", "mixed"]:
+        print("Nessuna fonte web trovata. Procedo con generazione AI basata sul profilo.")
+
+    sources_text = sources_to_prompt(sources)
+
+    if question_mode == "ai":
+        prompt = f"""
+Sei un recruiter esperto.
+
+Devi generare 10 domande di colloquio per questo candidato.
 
 Profilo candidato:
 - Nome: {name}
@@ -340,69 +688,176 @@ Profilo candidato:
 - Settore: {sector}
 - Livello esperienza: {experience_level}
 - Lingua colloquio: {interview_language}
+- Azienda target: {company}
+- Tipo colloquio: {data.interview_type}
+- Difficoltà: {data.difficulty}
 
-Tipo di colloquio:
-{data.interview_type}
+Le 10 domande devono simulare un colloquio realistico.
+Devono essere diverse tra loro e progressive.
 
-Difficoltà:
-{data.difficulty}
+Restituisci SOLO un JSON valido con questa struttura:
 
-Genera UNA SOLA domanda di colloquio.
+{{
+  "questions": [
+    "domanda 1",
+    "domanda 2",
+    "domanda 3",
+    "domanda 4",
+    "domanda 5",
+    "domanda 6",
+    "domanda 7",
+    "domanda 8",
+    "domanda 9",
+    "domanda 10"
+  ]
+}}
 
 Regole:
-- La domanda deve essere realistica.
-- La domanda deve essere coerente con il ruolo target.
-- La domanda deve essere adatta al livello di esperienza.
-- Non aggiungere spiegazioni.
-- Non numerare la domanda.
-- Scrivi solo la domanda.
+- Non aggiungere testo prima o dopo il JSON.
+- Scrivi esattamente 10 domande.
+- Le domande devono essere coerenti con ruolo, azienda e livello.
+- Non numerare le domande dentro il testo.
+"""
+    else:
+        prompt = f"""
+Sei un recruiter esperto.
+
+Devi generare 10 domande di colloquio realistiche per un candidato, ispirandoti ai risultati web trovati.
+
+Profilo candidato:
+- Nome: {name}
+- Percorso di studi: {education}
+- Ruolo target: {target_role}
+- Settore: {sector}
+- Livello esperienza: {experience_level}
+- Lingua colloquio: {interview_language}
+- Azienda target: {company}
+- Tipo colloquio: {data.interview_type}
+- Difficoltà: {data.difficulty}
+
+Risultati web trovati:
+{sources_text}
+
+Le 10 domande devono simulare un colloquio realistico.
+Devono essere diverse tra loro e progressive.
+
+Regole:
+- Non copiare frasi lunghe dalle fonti.
+- Non dire "secondo la fonte".
+- Genera domande originali ma coerenti con i temi ricorrenti nei risultati.
+- Se i risultati sono poco pertinenti, usa comunque il profilo candidato e il ruolo target.
+- Scrivi esattamente 10 domande.
+- Non numerare le domande dentro il testo.
+
+Restituisci SOLO un JSON valido con questa struttura:
+
+{{
+  "questions": [
+    "domanda 1",
+    "domanda 2",
+    "domanda 3",
+    "domanda 4",
+    "domanda 5",
+    "domanda 6",
+    "domanda 7",
+    "domanda 8",
+    "domanda 9",
+    "domanda 10"
+  ]
+}}
 """
 
     try:
-        question_text = call_ai(prompt, temperature=0.7, max_tokens=300)
+        raw_questions = call_groq(prompt, temperature=0.5, max_tokens=1200)
+        questions_list = extract_questions_list(raw_questions)
     except Exception as e:
         conn.close()
         raise e
+
+    fallback_questions = [
+        "Parlami brevemente di te e del tuo percorso.",
+        "Perché ti interessa questa posizione?",
+        "Quali competenze pensi di poter portare in questo ruolo?",
+        "Raccontami un progetto o un’esperienza rilevante per questa posizione.",
+        "Qual è stata una difficoltà che hai affrontato e come l’hai gestita?",
+        "Come ti organizzi quando hai una scadenza importante?",
+        "Descrivi una situazione in cui hai lavorato in team.",
+        "Qual è un tuo punto di forza e come lo useresti in questo ruolo?",
+        "Qual è un aspetto su cui vuoi migliorare professionalmente?",
+        "Hai qualche domanda sull’azienda o sul ruolo?"
+    ]
+
+    while len(questions_list) < 10:
+        questions_list.append(fallback_questions[len(questions_list)])
+
+    questions_list = questions_list[:10]
+
+    sources_json = json.dumps(sources, ensure_ascii=False)
 
     cursor.execute("""
     INSERT INTO interview_sessions (
         user_id,
         interview_type,
-        difficulty
+        difficulty,
+        company,
+        question_mode
     )
-    VALUES (?, ?, ?)
+    VALUES (?, ?, ?, ?, ?)
     """, (
         user_id,
         data.interview_type,
-        data.difficulty
+        data.difficulty,
+        company,
+        question_mode
     ))
 
     session_id = cursor.lastrowid
 
-    cursor.execute("""
-    INSERT INTO questions (
-        session_id,
-        question_text,
-        category,
-        difficulty
-    )
-    VALUES (?, ?, ?, ?)
-    """, (
-        session_id,
-        question_text,
-        data.interview_type,
-        data.difficulty
-    ))
+    saved_questions = []
 
-    question_id = cursor.lastrowid
+    for question_text in questions_list:
+        cursor.execute("""
+        INSERT INTO questions (
+            session_id,
+            question_text,
+            category,
+            difficulty,
+            company,
+            question_mode,
+            sources_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            session_id,
+            question_text,
+            data.interview_type,
+            data.difficulty,
+            company,
+            question_mode,
+            sources_json
+        ))
+
+        question_id = cursor.lastrowid
+
+        save_sources_for_question(cursor, question_id, sources)
+
+        saved_questions.append({
+            "question_id": question_id,
+            "question": question_text
+        })
 
     conn.commit()
     conn.close()
 
+    print("10 domande salvate e restituite al frontend.")
+
     return {
         "session_id": session_id,
-        "question_id": question_id,
-        "question": question_text
+        "questions": saved_questions,
+        "question_id": saved_questions[0]["question_id"],
+        "question": saved_questions[0]["question"],
+        "company": company,
+        "question_mode": question_mode
     }
 
 
@@ -412,6 +867,8 @@ Regole:
 
 @app.post("/evaluate-answer")
 def evaluate_answer(data: EvaluateAnswerRequest):
+    print("Endpoint /evaluate-answer chiamato.")
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -420,6 +877,9 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         q.id,
         q.question_text,
         q.session_id,
+        q.company,
+        q.question_mode,
+        q.sources_json,
         s.user_id,
         s.interview_type,
         s.difficulty,
@@ -445,6 +905,9 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         question_id,
         question_text,
         session_id,
+        company,
+        question_mode,
+        sources_json,
         user_id,
         interview_type,
         difficulty,
@@ -456,10 +919,26 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         interview_language
     ) = row
 
+    has_speech_metrics = data.speech_metrics is not None
+
+    speech_info = ""
+
+    if has_speech_metrics:
+        speech_info = f"""
+Metriche vocali rilevate dal frontend:
+- Durata risposta: {data.speech_metrics.duration_seconds} secondi
+- Numero parole: {data.speech_metrics.words_count}
+- Parole al minuto: {data.speech_metrics.words_per_minute}
+- Numero parole riempitive: {data.speech_metrics.filler_words_count}
+- Parole riempitive rilevate: {data.speech_metrics.filler_words}
+
+Valuta anche il modo di parlare considerando ritmo, sintesi, sicurezza percepita e presenza di parole riempitive.
+"""
+
     prompt = f"""
 Sei un coach esperto di colloqui di lavoro.
 
-Devi valutare la risposta di un candidato a una domanda di colloquio.
+Devi valutare la risposta di un candidato.
 
 Profilo candidato:
 - Nome: {name}
@@ -468,12 +947,9 @@ Profilo candidato:
 - Settore: {sector}
 - Livello esperienza: {experience_level}
 - Lingua colloquio: {interview_language}
-
-Tipo di colloquio:
-{interview_type}
-
-Difficoltà:
-{difficulty}
+- Azienda target: {company}
+- Tipo colloquio: {interview_type}
+- Difficoltà: {difficulty}
 
 Domanda del colloquio:
 {question_text}
@@ -481,22 +957,15 @@ Domanda del colloquio:
 Risposta del candidato:
 {data.answer}
 
+{speech_info}
+
 Valuta la risposta secondo questi criteri:
-
-1. Chiarezza:
-La risposta è comprensibile, ordinata e facile da seguire?
-
-2. Completezza:
-La risposta risponde davvero alla domanda oppure rimane troppo generica?
-
-3. Pertinenza:
-La risposta è coerente con il ruolo target e con il settore scelto?
-
-4. Professionalità:
-Il tono è adatto a un colloquio di lavoro?
-
-5. Sintesi:
-La risposta è della lunghezza giusta oppure è troppo breve/troppo lunga?
+1. Chiarezza
+2. Completezza
+3. Pertinenza rispetto al ruolo e all'azienda
+4. Professionalità
+5. Sintesi
+6. Modo di parlare, se sono presenti metriche vocali
 
 Restituisci SOLO un JSON valido, senza testo prima e senza testo dopo.
 
@@ -508,25 +977,27 @@ La struttura deve essere ESATTAMENTE questa:
   "relevance_score": 0,
   "professionalism_score": 0,
   "synthesis_score": 0,
+  "speaking_score": 0,
   "total_score": 0,
   "feedback": "feedback dettagliato ma comprensibile",
-  "improved_answer": "risposta migliorata adatta a un colloquio"
+  "improved_answer": "risposta migliorata adatta a un colloquio",
+  "speaking_feedback": "feedback sul modo di parlare"
 }}
 
-Regole obbligatorie:
-- I punteggi devono essere numeri interi da 0 a 100.
-- Il total_score deve essere la media ragionata dei cinque criteri.
-- Il feedback deve spiegare cosa funziona e cosa migliorare.
-- La risposta migliorata deve mantenere un tono naturale.
-- Non devi inventare esperienze non presenti nella risposta, ma puoi valorizzare meglio ciò che il candidato ha scritto.
-- Se la risposta è troppo generica, spiega cosa andrebbe aggiunto.
+Regole:
+- Tutti i punteggi devono essere numeri interi compresi tra 0 e 100.
+- Non usare mai punteggi maggiori di 100.
+- Non usare mai punteggi negativi.
+- total_score deve essere compreso tra 0 e 100.
+- Se non ci sono metriche vocali, speaking_score deve essere 0 e speaking_feedback deve dire che la risposta è stata valutata solo sul testo.
+- Non inventare esperienze non presenti nella risposta.
+- La risposta migliorata deve essere naturale e credibile.
 - Restituisci solo JSON valido.
 """
 
     try:
-        raw_output = call_ai(prompt, temperature=0.4, max_tokens=1200)
+        raw_output = call_groq(prompt, temperature=0.4, max_tokens=1300)
         result = extract_json(raw_output)
-
     except Exception as e:
         conn.close()
         raise HTTPException(
@@ -534,14 +1005,41 @@ Regole obbligatorie:
             detail=f"Errore nella valutazione della risposta: {str(e)}"
         )
 
-    clarity_score = result.get("clarity_score", 0)
-    completeness_score = result.get("completeness_score", 0)
-    relevance_score = result.get("relevance_score", 0)
-    professionalism_score = result.get("professionalism_score", 0)
-    synthesis_score = result.get("synthesis_score", 0)
-    total_score = result.get("total_score", 0)
+    clarity_score = clamp_score(result.get("clarity_score", 0))
+    completeness_score = clamp_score(result.get("completeness_score", 0))
+    relevance_score = clamp_score(result.get("relevance_score", 0))
+    professionalism_score = clamp_score(result.get("professionalism_score", 0))
+    synthesis_score = clamp_score(result.get("synthesis_score", 0))
+
+    if has_speech_metrics:
+        speaking_score = clamp_score(result.get("speaking_score", 0))
+    else:
+        speaking_score = 0
+
+    total_score = compute_total_score(
+        clarity_score,
+        completeness_score,
+        relevance_score,
+        professionalism_score,
+        synthesis_score,
+        speaking_score
+    )
+
     feedback = result.get("feedback", "")
     improved_answer = result.get("improved_answer", "")
+
+    if has_speech_metrics:
+        speaking_feedback = result.get("speaking_feedback", "")
+    else:
+        speaking_feedback = "La risposta è stata valutata solo sul contenuto testuale perché non sono presenti metriche vocali."
+
+    speech_metrics_json = None
+
+    if data.speech_metrics:
+        try:
+            speech_metrics_json = data.speech_metrics.model_dump_json()
+        except Exception:
+            speech_metrics_json = data.speech_metrics.json()
 
     cursor.execute("""
     INSERT INTO answers (
@@ -552,11 +1050,14 @@ Regole obbligatorie:
         relevance_score,
         professionalism_score,
         synthesis_score,
+        speaking_score,
         total_score,
         feedback,
-        improved_answer
+        improved_answer,
+        speaking_feedback,
+        speech_metrics_json
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         question_id,
         data.answer,
@@ -565,9 +1066,12 @@ Regole obbligatorie:
         relevance_score,
         professionalism_score,
         synthesis_score,
+        speaking_score,
         total_score,
         feedback,
-        improved_answer
+        improved_answer,
+        speaking_feedback,
+        speech_metrics_json
     ))
 
     cursor.execute("""
@@ -582,15 +1086,19 @@ Regole obbligatorie:
     conn.commit()
     conn.close()
 
+    print("Valutazione salvata e restituita al frontend.")
+
     return {
         "clarity_score": clarity_score,
         "completeness_score": completeness_score,
         "relevance_score": relevance_score,
         "professionalism_score": professionalism_score,
         "synthesis_score": synthesis_score,
+        "speaking_score": speaking_score,
         "total_score": total_score,
         "feedback": feedback,
-        "improved_answer": improved_answer
+        "improved_answer": improved_answer,
+        "speaking_feedback": speaking_feedback
     }
 
 
@@ -608,6 +1116,8 @@ def get_history(user_id: int):
         s.id,
         s.interview_type,
         s.difficulty,
+        s.company,
+        s.question_mode,
         s.total_score,
         s.created_at,
         q.question_text,
@@ -617,8 +1127,10 @@ def get_history(user_id: int):
         a.relevance_score,
         a.professionalism_score,
         a.synthesis_score,
+        a.speaking_score,
         a.feedback,
-        a.improved_answer
+        a.improved_answer,
+        a.speaking_feedback
     FROM interview_sessions s
     JOIN questions q ON q.session_id = s.id
     LEFT JOIN answers a ON a.question_id = q.id
@@ -636,17 +1148,21 @@ def get_history(user_id: int):
             "session_id": row[0],
             "interview_type": row[1],
             "difficulty": row[2],
-            "total_score": row[3],
-            "created_at": row[4],
-            "question": row[5],
-            "user_answer": row[6],
-            "clarity_score": row[7],
-            "completeness_score": row[8],
-            "relevance_score": row[9],
-            "professionalism_score": row[10],
-            "synthesis_score": row[11],
-            "feedback": row[12],
-            "improved_answer": row[13]
+            "company": row[3],
+            "question_mode": row[4],
+            "total_score": row[5],
+            "created_at": row[6],
+            "question": row[7],
+            "user_answer": row[8],
+            "clarity_score": row[9],
+            "completeness_score": row[10],
+            "relevance_score": row[11],
+            "professionalism_score": row[12],
+            "synthesis_score": row[13],
+            "speaking_score": row[14],
+            "feedback": row[15],
+            "improved_answer": row[16],
+            "speaking_feedback": row[17]
         })
 
     return history
@@ -669,7 +1185,8 @@ def get_progress(user_id: int):
         AVG(a.completeness_score),
         AVG(a.relevance_score),
         AVG(a.professionalism_score),
-        AVG(a.synthesis_score)
+        AVG(a.synthesis_score),
+        AVG(a.speaking_score)
     FROM answers a
     JOIN questions q ON a.question_id = q.id
     JOIN interview_sessions s ON q.session_id = s.id
@@ -692,5 +1209,48 @@ def get_progress(user_id: int):
         "average_completeness_score": round(row[3], 2) if row[3] is not None else 0,
         "average_relevance_score": round(row[4], 2) if row[4] is not None else 0,
         "average_professionalism_score": round(row[5], 2) if row[5] is not None else 0,
-        "average_synthesis_score": round(row[6], 2) if row[6] is not None else 0
+        "average_synthesis_score": round(row[6], 2) if row[6] is not None else 0,
+        "average_speaking_score": round(row[7], 2) if row[7] is not None else 0
+    }
+
+
+# =========================
+# ENDPOINT FONTI DOMANDA
+# =========================
+
+@app.get("/question-sources/{question_id}")
+def get_question_sources(question_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT 
+        ws.id,
+        ws.title,
+        ws.url,
+        ws.content,
+        ws.created_at
+    FROM web_sources ws
+    JOIN question_web_sources qws ON ws.id = qws.source_id
+    WHERE qws.question_id = ?
+    ORDER BY ws.created_at DESC
+    """, (question_id,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    sources = []
+
+    for row in rows:
+        sources.append({
+            "source_id": row[0],
+            "title": row[1],
+            "url": row[2],
+            "content": row[3],
+            "created_at": row[4]
+        })
+
+    return {
+        "question_id": question_id,
+        "sources": sources
     }

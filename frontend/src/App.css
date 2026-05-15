@@ -16,6 +16,8 @@
   --error-bg: #fdeaea;
   --error-text: #9f1d1d;
   --warning-bg: #fff7db;
+  --danger: #b42318;
+  --danger-dark: #912018;
 }
 
 body {
@@ -34,7 +36,7 @@ textarea {
 
 .page {
   width: 100%;
-  max-width: 1050px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 32px 20px 60px;
 }
@@ -116,6 +118,11 @@ textarea {
   font-size: 26px;
 }
 
+.sub-title {
+  margin-top: 26px;
+  color: var(--primary);
+}
+
 .section-description {
   color: var(--muted);
   line-height: 1.5;
@@ -126,6 +133,7 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
+  margin-bottom: 18px;
 }
 
 .form-grid .full {
@@ -172,7 +180,8 @@ textarea {
 }
 
 .primary-button,
-.secondary-button {
+.secondary-button,
+.danger-button {
   border: none;
   padding: 13px 18px;
   border-radius: 13px;
@@ -199,8 +208,18 @@ textarea {
   background: #d9e4ef;
 }
 
+.danger-button {
+  background: var(--danger);
+  color: white;
+}
+
+.danger-button:hover {
+  background: var(--danger-dark);
+}
+
 .primary-button:disabled,
-.secondary-button:disabled {
+.secondary-button:disabled,
+.danger-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
@@ -266,8 +285,19 @@ textarea {
   font-size: 14px;
 }
 
+.progress-question {
+  display: inline-block;
+  background: var(--primary-light);
+  color: var(--primary);
+  padding: 9px 14px;
+  border-radius: 999px;
+  font-weight: 700;
+  margin: 10px 0 16px;
+}
+
 .tag-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin: 14px 0 18px;
 }
@@ -291,6 +321,85 @@ textarea {
   font-size: 19px;
   line-height: 1.5;
   font-weight: 600;
+}
+
+.info-box {
+  background: #f8fbff;
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--primary);
+  color: var(--muted);
+  padding: 16px;
+  border-radius: 14px;
+  margin-bottom: 22px;
+  line-height: 1.5;
+}
+
+.mode-switch {
+  display: flex;
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.mode {
+  border: 1px solid var(--border);
+  background: #f7f9fc;
+  color: var(--primary);
+  padding: 12px 16px;
+  border-radius: 14px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.mode.active {
+  background: var(--primary);
+  color: white;
+  border-color: var(--primary);
+}
+
+.voice-panel {
+  background: #f7f9fc;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 18px;
+  margin-bottom: 20px;
+}
+
+.voice-panel h3 {
+  color: var(--primary);
+  margin-top: 0;
+}
+
+.voice-panel p {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.speech-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.speech-metrics div {
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  text-align: center;
+}
+
+.speech-metrics strong {
+  display: block;
+  font-size: 24px;
+  color: var(--primary);
+}
+
+.speech-metrics p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
 }
 
 .score-main {
@@ -318,7 +427,7 @@ textarea {
 
 .scores-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 24px;
 }
@@ -460,6 +569,16 @@ textarea {
   font-weight: 700;
 }
 
+@media (max-width: 900px) {
+  .scores-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .speech-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 800px) {
   .header {
     align-items: flex-start;
@@ -469,10 +588,6 @@ textarea {
   .choice-grid,
   .progress-summary {
     grid-template-columns: 1fr;
-  }
-
-  .scores-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .card {
@@ -499,16 +614,20 @@ textarea {
     flex-direction: column;
   }
 
-  .scores-grid {
+  .scores-grid,
+  .speech-metrics {
     grid-template-columns: 1fr;
   }
 
-  .actions {
+  .actions,
+  .mode-switch {
     flex-direction: column;
   }
 
   .primary-button,
-  .secondary-button {
+  .secondary-button,
+  .danger-button,
+  .mode {
     width: 100%;
   }
 }
