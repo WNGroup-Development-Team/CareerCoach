@@ -76,7 +76,7 @@ function App() {
   const [difficulty, setDifficulty] = useState("intermedio");
 
   const [company, setCompany] = useState("Generica");
-  const [questionMode, setQuestionMode] = useState("web");
+  const [questionMode] = useState("web");
 
   const [questions, setQuestions] = useState([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -179,8 +179,6 @@ function App() {
     setAllFeedbacks([]);
 
     try {
-      console.log("Invio richiesta a /generate-question");
-
       const response = await fetchWithTimeout(
         `${API_URL}/generate-question`,
         {
@@ -198,8 +196,6 @@ function App() {
         },
         45000
       );
-
-      console.log("Risposta ricevuta dal backend:", response.status);
 
       let data = null;
 
@@ -228,6 +224,8 @@ function App() {
         }
       ];
 
+      console.log("Domande ricevute:", receivedQuestions);
+
       if (!receivedQuestions.length || !receivedQuestions[0].question) {
         setError("Il backend non ha restituito domande valide.");
         return;
@@ -248,7 +246,7 @@ function App() {
 
       if (err.name === "AbortError") {
         setError(
-          "La generazione delle domande sta impiegando troppo tempo. Prova con 'Solo AI senza ricerca web' oppure riprova tra poco."
+          "La generazione delle domande sta impiegando troppo tempo. Riprova tra poco."
         );
       } else {
         setError(
@@ -256,7 +254,6 @@ function App() {
         );
       }
     } finally {
-      console.log("Fine caricamento generateQuestion");
       setLoading(false);
     }
   };
@@ -447,27 +444,27 @@ function App() {
     }
   };
 
-const goToNextQuestion = () => {
-  resetError();
+  const goToNextQuestion = () => {
+    resetError();
 
-  const nextIndex = currentQuestionIndex + 1;
+    const nextIndex = currentQuestionIndex + 1;
 
-  if (nextIndex >= questions.length) {
-    loadHistory();
-    return;
-  }
+    if (nextIndex >= questions.length) {
+      loadHistory();
+      return;
+    }
 
-  const nextQuestion = questions[nextIndex];
+    const nextQuestion = questions[nextIndex];
 
-  setCurrentQuestionIndex(nextIndex);
-  setQuestionId(nextQuestion.question_id);
-  setQuestion(nextQuestion.question);
-  setAnswer("");
-  setFeedback(null);
-  setSpeechMetrics(null);
-  setAnswerMode("text");
-  setStep("question");
-};
+    setCurrentQuestionIndex(nextIndex);
+    setQuestionId(nextQuestion.question_id);
+    setQuestion(nextQuestion.question);
+    setAnswer("");
+    setFeedback(null);
+    setSpeechMetrics(null);
+    setAnswerMode("text");
+    setStep("question");
+  };
 
   const startNewTraining = () => {
     resetError();
@@ -514,8 +511,7 @@ const goToNextQuestion = () => {
           <h2>Personalizza la tua esperienza</h2>
           <p className="section-description">
             Inserisci il tuo profilo candidato. Queste informazioni verranno usate
-            per cercare domande online, adattarle al tuo ruolo e simulare un colloquio
-            più realistico.
+            per generare domande realistiche, adattarle al tuo ruolo e simulare un colloquio completo.
           </p>
 
           <div className="form-grid">
@@ -598,8 +594,8 @@ const goToNextQuestion = () => {
         <section className="card">
           <h2>Palestra dei colloqui</h2>
           <p className="section-description">
-            Scegli azienda, tipo di colloquio e origine delle domande.
-            Verranno generate 10 domande per simulare un colloquio completo.
+            Scegli azienda, tipologia di colloquio e livello di difficoltà.
+            L’app genererà 10 domande realistiche e personalizzate per simulare un colloquio completo.
           </p>
 
           <div className="form-grid">
@@ -611,56 +607,45 @@ const goToNextQuestion = () => {
                 placeholder="Es. Amazon, Google, Deloitte, Reply, TIM..."
               />
             </div>
-
-            <div>
-              <label>Origine domande</label>
-              <select
-                value={questionMode}
-                onChange={(e) => setQuestionMode(e.target.value)}
-              >
-                <option value="web">Cerca online domande reali/simili</option>
-                <option value="mixed">Web + personalizzazione AI</option>
-                <option value="ai">Solo AI senza ricerca web</option>
-              </select>
-            </div>
           </div>
 
           <h3 className="sub-title">Tipo di allenamento</h3>
 
           <div className="choice-grid three-columns">
-  <button
-    className={interviewType === "conoscitive_motivazionali" ? "choice active" : "choice"}
-    onClick={() => setInterviewType("conoscitive_motivazionali")}
-  >
-    <h3>Conoscitive e motivazionali</h3>
-    <p>
-      Domande su chi sei, cosa ti aspetti, obiettivi, motivazioni,
-      lavoro di gruppo, azienda e percorso personale.
-    </p>
-  </button>
+            <button
+              className={interviewType === "conoscitive_motivazionali" ? "choice active" : "choice"}
+              onClick={() => setInterviewType("conoscitive_motivazionali")}
+            >
+              <h3>Conoscitive e motivazionali</h3>
+              <p>
+                Domande su chi sei, obiettivi, aspettative, motivazione,
+                azienda, percorso personale e lavoro di gruppo.
+              </p>
+            </button>
 
-  <button
-    className={interviewType === "tecniche" ? "choice active" : "choice"}
-    onClick={() => setInterviewType("tecniche")}
-  >
-    <h3>Tecniche</h3>
-    <p>
-      Domande specifiche sul ruolo scelto, sulle competenze richieste,
-      sugli strumenti e sulle capacità operative.
-    </p>
-  </button>
+            <button
+              className={interviewType === "tecniche" ? "choice active" : "choice"}
+              onClick={() => setInterviewType("tecniche")}
+            >
+              <h3>Tecniche</h3>
+              <p>
+                Domande specifiche sul ruolo scelto, sulle competenze richieste,
+                sugli strumenti e sulle capacità operative.
+              </p>
+            </button>
 
-  <button
-    className={interviewType === "logica" ? "choice active" : "choice"}
-    onClick={() => setInterviewType("logica")}
-  >
-    <h3>Logica e ragionamento</h3>
-    <p>
-      Domande a trabocchetto, indovinelli, casi di ragionamento,
-      problem solving e pensiero critico.
-    </p>
-  </button>
-</div>
+            <button
+              className={interviewType === "logica" ? "choice active" : "choice"}
+              onClick={() => setInterviewType("logica")}
+            >
+              <h3>Logica e ragionamento</h3>
+              <p>
+                Domande a trabocchetto, serie numeriche o alfabetiche,
+                stime, problem solving e ragionamento.
+              </p>
+            </button>
+          </div>
+
           <label>Difficoltà</label>
           <select
             value={difficulty}
@@ -695,17 +680,14 @@ const goToNextQuestion = () => {
             <span>{company}</span>
             <span>{interviewType}</span>
             <span>{difficulty}</span>
-            <span>{questionMode}</span>
           </div>
 
           <div className="question-box">{question}</div>
 
-          {questionMode !== "ai" && (
-            <div className="info-box">
-              La domanda è stata generata usando una ricerca web e personalizzata sul tuo profilo.
-              Le fonti sono state salvate nel database dell’app.
-            </div>
-          )}
+          <div className="info-box">
+            La domanda è stata generata in base al tuo profilo, al ruolo scelto, all’azienda e al livello di difficoltà.
+            Le eventuali fonti usate sono salvate nel database dell’app.
+          </div>
 
           <div className="mode-switch">
             <button
@@ -728,7 +710,7 @@ const goToNextQuestion = () => {
               <h3>Allenamento vocale</h3>
               <p>
                 Parla come se fossi davanti a un recruiter. L’app trascrive la tua
-                risposta e calcola alcune metriche gratuite sul modo di parlare.
+                risposta e analizza il modo di parlare, senza mostrare numeri tecnici a schermo.
               </p>
 
               {!isListening ? (
@@ -739,30 +721,6 @@ const goToNextQuestion = () => {
                 <button className="danger-button" onClick={stopVoiceAnswer}>
                   Ferma registrazione
                 </button>
-              )}
-
-              {speechMetrics && (
-                <div className="speech-metrics">
-                  <div>
-                    <strong>{speechMetrics.duration_seconds}s</strong>
-                    <p>Durata</p>
-                  </div>
-
-                  <div>
-                    <strong>{speechMetrics.words_count}</strong>
-                    <p>Parole</p>
-                  </div>
-
-                  <div>
-                    <strong>{speechMetrics.words_per_minute}</strong>
-                    <p>Parole/min</p>
-                  </div>
-
-                  <div>
-                    <strong>{speechMetrics.filler_words_count}</strong>
-                    <p>Riempitivi</p>
-                  </div>
-                </div>
               )}
             </div>
           )}
@@ -845,9 +803,16 @@ const goToNextQuestion = () => {
           )}
 
           <div className="improved-answer">
-            <h3>Risposta migliorata</h3>
+            <h3>Risposta modello / migliorata</h3>
             <p>{feedback.improved_answer}</p>
           </div>
+
+          {feedback.solution_explanation && (
+            <div className="solution-block">
+              <h3>Soluzione / ragionamento corretto</h3>
+              <p>{feedback.solution_explanation}</p>
+            </div>
+          )}
 
           <div className="actions">
             {currentQuestionIndex < questions.length - 1 ? (
@@ -889,10 +854,6 @@ const goToNextQuestion = () => {
               </p>
 
               <p>
-                <strong>Origine domanda:</strong> {item.question_mode}
-              </p>
-
-              <p>
                 <strong>Punteggio:</strong>{" "}
                 {item.total_score !== null ? `${item.total_score}/100` : "Non valutato"}
               </p>
@@ -921,8 +882,15 @@ const goToNextQuestion = () => {
 
               {item.improved_answer && (
                 <div className="mini-improved">
-                  <strong>Risposta migliorata:</strong>
+                  <strong>Risposta modello / migliorata:</strong>
                   <p>{item.improved_answer}</p>
+                </div>
+              )}
+
+              {item.solution_explanation && (
+                <div className="mini-solution">
+                  <strong>Soluzione:</strong>
+                  <p>{item.solution_explanation}</p>
                 </div>
               )}
             </div>

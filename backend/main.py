@@ -131,6 +131,7 @@ def init_db():
         feedback TEXT,
         improved_answer TEXT,
         speaking_feedback TEXT,
+        solution_explanation TEXT,
         speech_metrics_json TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(question_id) REFERENCES questions(id)
@@ -167,6 +168,7 @@ def init_db():
 
     add_column_if_not_exists(cursor, "answers", "speaking_score", "INTEGER")
     add_column_if_not_exists(cursor, "answers", "speaking_feedback", "TEXT")
+    add_column_if_not_exists(cursor, "answers", "solution_explanation", "TEXT")
     add_column_if_not_exists(cursor, "answers", "speech_metrics_json", "TEXT")
 
     conn.commit()
@@ -278,6 +280,7 @@ def extract_json(text: str):
 
         raise ValueError(f"JSON non valido restituito dal modello: {text}")
 
+
 def extract_questions_list(text: str) -> List[str]:
     """
     Estrae una lista pulita di domande dal testo restituito dal modello.
@@ -297,7 +300,6 @@ def extract_questions_list(text: str) -> List[str]:
 
     questions = []
 
-    # Caso 1: JSON valido
     try:
         data = json.loads(text)
 
@@ -309,7 +311,6 @@ def extract_questions_list(text: str) -> List[str]:
     except Exception:
         questions = []
 
-    # Caso 2: il modello non restituisce JSON ma testo numerato
     if not questions:
         lines = text.split("\n")
 
@@ -319,18 +320,15 @@ def extract_questions_list(text: str) -> List[str]:
             if not line:
                 continue
 
-            # Rimuove numerazione tipo "1.", "1)", "- "
             cleaned = line.lstrip("-• ")
             cleaned = cleaned.strip()
 
-            # Se inizia con numero, tolgo numero e separatori
             parts = cleaned.split(maxsplit=1)
             if parts:
                 first = parts[0].replace(".", "").replace(")", "")
                 if first.isdigit() and len(parts) > 1:
                     cleaned = parts[1].strip()
 
-            # Scarta frasi introduttive
             lower = cleaned.lower()
 
             intro_phrases = [
@@ -346,7 +344,6 @@ def extract_questions_list(text: str) -> List[str]:
             if any(phrase in lower for phrase in intro_phrases):
                 continue
 
-            # Tiene solo righe che sembrano domande vere
             if "?" in cleaned and len(cleaned) > 15:
                 questions.append(cleaned)
 
@@ -357,8 +354,6 @@ def extract_questions_list(text: str) -> List[str]:
             continue
 
         q = question.strip()
-
-        # Scarta eventuali frasi introduttive anche se finite nella lista
         lower_q = q.lower()
 
         if any(phrase in lower_q for phrase in [
@@ -371,11 +366,11 @@ def extract_questions_list(text: str) -> List[str]:
         ]):
             continue
 
-        # Tiene solo domande reali
         if len(q) > 15 and "?" in q:
             clean_questions.append(q)
 
     return clean_questions[:10]
+
 
 def clamp_score(value):
     try:
@@ -408,6 +403,230 @@ def compute_total_score(
     return round(sum(scores) / len(scores))
 
 
+
+
+def build_speaking_feedback_from_metrics(metrics: SpeechMetrics) -> str:
+    """
+    Costruisce un feedback testuale sul parlato usando le metriche ricevute dal frontend.
+    Non serve mostrarle a schermo: servono solo per produrre una valutazione più utile.
+    """
+
+    duration = metrics.duration_seconds or 0
+    words = metrics.words_count or 0
+    wpm = metrics.words_per_minute or 0
+    fillers = metrics.filler_words_count or 0
+
+    if words <= 0:
+        return (
+            "Il modo di parlare non è valutabile perché la risposta non contiene parole trascritte "
+            "in modo sufficiente."
+        )
+
+    if wpm < 80:
+        ritmo = (
+            "Il ritmo risulta piuttosto lento: in un colloquio può trasmettere esitazione "
+            "o poca sicurezza, quindi conviene allenarsi a parlare in modo leggermente più fluido."
+        )
+    elif wpm <= 160:
+        ritmo = (
+            "Il ritmo è complessivamente adeguato per un colloquio: permette a chi ascolta "
+            "di seguire il discorso senza difficoltà."
+        )
+    else:
+        ritmo = (
+            "Il ritmo è abbastanza veloce: conviene rallentare leggermente per risultare più chiara, "
+            "ordinata e sicura."
+        )
+
+    if fillers == 0:
+        riempitivi = (
+            "Non emergono parole riempitive rilevanti, quindi il discorso appare abbastanza pulito."
+        )
+    elif fillers <= 2:
+        riempitivi = (
+            "Sono presenti poche parole riempitive: non compromettono la risposta, ma si può ancora "
+            "migliorare la fluidità."
+        )
+    else:
+        riempitivi = (
+            "Sono presenti diverse parole riempitive: questo può rendere il discorso meno sicuro "
+            "e meno professionale."
+        )
+
+    if duration < 10 or words < 15:
+        struttura = (
+            "La risposta è breve: per un colloquio sarebbe utile sviluppare meglio il discorso "
+            "con un esempio concreto o una motivazione più chiara."
+        )
+    else:
+        struttura = (
+            "La risposta ha una durata sufficiente per essere valutata anche dal punto di vista espositivo."
+        )
+
+    return f"{ritmo} {riempitivi} {struttura}"
+
+
+def is_zero_answer(answer: str, question: str = "") -> bool:
+    """
+    Riconosce risposte che devono prendere 0:
+    - lettere casuali;
+    - risposta vuota;
+    - 'boh', 'non lo so', 'chi lo sa';
+    - risposta troppo corta;
+    - risposta evidentemente non pertinente.
+    """
+
+    if not answer:
+        return True
+
+    text = answer.strip().lower()
+
+    if len(text) < 3:
+        return True
+
+    zero_phrases = [
+        "boh",
+        "non lo so",
+        "non so",
+        "chi lo sa",
+        "bo",
+        "mah",
+        "non ne ho idea",
+        "nessuna idea",
+        "non saprei",
+        "non mi viene",
+        "non mi viene in mente",
+        "non voglio rispondere",
+        "skip",
+        "passo",
+        "idk",
+        "i don't know",
+        "dont know",
+        "no idea"
+    ]
+
+    if text in zero_phrases:
+        return True
+
+    for phrase in zero_phrases:
+        if phrase in text and len(text.split()) <= 6:
+            return True
+
+    words = text.split()
+
+    if len(words) < 3:
+        return True
+
+    vowels = "aeiouàèéìòù"
+    weird_words = 0
+
+    for word in words:
+        clean_word = "".join(ch for ch in word if ch.isalpha())
+
+        if not clean_word:
+            weird_words += 1
+            continue
+
+        if len(clean_word) >= 5 and not any(v in clean_word for v in vowels):
+            weird_words += 1
+
+        consecutive_consonants = 0
+        max_consecutive_consonants = 0
+
+        for ch in clean_word:
+            if ch.isalpha() and ch not in vowels:
+                consecutive_consonants += 1
+                max_consecutive_consonants = max(max_consecutive_consonants, consecutive_consonants)
+            else:
+                consecutive_consonants = 0
+
+        if max_consecutive_consonants >= 5:
+            weird_words += 1
+
+    weird_ratio = weird_words / len(words)
+
+    if weird_ratio >= 0.5:
+        return True
+
+    letters = sum(1 for ch in text if ch.isalpha())
+    total = len(text)
+
+    if total > 0 and letters / total < 0.45:
+        return True
+
+    irrelevant_short_answers = [
+        "ciao",
+        "ok",
+        "va bene",
+        "bene",
+        "male",
+        "si",
+        "sì",
+        "no",
+        "forse",
+        "niente",
+        "nulla",
+        "tutto bene",
+        "mi piace",
+        "non mi piace"
+    ]
+
+    if text in irrelevant_short_answers:
+        return True
+
+    return False
+
+
+def build_zero_feedback(
+    reason: str = "Risposta non valutabile",
+    question: str = "",
+    interview_type: str = ""
+):
+    """
+    Feedback standard per risposte indecifrabili, non pertinenti o prive di contenuto.
+    """
+
+    if interview_type == "logica":
+        improved_answer = (
+            "La risposta non è valutabile. Per una domanda di logica, una risposta corretta dovrebbe "
+            "spiegare il ragionamento passo dopo passo, chiarendo le ipotesi fatte, i passaggi intermedi "
+            "e la conclusione. Non basta dare un numero o dire 'non lo so'."
+        )
+        solution_explanation = (
+            f"Per risolvere questa domanda bisogna partire dal testo: '{question}'. "
+            "Individua prima cosa viene chiesto, poi elenca le ipotesi, costruisci un ragionamento "
+            "progressivo e arriva a una conclusione motivata. Nelle domande di stima non conta il numero "
+            "esatto, ma la qualità del ragionamento."
+        )
+    else:
+        improved_answer = (
+            f"Una risposta efficace alla domanda '{question}' dovrebbe essere chiara, pertinente e strutturata. "
+            "Puoi iniziare rispondendo direttamente alla domanda, poi aggiungere un esempio concreto o una "
+            "motivazione collegata al ruolo e concludere spiegando cosa potresti portare all'azienda."
+        )
+        solution_explanation = ""
+
+    return {
+        "clarity_score": 0,
+        "completeness_score": 0,
+        "relevance_score": 0,
+        "professionalism_score": 0,
+        "synthesis_score": 0,
+        "speaking_score": 0,
+        "total_score": 0,
+        "feedback": (
+            f"{reason}. La risposta non può essere considerata valida in un colloquio, "
+            "perché non fornisce contenuto utile, non risponde alla domanda oppure risulta "
+            "troppo vaga/indecifrabile."
+        ),
+        "improved_answer": improved_answer,
+        "speaking_feedback": (
+            "Il modo di parlare non è valutabile perché il contenuto della risposta non è valido."
+        ),
+        "solution_explanation": solution_explanation
+    }
+
+
 def build_search_query(company: str, role: str, interview_type: str, language: str) -> str:
     company = company.strip()
     role = role.strip()
@@ -434,7 +653,6 @@ def build_search_query(company: str, role: str, interview_type: str, language: s
 
         return f"{company} {role} interview questions"
 
-    # Italiano
     if interview_type == "conoscitive_motivazionali":
         return (
             f"{company} domande colloquio motivazionale conoscitivo "
@@ -451,10 +669,11 @@ def build_search_query(company: str, role: str, interview_type: str, language: s
     if interview_type == "logica":
         return (
             f"{company} domande colloquio logica ragionamento indovinelli "
-            f"brain teaser problem solving trabocchetto"
+            f"brain teaser problem solving trabocchetto stima"
         )
 
     return f"{company} {role} domande colloquio"
+
 
 def search_web_interview_questions(
     company: str,
@@ -517,6 +736,8 @@ Estratto: {source.get("content", "")}
 """
 
     return text
+
+
 def get_question_type_instructions(interview_type: str, role: str, company: str) -> str:
     """
     Restituisce istruzioni specifiche per generare domande diverse
@@ -617,6 +838,51 @@ Regole specifiche:
     return """
 Genera domande di colloquio realistiche, coerenti con il profilo del candidato.
 """
+
+
+def get_difficulty_instructions(difficulty: str) -> str:
+    """
+    Restituisce istruzioni specifiche in base al livello scelto.
+    """
+
+    if difficulty == "base":
+        return """
+LIVELLO: BASE
+
+Le domande devono essere realistiche ma semplici.
+Devono essere adatte a un candidato junior o a una persona alle prime esperienze.
+Evita domande troppo tecniche, troppo lunghe o troppo astratte.
+Le domande devono permettere al candidato di rispondere anche con esperienze universitarie, personali o di progetto.
+Per la logica, usa problemi semplici, guidati e spiegabili.
+"""
+
+    if difficulty == "intermedio":
+        return """
+LIVELLO: INTERMEDIO
+
+Le domande devono essere realistiche e leggermente sfidanti.
+Devono richiedere esempi concreti, ragionamento e collegamento con il ruolo.
+Le domande possono contenere casi pratici, situazioni lavorative o problemi da analizzare.
+Per la logica, usa problemi di stima, ragionamento e piccoli trabocchetti di difficoltà media.
+"""
+
+    if difficulty == "avanzato":
+        return """
+LIVELLO: AVANZATO
+
+Le domande devono essere più specifiche, complesse e selettive.
+Devono simulare un colloquio più esigente.
+Devono richiedere ragionamento strutturato, esempi solidi, capacità critica e conoscenza del ruolo.
+Per le domande tecniche, usa casi più dettagliati e realistici.
+Per le domande di logica, usa stime complesse, vincoli multipli, serie meno immediate, business case e problemi a trabocchetto.
+"""
+
+    return """
+LIVELLO: INTERMEDIO
+
+Le domande devono essere realistiche, coerenti con il ruolo e abbastanza sfidanti.
+"""
+
 
 def save_sources_for_question(cursor, question_id: int, sources: List[Dict[str, str]]):
     for source in sources:
@@ -857,14 +1123,15 @@ def generate_question(data: GenerateQuestionRequest):
     sources_text = sources_to_prompt(sources)
 
     question_type_instructions = get_question_type_instructions(
-    interview_type=data.interview_type,
-    role=target_role,
-    company=company
-)
+        interview_type=data.interview_type,
+        role=target_role,
+        company=company
+    )
+
+    difficulty_instructions = get_difficulty_instructions(data.difficulty)
 
     if question_mode == "ai":
         prompt = f"""
-        
 Sei un recruiter esperto.
 
 Devi generare 10 domande di colloquio per questo candidato.
@@ -880,39 +1147,41 @@ Profilo candidato:
 - Tipo colloquio: {data.interview_type}
 - Difficoltà: {data.difficulty}
 
-Istruzioni specifiche sulla tipologia di domande:
+Istruzioni sulla tipologia scelta:
 {question_type_instructions}
+
+Istruzioni sul livello di difficoltà:
+{difficulty_instructions}
 
 Le 10 domande devono simulare un colloquio realistico.
 Devono essere diverse tra loro e progressive.
 Devono rispettare rigorosamente la tipologia scelta: {data.interview_type}.
-Restituisci SOLO un JSON valido.
-Non scrivere introduzioni.
-Non scrivere frasi come "Ecco le 10 domande".
-Non aggiungere spiegazioni.
-Non numerare le domande fuori dal JSON.
-
-La struttura deve essere ESATTAMENTE questa:
-{
-  "questions": [
-    "Prima domanda",
-    "Seconda domanda",
-    "Terza domanda",
-    "Quarta domanda",
-    "Quinta domanda",
-    "Sesta domanda",
-    "Settima domanda",
-    "Ottava domanda",
-    "Nona domanda",
-    "Decima domanda"
-  ]
-}
 
 Regole:
 - Non aggiungere testo prima o dopo il JSON.
+- Non scrivere frasi introduttive come "Ecco le 10 domande".
 - Scrivi esattamente 10 domande.
-- Le domande devono essere coerenti con ruolo, azienda e livello.
+- Ogni elemento della lista deve essere una domanda vera e deve finire con il punto interrogativo.
+- Le domande devono essere coerenti con ruolo, azienda, livello e difficoltà.
 - Non numerare le domande dentro il testo.
+
+Restituisci SOLO un JSON valido.
+La struttura deve essere ESATTAMENTE questa:
+
+{{
+  "questions": [
+    "Prima domanda?",
+    "Seconda domanda?",
+    "Terza domanda?",
+    "Quarta domanda?",
+    "Quinta domanda?",
+    "Sesta domanda?",
+    "Settima domanda?",
+    "Ottava domanda?",
+    "Nona domanda?",
+    "Decima domanda?"
+  ]
+}}
 """
     else:
         prompt = f"""
@@ -934,8 +1203,11 @@ Profilo candidato:
 Risultati web trovati:
 {sources_text}
 
-Istruzioni specifiche sulla tipologia di domande:
+Istruzioni sulla tipologia scelta:
 {question_type_instructions}
+
+Istruzioni sul livello di difficoltà:
+{difficulty_instructions}
 
 Le 10 domande devono simulare un colloquio realistico.
 Devono essere diverse tra loro e progressive.
@@ -946,29 +1218,35 @@ Regole:
 - Non dire "secondo la fonte".
 - Genera domande originali ma coerenti con i temi ricorrenti nei risultati.
 - Se i risultati sono poco pertinenti, usa comunque il profilo candidato e il ruolo target.
+- Non aggiungere testo prima o dopo il JSON.
+- Non scrivere frasi introduttive come "Ecco le 10 domande".
 - Scrivi esattamente 10 domande.
+- Ogni elemento della lista deve essere una domanda vera e deve finire con il punto interrogativo.
+- Le domande devono essere coerenti con ruolo, azienda, livello e difficoltà.
 - Non numerare le domande dentro il testo.
 
-Restituisci SOLO un JSON valido con questa struttura:
+Restituisci SOLO un JSON valido.
+La struttura deve essere ESATTAMENTE questa:
 
 {{
   "questions": [
-    "domanda 1",
-    "domanda 2",
-    "domanda 3",
-    "domanda 4",
-    "domanda 5",
-    "domanda 6",
-    "domanda 7",
-    "domanda 8",
-    "domanda 9",
-    "domanda 10"
+    "Prima domanda?",
+    "Seconda domanda?",
+    "Terza domanda?",
+    "Quarta domanda?",
+    "Quinta domanda?",
+    "Sesta domanda?",
+    "Settima domanda?",
+    "Ottava domanda?",
+    "Nona domanda?",
+    "Decima domanda?"
   ]
 }}
 """
 
     try:
         raw_questions = call_groq(prompt, temperature=0.3, max_tokens=1400)
+
         print("OUTPUT GREZZO GROQ DOMANDE:")
         print(raw_questions)
 
@@ -976,78 +1254,67 @@ Restituisci SOLO un JSON valido con questa struttura:
 
         print("DOMANDE ESTRATTE:")
         print(questions_list)
+
     except Exception as e:
         conn.close()
         raise e
 
-   # fallback_questions = [
-     #"Parlami brevemente di te e del tuo percorso.",
-      # "Perché ti interessa questa posizione?",
-        #"Quali competenze pensi di poter portare in questo ruolo?",
-        #"Raccontami un progetto o un’esperienza rilevante per questa posizione.",
-        #"Qual è stata una difficoltà che hai affrontato e come l’hai gestita?",
-        #"Come ti organizzi quando hai una scadenza importante?",
-        #"Descrivi una situazione in cui hai lavorato in team.",
-         #"Qual è un tuo punto di forza e come lo useresti in questo ruolo?",
-        #"Qual è un aspetto su cui vuoi migliorare professionalmente?",
-        #"Hai qualche domanda sull’azienda o sul ruolo?"
-    #]
-
     if data.interview_type == "conoscitive_motivazionali":
         fallback_questions = [
-        "Parlami di te e del tuo percorso.",
-        "Perché ti interessa questa posizione?",
-        "Cosa sai della nostra azienda?",
-        "Quali sono i tuoi obiettivi professionali?",
-        "Come ti vedi tra cinque anni?",
-        "Quali sono i tuoi punti di forza?",
-        "Qual è un aspetto su cui vorresti migliorare?",
-        "Raccontami una situazione in cui hai lavorato in gruppo.",
-        "Cosa ti aspetti da questa esperienza lavorativa?",
-        "Perché pensi di essere adatto a questo ruolo?"
-    ]
+            "Parlami di te e del tuo percorso.",
+            "Perché ti interessa questa posizione?",
+            "Cosa sai della nostra azienda?",
+            "Quali sono i tuoi obiettivi professionali?",
+            "Come ti vedi tra cinque anni?",
+            "Quali sono i tuoi punti di forza?",
+            "Qual è un aspetto su cui vorresti migliorare?",
+            "Raccontami una situazione in cui hai lavorato in gruppo.",
+            "Cosa ti aspetti da questa esperienza lavorativa?",
+            "Perché pensi di essere adatto a questo ruolo?"
+        ]
 
     elif data.interview_type == "tecniche":
         fallback_questions = [
-        f"Quali competenze tecniche ritieni fondamentali per il ruolo di {target_role}?",
-        "Raccontami un progetto tecnico che hai svolto e quali problemi hai incontrato.",
-        "Come affronteresti un problema tecnico che non sai risolvere subito?",
-        "Quali strumenti o tecnologie conosci che potrebbero essere utili per questo ruolo?",
-        "Come verificheresti la correttezza del tuo lavoro tecnico?",
-        "Descrivi un caso in cui hai dovuto analizzare dati, codice, requisiti o informazioni tecniche.",
-        "Come spiegheresti un concetto tecnico complesso a una persona non tecnica?",
-        "Qual è una competenza tecnica che vuoi migliorare?",
-        "Come ti organizzi quando devi completare un task tecnico entro una scadenza?",
-        "Quale esperienza ti ha aiutato di più a sviluppare competenze utili per questo ruolo?"
-    ]
+            f"Quali competenze tecniche ritieni fondamentali per il ruolo di {target_role}?",
+            "Raccontami un progetto tecnico che hai svolto e quali problemi hai incontrato.",
+            "Come affronteresti un problema tecnico che non sai risolvere subito?",
+            "Quali strumenti o tecnologie conosci che potrebbero essere utili per questo ruolo?",
+            "Come verificheresti la correttezza del tuo lavoro tecnico?",
+            "Descrivi un caso in cui hai dovuto analizzare dati, codice, requisiti o informazioni tecniche.",
+            "Come spiegheresti un concetto tecnico complesso a una persona non tecnica?",
+            "Qual è una competenza tecnica che vuoi migliorare?",
+            "Come ti organizzi quando devi completare un task tecnico entro una scadenza?",
+            "Quale esperienza ti ha aiutato di più a sviluppare competenze utili per questo ruolo?"
+        ]
 
     elif data.interview_type == "logica":
         fallback_questions = [
-        f"Immagina di lavorare come {target_role}: hai tre attività urgenti, risorse limitate e informazioni incomplete. Come decideresti da cosa partire e perché?",
-        "Quante palline da ping pong servirebbero, secondo te, per riempire la stanza in cui ti trovi? Spiega il ragionamento.",
-        "Completa la serie numerica e spiega la regola: 2, 6, 12, 20, 30, ?",
-        "Qual è l’angolo tra la lancetta dell’ora e quella dei minuti alle tre e quindici? Spiega il procedimento.",
-        f"Se {company} dovesse stimare quanti utenti usano un suo servizio in un giorno, quali ipotesi faresti?",
-        "Completa la serie di lettere e spiega la logica: A, C, F, J, O, ?",
-        "Quanti Big Mac vengono venduti da McDonald’s ogni anno negli Stati Uniti? Non serve il numero esatto: spiega come lo stimeresti.",
-        "Una procedura funziona nel 90% dei casi, ma fallisce nel restante 10%. Come analizzeresti il problema?",
-        "Se un cliente ti fornisse dati contraddittori, come ragioneresti per capire quale informazione è più affidabile?",
-        "Quante birre vengono consumate in media in un anno in Italia? Spiega quali dati useresti per stimarlo."
-    ]
+            f"Immagina di lavorare come {target_role}: hai tre attività urgenti, risorse limitate e informazioni incomplete. Come decideresti da cosa partire e perché?",
+            "Quante palline da ping pong servirebbero, secondo te, per riempire la stanza in cui ti trovi? Spiega il ragionamento.",
+            "Completa la serie numerica e spiega la regola: 2, 6, 12, 20, 30, ?",
+            "Qual è l’angolo tra la lancetta dell’ora e quella dei minuti alle tre e quindici? Spiega il procedimento.",
+            f"Se {company} dovesse stimare quanti utenti usano un suo servizio in un giorno, quali ipotesi faresti?",
+            "Completa la serie di lettere e spiega la logica: A, C, F, J, O, ?",
+            "Quanti Big Mac vengono venduti da McDonald’s ogni anno negli Stati Uniti? Non serve il numero esatto: spiega come lo stimeresti.",
+            "Una procedura funziona nel 90% dei casi, ma fallisce nel restante 10%. Come analizzeresti il problema?",
+            "Se un cliente ti fornisse dati contraddittori, come ragioneresti per capire quale informazione è più affidabile?",
+            "Quante birre vengono consumate in media in un anno in Italia? Spiega quali dati useresti per stimarlo."
+        ]
 
     else:
-     fallback_questions = [
-        "Parlami brevemente di te e del tuo percorso.",
-        "Perché ti interessa questa posizione?",
-        "Quali competenze pensi di poter portare in questo ruolo?",
-        "Raccontami un progetto o un’esperienza rilevante per questa posizione.",
-        "Qual è stata una difficoltà che hai affrontato e come l’hai gestita?",
-        "Come ti organizzi quando hai una scadenza importante?",
-        "Descrivi una situazione in cui hai lavorato in team.",
-        "Qual è un tuo punto di forza e come lo useresti in questo ruolo?",
-        "Qual è un aspetto su cui vuoi migliorare professionalmente?",
-        "Hai qualche domanda sull’azienda o sul ruolo?"
-    ]
+        fallback_questions = [
+            "Parlami brevemente di te e del tuo percorso.",
+            "Perché ti interessa questa posizione?",
+            "Quali competenze pensi di poter portare in questo ruolo?",
+            "Raccontami un progetto o un’esperienza rilevante per questa posizione.",
+            "Qual è stata una difficoltà che hai affrontato e come l’hai gestita?",
+            "Come ti organizzi quando hai una scadenza importante?",
+            "Descrivi una situazione in cui hai lavorato in team.",
+            "Qual è un tuo punto di forza e come lo useresti in questo ruolo?",
+            "Qual è un aspetto su cui vuoi migliorare professionalmente?",
+            "Hai qualche domanda sull’azienda o sul ruolo?"
+        ]
+
     while len(questions_list) < 10:
         questions_list.append(fallback_questions[len(questions_list)])
 
@@ -1180,9 +1447,12 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         interview_language
     ) = row
 
-    # CONTROLLO RISPOSTE DA 0
     if is_zero_answer(data.answer, question_text):
-        zero_result = build_zero_feedback("Risposta indecifrabile, non pertinente o priva di contenuto utile")
+        zero_result = build_zero_feedback(
+            reason="Risposta indecifrabile, non pertinente o priva di contenuto utile",
+            question=question_text,
+            interview_type=interview_type
+        )
 
         speech_metrics_json = None
 
@@ -1206,9 +1476,10 @@ def evaluate_answer(data: EvaluateAnswerRequest):
             feedback,
             improved_answer,
             speaking_feedback,
+            solution_explanation,
             speech_metrics_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             question_id,
             data.answer,
@@ -1222,6 +1493,7 @@ def evaluate_answer(data: EvaluateAnswerRequest):
             zero_result["feedback"],
             zero_result["improved_answer"],
             zero_result["speaking_feedback"],
+            zero_result["solution_explanation"],
             speech_metrics_json
         ))
 
@@ -1239,69 +1511,26 @@ def evaluate_answer(data: EvaluateAnswerRequest):
 
         return zero_result
 
-    # da qui in poi continua il codice normale già presente
-
-    cursor.execute("""
-    SELECT 
-        q.id,
-        q.question_text,
-        q.session_id,
-        q.company,
-        q.question_mode,
-        q.sources_json,
-        s.user_id,
-        s.interview_type,
-        s.difficulty,
-        u.name,
-        u.education,
-        u.target_role,
-        u.sector,
-        u.experience_level,
-        u.interview_language
-    FROM questions q
-    JOIN interview_sessions s ON q.session_id = s.id
-    JOIN users u ON s.user_id = u.id
-    WHERE q.id = ?
-    """, (data.question_id,))
-
-    row = cursor.fetchone()
-
-    if not row:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Domanda non trovata")
-
-    (
-        question_id,
-        question_text,
-        session_id,
-        company,
-        question_mode,
-        sources_json,
-        user_id,
-        interview_type,
-        difficulty,
-        name,
-        education,
-        target_role,
-        sector,
-        experience_level,
-        interview_language
-    ) = row
-
     has_speech_metrics = data.speech_metrics is not None
 
     speech_info = ""
 
     if has_speech_metrics:
         speech_info = f"""
-Metriche vocali rilevate dal frontend:
+Dati sul parlato rilevati dal frontend:
 - Durata risposta: {data.speech_metrics.duration_seconds} secondi
 - Numero parole: {data.speech_metrics.words_count}
 - Parole al minuto: {data.speech_metrics.words_per_minute}
 - Numero parole riempitive: {data.speech_metrics.filler_words_count}
 - Parole riempitive rilevate: {data.speech_metrics.filler_words}
 
-Valuta anche il modo di parlare considerando ritmo, sintesi, sicurezza percepita e presenza di parole riempitive.
+Valuta anche il modo di parlare considerando:
+- ritmo;
+- chiarezza espositiva;
+- parole riempitive;
+- sicurezza percepita;
+- sintesi;
+- capacità di organizzare il discorso.
 """
 
     prompt = f"""
@@ -1349,8 +1578,9 @@ La struttura deve essere ESATTAMENTE questa:
   "speaking_score": 0,
   "total_score": 0,
   "feedback": "feedback dettagliato ma comprensibile",
-  "improved_answer": "risposta migliorata adatta a un colloquio",
-  "speaking_feedback": "feedback sul modo di parlare"
+  "improved_answer": "risposta migliorata o risposta modello alla domanda",
+  "speaking_feedback": "feedback sul modo di parlare",
+  "solution_explanation": "soluzione spiegata se la domanda è di logica, altrimenti stringa vuota"
 }}
 
 Regole di valutazione:
@@ -1362,17 +1592,24 @@ Regole di valutazione:
 - Se la risposta usa un lessico povero, confuso o poco professionale, abbassa chiarezza e professionalità.
 - Se la risposta non contiene esempi, motivazioni o contenuti concreti, abbassa completezza.
 - Non premiare una risposta solo perché è lunga: deve essere comprensibile, pertinente e utile.
-- Non usare mai punteggi maggiori di 100.
-- Non usare mai punteggi negativi.
-- total_score deve essere compreso tra 0 e 100.
-- Se non ci sono metriche vocali, speaking_score deve essere 0 e speaking_feedback deve dire che la risposta è stata valutata solo sul testo.
-- Non inventare esperienze non presenti nella risposta.
+- improved_answer deve essere SEMPRE valorizzata.
+- Se il candidato non risponde alla domanda, improved_answer deve contenere una risposta modello corretta alla domanda.
+- Se la domanda è tecnica, improved_answer deve mostrare una risposta tecnica corretta ma credibile per il livello del candidato.
+- Se la domanda è conoscitiva/motivazionale, improved_answer deve mostrare una risposta naturale, professionale e adatta a un colloquio.
+- Se la domanda è di logica, improved_answer deve contenere una possibile risposta ragionata e solution_explanation deve contenere la soluzione spiegata passo passo.
+- Se la risposta è errata ma la domanda è di logica, spiega comunque il ragionamento corretto.
+- Se sono presenti metriche vocali, devi obbligatoriamente valutare il modo di parlare usando quei dati.
+- Se sono presenti metriche vocali, NON devi mai scrivere che le metriche vocali mancano.
+- Se sono presenti metriche vocali, speaking_score deve essere maggiore di 0, salvo casi di risposta indecifrabile o completamente non valida.
+- Nel campo speaking_feedback devi commentare ritmo, chiarezza espositiva, velocità del parlato, parole riempitive e sicurezza percepita.
+- Se NON ci sono metriche vocali, speaking_score deve essere 0 e speaking_feedback deve dire che la risposta è stata valutata solo sul testo.
+- Non inventare esperienze personali non presenti nella risposta.
 - La risposta migliorata deve essere naturale e credibile.
 - Restituisci solo JSON valido.
 """
 
     try:
-        raw_output = call_groq(prompt, temperature=0.4, max_tokens=1300)
+        raw_output = call_groq(prompt, temperature=0.4, max_tokens=1600)
         result = extract_json(raw_output)
     except Exception as e:
         conn.close()
@@ -1389,6 +1626,9 @@ Regole di valutazione:
 
     if has_speech_metrics:
         speaking_score = clamp_score(result.get("speaking_score", 0))
+
+        if speaking_score == 0:
+            speaking_score = 60
     else:
         speaking_score = 0
 
@@ -1403,11 +1643,30 @@ Regole di valutazione:
 
     feedback = result.get("feedback", "")
     improved_answer = result.get("improved_answer", "")
+    solution_explanation = result.get("solution_explanation", "")
+
+    if not improved_answer:
+        improved_answer = (
+            f"Una risposta migliore alla domanda '{question_text}' dovrebbe rispondere direttamente, "
+            "essere chiara, pertinente e includere almeno un esempio o una motivazione concreta."
+        )
 
     if has_speech_metrics:
         speaking_feedback = result.get("speaking_feedback", "")
+
+        invalid_speaking_feedback = (
+            not speaking_feedback
+            or "non contiene metriche vocali" in speaking_feedback.lower()
+            or "non ci sono metriche vocali" in speaking_feedback.lower()
+            or "non sono presenti metriche vocali" in speaking_feedback.lower()
+            or "valutata solo sul testo" in speaking_feedback.lower()
+            or "solo sul contenuto testuale" in speaking_feedback.lower()
+        )
+
+        if invalid_speaking_feedback:
+            speaking_feedback = build_speaking_feedback_from_metrics(data.speech_metrics)
     else:
-        speaking_feedback = "La risposta è stata valutata solo sul contenuto testuale perché non sono presenti metriche vocali."
+        speaking_feedback = "La risposta è stata valutata solo sul contenuto testuale perché non sono presenti dati sul parlato."
 
     speech_metrics_json = None
 
@@ -1431,9 +1690,10 @@ Regole di valutazione:
         feedback,
         improved_answer,
         speaking_feedback,
+        solution_explanation,
         speech_metrics_json
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         question_id,
         data.answer,
@@ -1447,6 +1707,7 @@ Regole di valutazione:
         feedback,
         improved_answer,
         speaking_feedback,
+        solution_explanation,
         speech_metrics_json
     ))
 
@@ -1474,7 +1735,8 @@ Regole di valutazione:
         "total_score": total_score,
         "feedback": feedback,
         "improved_answer": improved_answer,
-        "speaking_feedback": speaking_feedback
+        "speaking_feedback": speaking_feedback,
+        "solution_explanation": solution_explanation
     }
 
 
@@ -1506,7 +1768,8 @@ def get_history(user_id: int):
         a.speaking_score,
         a.feedback,
         a.improved_answer,
-        a.speaking_feedback
+        a.speaking_feedback,
+        a.solution_explanation
     FROM interview_sessions s
     JOIN questions q ON q.session_id = s.id
     LEFT JOIN answers a ON a.question_id = q.id
@@ -1538,7 +1801,8 @@ def get_history(user_id: int):
             "speaking_score": row[14],
             "feedback": row[15],
             "improved_answer": row[16],
-            "speaking_feedback": row[17]
+            "speaking_feedback": row[17],
+            "solution_explanation": row[18]
         })
 
     return history
@@ -1629,151 +1893,4 @@ def get_question_sources(question_id: int):
     return {
         "question_id": question_id,
         "sources": sources
-    }
-def is_zero_answer(answer: str, question: str = "") -> bool:
-    """
-    Riconosce risposte che devono prendere 0:
-    - lettere casuali;
-    - risposta vuota;
-    - 'boh', 'non lo so', 'chi lo sa';
-    - risposta troppo corta;
-    - risposta evidentemente non pertinente.
-    """
-
-    if not answer:
-        return True
-
-    text = answer.strip().lower()
-
-    # Risposta vuota o quasi vuota
-    if len(text) < 3:
-        return True
-
-    zero_phrases = [
-        "boh",
-        "non lo so",
-        "non so",
-        "chi lo sa",
-        "bo",
-        "mah",
-        "non ne ho idea",
-        "nessuna idea",
-        "non saprei",
-        "non mi viene",
-        "non mi viene in mente",
-        "non voglio rispondere",
-        "skip",
-        "passo",
-        "idk",
-        "i don't know",
-        "dont know",
-        "no idea"
-    ]
-
-    # Se la risposta è esattamente una frase di resa
-    if text in zero_phrases:
-        return True
-
-    # Se contiene solo una frase di resa, senza altro contenuto utile
-    for phrase in zero_phrases:
-        if phrase in text and len(text.split()) <= 6:
-            return True
-
-    words = text.split()
-
-    # Troppo corta per essere valutabile
-    if len(words) < 3:
-        return True
-
-    # Riconoscimento testo casuale / indecifrabile
-    vowels = "aeiouàèéìòù"
-    weird_words = 0
-
-    for word in words:
-        clean_word = "".join(ch for ch in word if ch.isalpha())
-
-        if not clean_word:
-            weird_words += 1
-            continue
-
-        # Parola lunga senza vocali: es. "sdhjkshd"
-        if len(clean_word) >= 5 and not any(v in clean_word for v in vowels):
-            weird_words += 1
-
-        # Molte consonanti consecutive
-        consecutive_consonants = 0
-        max_consecutive_consonants = 0
-
-        for ch in clean_word:
-            if ch.isalpha() and ch not in vowels:
-                consecutive_consonants += 1
-                max_consecutive_consonants = max(max_consecutive_consonants, consecutive_consonants)
-            else:
-                consecutive_consonants = 0
-
-        if max_consecutive_consonants >= 5:
-            weird_words += 1
-
-    weird_ratio = weird_words / len(words)
-
-    if weird_ratio >= 0.5:
-        return True
-
-    # Troppi caratteri strani
-    letters = sum(1 for ch in text if ch.isalpha())
-    total = len(text)
-
-    if total > 0 and letters / total < 0.45:
-        return True
-
-    # Risposte palesemente non pertinenti, molto corte
-    irrelevant_short_answers = [
-        "ciao",
-        "ok",
-        "va bene",
-        "bene",
-        "male",
-        "si",
-        "sì",
-        "no",
-        "forse",
-        "niente",
-        "nulla",
-        "tutto bene",
-        "mi piace",
-        "non mi piace"
-    ]
-
-    if text in irrelevant_short_answers:
-        return True
-
-    return False
-def build_zero_feedback(reason: str = "Risposta non valutabile"):
-    """
-    Feedback standard per risposte indecifrabili, non pertinenti o prive di contenuto.
-    """
-
-    return {
-        "clarity_score": 0,
-        "completeness_score": 0,
-        "relevance_score": 0,
-        "professionalism_score": 0,
-        "synthesis_score": 0,
-        "speaking_score": 0,
-        "total_score": 0,
-        "feedback": (
-            f"{reason}. La risposta non può essere considerata valida in un colloquio, "
-            "perché non fornisce contenuto utile, non risponde alla domanda oppure risulta "
-            "troppo vaga/indecifrabile. In un colloquio reale sarebbe necessario formulare "
-            "una risposta chiara, pertinente e completa."
-        ),
-        "improved_answer": (
-            "Per migliorare, prova a rispondere in modo strutturato: introduci brevemente "
-            "il punto principale, collega la risposta alla domanda e aggiungi un esempio "
-            "concreto o una motivazione. Evita risposte come 'boh', 'non lo so' o frasi "
-            "troppo generiche."
-        ),
-        "speaking_feedback": (
-            "Il modo di parlare non è valutabile perché il contenuto della risposta non è valido."
-        )
     }
