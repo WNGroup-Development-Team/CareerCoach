@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import "./App.css";
+
 import logoCareerCoach from "./assets/career-coach-logo.png";
+import PersonalizeExperience from "./PersonalizeExperience";
 
 const API_URL = "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
@@ -206,6 +208,7 @@ function App() {
     instagram_handle: "",
   });
   const [digitalAnalysis, setDigitalAnalysis] = useState(null);
+  const [cvOptimizationAnalysis, setCvOptimizationAnalysis] = useState(null);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [stepHistory, setStepHistory] = useState([]);
 
@@ -213,6 +216,13 @@ function App() {
   const [difficulty, setDifficulty] = useState("intermedio");
 
   const [company, setCompany] = useState("Generica");
+  const [personalizeIntent, setPersonalizeIntent] = useState("interview");
+  const [personalizeForm, setPersonalizeForm] = useState({
+    goal: "",
+    company: "",
+    role: "",
+    link: "",
+  });
   const [questionMode] = useState("web");
 
   const [questions, setQuestions] = useState([]);
@@ -930,6 +940,10 @@ function App() {
       });
       setCvFile(null);
       setCvPreview(null);
+      if (personalizeIntent === "cv") {
+        await analyzeCvOptimization(updatedUser);
+        return;
+      }
       transitionToStep("cv-digital");
     } catch (err) {
       console.error(err);
@@ -972,6 +986,48 @@ function App() {
       }));
       setDigitalAnalysis(data.analysis || data.user?.digital_analysis || null);
       transitionToStep("cv-analysis");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const analyzeCvOptimization = async (profileOverride = profile) => {
+    resetError();
+
+    if (!profileOverride.cv_uploaded && !profileOverride.cv_filename) {
+      setError("Carica un CV prima di avviare l'analisi strategica.");
+      transitionToStep("cv-upload");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv-optimization-analysis`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          company: personalizeForm.company.trim() || company,
+          role: personalizeForm.role.trim() || profileOverride.target_role || "",
+          goal: personalizeForm.goal.trim(),
+          job_link: personalizeForm.link.trim(),
+        })
+      }, 60000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi del CV.");
+        return;
+      }
+
+      setCvOptimizationAnalysis(data.analysis);
+      transitionToStep("cv-strategy");
     } catch (err) {
       console.error(err);
       setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
@@ -1065,6 +1121,9 @@ function App() {
     setCurrentQuestionIndex(0);
     setAllFeedbacks([]);
 
+    const selectedCompany = personalizeForm.company.trim() || company || "Generica";
+    const selectedRole = personalizeForm.role.trim() || profile.target_role || "";
+
     try {
       const response = await fetchWithTimeout(
         `${API_URL}/generate-question`,
@@ -1077,7 +1136,10 @@ function App() {
             user_id: userId,
             interview_type: interviewType,
             difficulty: difficulty,
-            company: company,
+            company: selectedCompany,
+            goal: personalizeForm.goal.trim(),
+            role: selectedRole,
+            job_link: personalizeForm.link.trim(),
             question_mode: questionMode
           })
         },
@@ -1369,8 +1431,62 @@ function App() {
     transitionToStep("gym");
   };
 
+
+  const preparePersonalizeForm = () => {
+    setPersonalizeForm((current) => ({
+      goal: current.goal,
+      company: current.company || (company === "Generica" ? "" : company),
+      role: current.role || profile.target_role || "",
+      link: current.link,
+    }));
+  };
+
   const startCvPath = () => {
-    transitionToStep(isProfileComplete(profile) ? "cv-digital" : "cv-upload");
+    preparePersonalizeForm();
+    setPersonalizeIntent("cv");
+    transitionToStep("personalize");
+  };
+
+  const startInterviewPath = () => {
+    preparePersonalizeForm();
+    setPersonalizeIntent("interview");
+    transitionToStep("personalize");
+  };
+
+  const updatePersonalizeForm = (field, value) => {
+    setPersonalizeForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  };
+
+  const continuePersonalizedPath = async (event) => {
+    event.preventDefault();
+    resetError();
+
+    const nextCompany = personalizeForm.company.trim() || "Generica";
+    const nextRole = personalizeForm.role.trim();
+
+    setCompany(nextCompany);
+
+    if (nextRole) {
+      setProfile((current) => ({
+        ...current,
+        target_role: nextRole,
+      }));
+    }
+
+    if (personalizeIntent === "cv") {
+      if (!isProfileComplete(profile)) {
+        transitionToStep("cv-upload");
+        return;
+      }
+
+      await analyzeCvOptimization();
+      return;
+    }
+
+    transitionToStep("gym");
   };
 
   if (showSplash) {
@@ -1517,13 +1633,26 @@ function App() {
                 Esercitati con simulazioni realistiche per affrontare ogni
                 domanda con sicurezza.
               </p>
-              <button onClick={() => transitionToStep("gym")}>
+              <button onClick={startInterviewPath}>
                 Avvia simulazione
                 
               </button>
             </div>
           </div>
         </section>
+      )}
+
+      {step === "personalize" && (
+        <PersonalizeExperience
+          company={personalizeForm.company}
+          goal={personalizeForm.goal}
+          link={personalizeForm.link}
+          role={personalizeForm.role}
+          onBack={() => transitionToStep("home")}
+          onChange={updatePersonalizeForm}
+          onSubmit={continuePersonalizedPath}
+          submitLabel={personalizeIntent === "cv" ? "Continua al CV" : "Continua alla simulazione"}
+        />
       )}
 
       {step === "auth" && (
@@ -1855,6 +1984,96 @@ function App() {
         </section>
       )}
 
+      {step === "cv-strategy" && (
+        <section className="cv-strategy-page">
+          <div className="cv-strategy-heading">
+            <h2>Analisi Strategica CV</h2>
+            <p>
+              {(cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "Ruolo target")} presso{" "}
+              {cvOptimizationAnalysis?.target?.company || company || "azienda target"}
+            </p>
+          </div>
+
+          <div className="cv-strategy-score-card">
+            <div
+              className="cv-score-ring"
+              style={{
+                background: `radial-gradient(circle at center, #ffffff 58%, transparent 60%), conic-gradient(#248269 0 ${cvOptimizationAnalysis?.score || 0}%, #dfe8ef ${cvOptimizationAnalysis?.score || 0}% 100%)`,
+              }}
+            >
+              <span>{cvOptimizationAnalysis?.score || 0}%</span>
+            </div>
+            <h3>{cvOptimizationAnalysis?.headline || "Analisi completata"}</h3>
+            <p>
+              {cvOptimizationAnalysis?.summary ||
+                "Abbiamo confrontato il tuo CV con ruolo, azienda e dati dell'annuncio per individuare priorita di ottimizzazione."}
+            </p>
+          </div>
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span className="success">+</span>
+              <h3>Punti di Forza</h3>
+            </div>
+
+            {(cvOptimizationAnalysis?.strengths || []).map((item, index) => (
+              <div className="cv-strategy-item success" key={`${item.title}-${index}`}>
+                <span>✓</span>
+                <div>
+                  <strong>{item.title}</strong>
+                  <p>{item.description}</p>
+                  {item.coach_tip && <small>{item.coach_tip}</small>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span className="warning">~</span>
+              <h3>Aree di Sviluppo</h3>
+            </div>
+
+            {(cvOptimizationAnalysis?.improvements || []).map((item, index) => (
+              <div className="cv-strategy-item warning" key={`${item.title}-${index}`}>
+                <span>!</span>
+                <div>
+                  <strong>{item.title}</strong>
+                  <p>{item.description}</p>
+                  {item.coach_tip && <small>{item.coach_tip}</small>}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {(cvOptimizationAnalysis?.sources || []).length > 0 && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span>i</span>
+                <h3>Fonti candidatura</h3>
+              </div>
+              <div className="source-list">
+                {cvOptimizationAnalysis.sources.slice(0, 4).map((source, index) => (
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    key={`${source.url}-${index}`}
+                  >
+                    {source.title || source.url}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
+            Torna alla home
+            <span>-&gt;</span>
+          </button>
+        </section>
+      )}
+
       {step === "cv-view" && (
         <section className="cv-flow-page">
           <div className="cv-analysis-heading">
@@ -2044,19 +2263,25 @@ function App() {
         <section className="card">
           <h2>Palestra dei colloqui</h2>
           <p className="section-description">
-            Scegli azienda, tipologia di colloquio e livello di difficoltà.
+            Scegli tipologia di colloquio e livello di difficoltà.
             L’app genererà 10 domande realistiche e personalizzate per simulare un colloquio completo.
           </p>
 
-          <div className="form-grid">
+          <div className="interview-context">
             <div>
-              <label>Azienda target</label>
-              <input
-                value={company}
-                onChange={(e) => setCompany(e.target.value)}
-                placeholder="Es. Amazon, Google, Deloitte, Reply, TIM..."
-              />
+              <span>Azienda</span>
+              <strong>{company || "Generica"}</strong>
             </div>
+            <div>
+              <span>Candidatura</span>
+              <strong>{personalizeForm.role || profile.target_role || "Ruolo da definire"}</strong>
+            </div>
+            {personalizeForm.goal && (
+              <div className="full">
+                <span>Obiettivo</span>
+                <strong>{personalizeForm.goal}</strong>
+              </div>
+            )}
           </div>
 
           <h3 className="sub-title">Tipo di allenamento</h3>
