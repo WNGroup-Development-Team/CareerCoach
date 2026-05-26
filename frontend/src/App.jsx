@@ -67,12 +67,40 @@ function analyzeSpeech(text, durationSeconds) {
 }
 
 function isProfileComplete(profile) {
-  return Boolean(
-    profile.name.trim() &&
-      profile.education.trim() &&
-      profile.target_role.trim() &&
-      profile.sector.trim()
-  );
+  return Boolean(profile.cv_uploaded || profile.cv_filename);
+}
+
+function normalizeInstagramHandle(value = "") {
+  return value
+    .trim()
+    .replace("https://www.instagram.com/", "")
+    .replace("https://instagram.com/", "")
+    .split("?")[0]
+    .replaceAll("/", "")
+    .replace(/^@/, "")
+    .toLowerCase();
+}
+
+function normalizeProfileUrl(value = "") {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return "";
+  }
+
+  const withProtocol = trimmed.startsWith("http://") || trimmed.startsWith("https://")
+    ? trimmed
+    : `https://${trimmed}`;
+
+  return withProtocol.replace(/\/$/, "").toLowerCase();
+}
+
+function getProfilePath(value = "") {
+  try {
+    return new URL(normalizeProfileUrl(value)).pathname.replace(/^\/|\/$/g, "").toLowerCase();
+  } catch {
+    return "";
+  }
 }
 
 function SplashScreen({
@@ -97,6 +125,24 @@ function SplashScreen({
         )}
       </div>
     </section>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 20h4.2L19.4 8.8a2 2 0 0 0 0-2.8L18 4.6a2 2 0 0 0-2.8 0L4 15.8V20Z" />
+      <path d="M14 6l4 4" />
+    </svg>
   );
 }
 
@@ -131,7 +177,25 @@ function App() {
     sector: "",
     experience_level: "Junior",
     interview_language: "Italiano",
+    cv_filename: "",
+    cv_uploaded: false,
+    cv_text: "",
+    linkedin_url: "",
+    portfolio_url: "",
+    instagram_handle: "",
   });
+
+  const [cvFile, setCvFile] = useState(null);
+  const [cvPreview, setCvPreview] = useState(null);
+  const [isCvDragging, setIsCvDragging] = useState(false);
+  const [digitalPresence, setDigitalPresence] = useState({
+    linkedin_url: "",
+    portfolio_url: "",
+    instagram_handle: "",
+  });
+  const [digitalAnalysis, setDigitalAnalysis] = useState(null);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [stepHistory, setStepHistory] = useState([]);
 
   const [interviewType, setInterviewType] = useState("conoscitive_motivazionali");
   const [difficulty, setDifficulty] = useState("intermedio");
@@ -216,6 +280,52 @@ function App() {
     loadSession(authToken);
   }, []);
 
+  useEffect(() => {
+    if (step !== "cv-view" || !userId || !profile.cv_filename) {
+      return;
+    }
+
+    const loadCvFile = async () => {
+      resetError();
+
+      try {
+        const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv-file`, {}, 15000);
+        const data = await response.json();
+
+        if (!response.ok) {
+          setError(typeof data.detail === "string" ? data.detail : "CV non trovato.");
+          return;
+        }
+
+        setCvPreview(data);
+      } catch (err) {
+        console.error(err);
+        setError("Errore nel caricamento dell'anteprima del CV.");
+      }
+    };
+
+    loadCvFile();
+  }, [step, userId, profile.cv_filename]);
+
+  useEffect(() => {
+    const handleBrowserBack = (event) => {
+      resetError();
+      setIsProfileMenuOpen(false);
+      setShowTransition(false);
+
+      if (!authToken || !userId) {
+        setStep("auth");
+        return;
+      }
+
+      setStep(event.state?.careerCoachStep || "home");
+    };
+
+    window.addEventListener("popstate", handleBrowserBack);
+
+    return () => window.removeEventListener("popstate", handleBrowserBack);
+  }, [authToken, userId]);
+
   const updateAuthForm = (field, value) => {
     setAuthForm({
       ...authForm,
@@ -276,12 +386,34 @@ function App() {
 
   const transitionToStep = (nextStep) => {
     resetError();
+    setIsProfileMenuOpen(false);
     setShowTransition(true);
+    window.history.pushState({ careerCoachStep: nextStep }, "", window.location.pathname);
+    setStepHistory((current) =>
+      current[current.length - 1] === step ? current : [...current, step].slice(-12)
+    );
 
     setTimeout(() => {
       setStep(nextStep);
       setShowTransition(false);
     }, TRANSITION_DURATION_MS);
+  };
+
+  const goBack = () => {
+    resetError();
+    setIsProfileMenuOpen(false);
+    const previousStep = stepHistory[stepHistory.length - 1];
+
+    if (!previousStep) {
+      const fallbackStep = isProfileComplete(profile) ? "home" : "cv-upload";
+      window.history.pushState({ careerCoachStep: fallbackStep }, "", window.location.pathname);
+      setStep(fallbackStep);
+      return;
+    }
+
+    setStepHistory((current) => current.slice(0, -1));
+    window.history.pushState({ careerCoachStep: previousStep }, "", window.location.pathname);
+    setStep(previousStep);
   };
 
   const applyAuthenticatedUser = (token, user) => {
@@ -297,17 +429,23 @@ function App() {
       sector: user.sector || "",
       experience_level: user.experience_level || "Junior",
       interview_language: user.interview_language || "Italiano",
+      cv_filename: user.cv_filename || "",
+      cv_uploaded: Boolean(user.cv_uploaded),
+      cv_text: user.cv_text || "",
+      linkedin_url: user.linkedin_url || "",
+      portfolio_url: user.portfolio_url || "",
+      instagram_handle: user.instagram_handle || "",
     });
-    setStep(isProfileComplete({
-      name: user.name || "",
-      education: user.education || "",
-      target_role: user.target_role || "",
-      sector: user.sector || "",
-      email: user.email || "",
-      phone: user.phone || "",
-      experience_level: user.experience_level || "Junior",
-      interview_language: user.interview_language || "Italiano",
-    }) ? "gym" : "profile");
+    setDigitalPresence({
+      linkedin_url: user.linkedin_url || "",
+      portfolio_url: user.portfolio_url || "",
+      instagram_handle: user.instagram_handle || "",
+    });
+    setDigitalAnalysis(user.digital_analysis || null);
+    setStepHistory([]);
+    const firstStep = isProfileComplete(user) ? "home" : "cv-upload";
+    window.history.replaceState({ careerCoachStep: firstStep }, "", window.location.pathname);
+    setStep(firstStep);
   };
 
   const loadSession = async (token) => {
@@ -536,6 +674,8 @@ function App() {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     setAuthToken("");
     setUserId(null);
+    setIsProfileMenuOpen(false);
+    setStepHistory([]);
     transitionToStep("auth");
 
     if (token) {
@@ -567,6 +707,155 @@ function App() {
       </button>
     </div>
   );
+
+  const readCvText = (file) =>
+    new Promise((resolve) => {
+      if (!file || file.type !== "text/plain") {
+        resolve("");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => resolve("");
+      reader.readAsText(file);
+    });
+
+  const readFileBase64 = (file) =>
+    new Promise((resolve) => {
+      if (!file) {
+        resolve("");
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = String(reader.result || "");
+        resolve(result.includes(",") ? result.split(",")[1] : result);
+      };
+      reader.onerror = () => resolve("");
+      reader.readAsDataURL(file);
+    });
+
+  const selectCvFile = (file) => {
+    resetError();
+
+    if (!file) {
+      return;
+    }
+
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const allowedExtensions = ["pdf", "docx", "txt"];
+
+    if (!allowedExtensions.includes(extension)) {
+      setError("Carica un file PDF, DOCX o TXT.");
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Il CV non puo superare 5MB.");
+      return;
+    }
+
+    setCvFile(file);
+  };
+
+  const uploadCv = async () => {
+    resetError();
+
+    if (!cvFile) {
+      setError("Seleziona o trascina il tuo CV.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const text = await readCvText(cvFile);
+      const fileBase64 = await readFileBase64(cvFile);
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          filename: cvFile.name,
+          content_type: cvFile.type || "application/octet-stream",
+          size: cvFile.size,
+          text,
+          file_base64: fileBase64
+        })
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nel caricamento del CV.");
+        return;
+      }
+
+      const updatedUser = data.user;
+      setProfile((current) => ({
+        ...current,
+        ...updatedUser,
+        cv_uploaded: Boolean(updatedUser.cv_uploaded),
+      }));
+      setDigitalPresence({
+        linkedin_url: updatedUser.linkedin_url || "",
+        portfolio_url: updatedUser.portfolio_url || "",
+        instagram_handle: updatedUser.instagram_handle || "",
+      });
+      setCvFile(null);
+      setCvPreview(null);
+      transitionToStep("home");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateDigitalPresence = (field, value) => {
+    setDigitalPresence((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  };
+
+  const analyzeDigitalPresence = async () => {
+    resetError();
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/digital-presence`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(digitalPresence)
+      }, 60000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nel salvataggio dei profili digitali.");
+        return;
+      }
+
+      setProfile((current) => ({
+        ...current,
+        ...data.user,
+      }));
+      setDigitalAnalysis(data.analysis || data.user?.digital_analysis || null);
+      transitionToStep("cv-analysis");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const createProfile = async () => {
     resetError();
@@ -957,38 +1246,99 @@ function App() {
     transitionToStep("gym");
   };
 
+  const startCvPath = () => {
+    transitionToStep(isProfileComplete(profile) ? "cv-digital" : "cv-upload");
+  };
+
   if (showSplash) {
     return <SplashScreen />;
   }
 
+  const canGoBack = userId && step !== "auth" && stepHistory.length > 0;
+  const profileInitial = (profile.name || profile.email || "U").trim().charAt(0).toUpperCase();
+  const firstName = (profile.name || "Silvia").trim().split(/\s+/)[0];
+  const interviewPreparationScore = progress?.average_total_score ?? 0;
+  const digitalCoherenceScore = digitalAnalysis?.score ?? 0;
+  const exactInstagramHandle = normalizeInstagramHandle(digitalPresence.instagram_handle || profile.instagram_handle || "");
+  const exactLinkedinPath = getProfilePath(digitalPresence.linkedin_url || profile.linkedin_url || "");
+  const visibleDigitalSources = (digitalAnalysis?.sources || []).filter((source) => {
+    const url = source.url || "";
+    const title = source.title || "";
+
+    if (title.toLowerCase() === "linkedin inserito dal candidato") {
+      return false;
+    }
+
+    if (url.includes("linkedin.com")) {
+      return Boolean(exactLinkedinPath) && getProfilePath(url) === exactLinkedinPath;
+    }
+
+    if (url.includes("instagram.com")) {
+      if (!exactInstagramHandle) {
+        return false;
+      }
+
+      try {
+        const pathHandle = new URL(url).pathname.replace(/^\/|\/$/g, "").split("/")[0]?.toLowerCase();
+        return pathHandle === exactInstagramHandle;
+      } catch {
+        return url.toLowerCase().includes(`instagram.com/${exactInstagramHandle}`);
+      }
+    }
+
+    return true;
+  });
+
   return (
     <div className={step === "auth" ? "page auth-page" : "page"}>
       {step !== "auth" && (
-        <header className="header">
-          <div className="brand">
-            <img
-              className="app-logo"
-              src={logoCareerCoach}
-              alt="Logo Career Coach"
-            />
+        <div className="top-controls">
+          <button
+            className="back-button"
+            onClick={goBack}
+            disabled={!canGoBack}
+            aria-label="Torna indietro"
+            title="Torna indietro"
+          >
+            &lt;
+          </button>
 
-            <div className="brand-copy">
-              <h1 className="brand-title" aria-label="CareerCoach">
-                <span className="brand-title-career">Career</span>
-                <span className="brand-title-coach">Coach</span>
-              </h1>
-              <p>La palestra intelligente per simulare colloqui reali</p>
+          {userId && (
+            <div className="profile-menu">
+              <button
+                className="profile-trigger"
+                onClick={() => setIsProfileMenuOpen((current) => !current)}
+                aria-expanded={isProfileMenuOpen}
+                aria-label="Apri profilo"
+              >
+                <span>{profileInitial}</span>
+                <strong>{profile.name || "Profilo"}</strong>
+              </button>
+
+              {isProfileMenuOpen && (
+                <div className="profile-popover">
+                  <div className="profile-popover-header">
+                    <span>{profileInitial}</span>
+                    <div>
+                      <strong>{profile.name || "Il tuo profilo"}</strong>
+                      <p>{profile.email || "Account CareerCoach"}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => transitionToStep("profile")}>Dettagli Profilo</button>
+                  <button className="logout-menu-button" onClick={logoutUser}>Logout</button>
+                </div>
+              )}
             </div>
-          </div>
-        </header>
+          )}
+        </div>
       )}
 
-      {userId && (
+      {userId && !["home", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
         <nav className="navbar">
+          <button onClick={() => transitionToStep("home")}>Home</button>
           <button onClick={() => transitionToStep("gym")}>Palestra colloqui</button>
           <button onClick={loadHistory}>Storico</button>
           <button onClick={loadProgress}>Progressi</button>
-          <button onClick={logoutUser}>Esci</button>
         </nav>
       )}
 
@@ -1004,6 +1354,53 @@ function App() {
           Email non configurata in sviluppo. Apri questo link di test:{" "}
           <a href={previewLink}>{previewLink}</a>
         </div>
+      )}
+
+      {step === "home" && (
+        <section className="home-page">
+          <div className="home-brand">
+            <img
+              src={logoCareerCoach}
+              alt="Logo Career Coach"
+            />
+            <strong>Career Coach</strong>
+          </div>
+
+          <div className="home-heading">
+            <h2>Cosa vuoi fare oggi?</h2>
+            <p>Seleziona un'attivita per continuare il tuo percorso.</p>
+          </div>
+
+          <div className="home-action-card">
+            <div className="home-action-icon">CV</div>
+            <div>
+              <h3>Ottimizza il tuo CV</h3>
+              <p>
+                Adatta il tuo curriculum agli annunci con l'AI per massimizzare
+                le tue possibilita di successo.
+              </p>
+              <button onClick={startCvPath}>
+                Inizia ottimizzazione
+                <span>-&gt;</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="home-action-card">
+            <div className="home-action-icon interview">AI</div>
+            <div>
+              <h3>Preparati al Colloquio</h3>
+              <p>
+                Esercitati con simulazioni realistiche per affrontare ogni
+                domanda con sicurezza.
+              </p>
+              <button onClick={() => transitionToStep("gym")}>
+                Avvia simulazione
+                <span>-&gt;</span>
+              </button>
+            </div>
+          </div>
+        </section>
       )}
 
       {step === "auth" && (
@@ -1175,98 +1572,330 @@ function App() {
         </section>
       )}
 
+      {step === "cv-upload" && (
+        <section className="cv-onboarding">
+          <div className="cv-onboarding-copy">
+            <h2>Mappiamo il tuo percorso</h2>
+            <p>
+              Carica il tuo CV attuale per aiutarci a capire il tuo background.
+              Non preoccuparti se non e perfetto: siamo qui per aiutarti a migliorarlo.
+            </p>
+          </div>
+
+          <div
+            className={isCvDragging ? "cv-dropzone active" : "cv-dropzone"}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setIsCvDragging(true);
+            }}
+            onDragLeave={() => setIsCvDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setIsCvDragging(false);
+              selectCvFile(event.dataTransfer.files?.[0]);
+            }}
+          >
+            <div className="cv-upload-icon">CV</div>
+            <h3>Trascina qui il tuo CV</h3>
+            <p>PDF, DOCX, o TXT (Max 5MB)</p>
+            {cvFile && <span className="cv-file-pill">{cvFile.name}</span>}
+            <div className="cv-divider"><span>oppure</span></div>
+            <input
+              id="cv-file-input"
+              type="file"
+              accept=".pdf,.docx,.txt"
+              onChange={(event) => selectCvFile(event.target.files?.[0])}
+            />
+            <label className="cv-browse-button" htmlFor="cv-file-input">
+              Sfoglia file
+            </label>
+          </div>
+
+          <button className="cv-next-button" onClick={uploadCv} disabled={loading || !cvFile}>
+            Prosegui con l'analisi
+            <span>-&gt;</span>
+          </button>
+        </section>
+      )}
+
+      {step === "cv-digital" && (
+        <section className="cv-flow-page">
+          <div className="cv-success-hero">
+            <div className="cv-success-icon">CV</div>
+            <h2>CV Caricato!</h2>
+            <p>
+              Il tuo file <strong>{profile.cv_filename || "CV"}</strong> e pronto.
+            </p>
+          </div>
+
+          <div className="cv-analysis-card">
+            <h3>Analisi Presenza Digitale</h3>
+            <p>
+              Rafforza la tua candidatura. Collega i tuoi profili social per permettere
+              all'AI di analizzare la coerenza tra il tuo CV e la tua presenza online.
+            </p>
+
+            <label>LinkedIn Profile Link</label>
+            <input
+              value={digitalPresence.linkedin_url}
+              onChange={(event) => updateDigitalPresence("linkedin_url", event.target.value)}
+              placeholder="https://linkedin.com/in/tuonome"
+            />
+
+            <label>Portfolio o X (Twitter)</label>
+            <input
+              value={digitalPresence.portfolio_url}
+              onChange={(event) => updateDigitalPresence("portfolio_url", event.target.value)}
+              placeholder="https://tuoportfolio.com"
+            />
+
+            <label>Instagram <span>(opzionale)</span></label>
+            <input
+              value={digitalPresence.instagram_handle}
+              onChange={(event) => updateDigitalPresence("instagram_handle", event.target.value)}
+              placeholder="@tuo_handle"
+            />
+          </div>
+
+          <button className="cv-next-button" onClick={analyzeDigitalPresence} disabled={loading}>
+            Analizza Coerenza Digitale
+            <span>-&gt;</span>
+          </button>
+
+          <button className="cv-skip-button" onClick={() => transitionToStep("gym")}>
+            Salta per ora
+          </button>
+        </section>
+      )}
+
+      {step === "cv-analysis" && (
+        <section className="cv-flow-page">
+          <div className="cv-analysis-heading">
+            <h2>Analisi Coerenza Digitale</h2>
+            <p>Confronto tra il tuo CV e i profili online.</p>
+          </div>
+
+          <div className="cv-score-card">
+            <div
+              className="cv-score-ring"
+              style={{
+                background: `radial-gradient(circle at center, #ffffff 58%, transparent 60%), conic-gradient(#3d735e 0 ${digitalAnalysis?.score || 0}%, #dfe8ef ${digitalAnalysis?.score || 0}% 100%)`,
+              }}
+            >
+              <span>{digitalAnalysis?.score || 0}%</span>
+            </div>
+            <h3>{digitalAnalysis?.headline || "Analisi completata"}</h3>
+            <p>
+              {digitalAnalysis?.summary ||
+                "Abbiamo confrontato CV, LinkedIn e profili inseriti per stimare l'impatto sul tuo profilo professionale."}
+            </p>
+          </div>
+
+          <h3 className="cv-detail-title">Dettagli Analisi</h3>
+
+          {(digitalAnalysis?.findings || []).map((finding, index) => (
+            <div
+              className={`cv-detail-card ${finding.status === "warning" ? "warning" : "success"}`}
+              key={`${finding.title}-${index}`}
+            >
+              <h4>{finding.title}</h4>
+              <p>{finding.description}</p>
+              {finding.coach_tip && (
+                <div className="coach-tip">
+                  <strong>Il consiglio del coach</strong>
+                  <p>{finding.coach_tip}</p>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {visibleDigitalSources.length > 0 && (
+            <div className="cv-analysis-card">
+              <h3>Profili analizzati</h3>
+              <div className="source-list">
+                {visibleDigitalSources.slice(0, 4).map((source, index) => (
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    key={`${source.url}-${index}`}
+                  >
+                    {source.title || source.url}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button className="cv-next-button" onClick={() => transitionToStep("gym")}>
+            Avanti
+            <span>-&gt;</span>
+          </button>
+        </section>
+      )}
+
+      {step === "cv-view" && (
+        <section className="cv-flow-page">
+          <div className="cv-analysis-heading">
+            <h2>CV Master</h2>
+            <p>{profile.cv_filename || "Nessun CV caricato"}</p>
+          </div>
+
+          <div className="cv-view-card">
+            <div className="cv-view-header">
+              <span>CV</span>
+              <div>
+                <strong>{cvPreview?.filename || profile.cv_filename || "CV non caricato"}</strong>
+                <p>{cvPreview?.uploaded_at || profile.cv_uploaded_at ? `Caricato il ${cvPreview?.uploaded_at || profile.cv_uploaded_at}` : "Carica il tuo CV master."}</p>
+              </div>
+            </div>
+
+            {cvPreview?.file_base64 && /\.(pdf|docx)$/i.test(cvPreview?.filename || "") ? (
+              <div className="cv-word-preview">
+                <strong>Documento {cvPreview.filename.toLowerCase().endsWith(".pdf") ? "PDF" : "Word"} caricato</strong>
+                <p>
+                  Il CV e salvato come file master. Aprilo per visualizzarlo nel programma associato.
+                </p>
+                <a
+                  href={`data:${cvPreview.content_type};base64,${cvPreview.file_base64}`}
+                  download={cvPreview.filename}
+                >
+                  Apri CV
+                </a>
+              </div>
+            ) : cvPreview?.text || profile.cv_text ? (
+              <pre className="cv-preview-text">{cvPreview?.text || profile.cv_text}</pre>
+            ) : (
+              <div className="empty-message">
+                Caricamento anteprima CV in corso oppure file non disponibile.
+              </div>
+            )}
+
+            <div className="actions">
+              <button className="primary-button" onClick={() => transitionToStep("cv-upload")}>
+                Sostituisci CV
+              </button>
+              <button className="secondary-button" onClick={() => transitionToStep("profile")}>
+                Torna al profilo
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
       {step === "profile" && (
-        <section className="card">
-          <h2>Personalizza la tua esperienza</h2>
-          <p className="section-description">
-            Inserisci il tuo profilo candidato. Queste informazioni verranno usate
-            per generare domande realistiche, adattarle al tuo ruolo e simulare un colloquio completo.
-          </p>
+        <section className="profile-dashboard">
+          <div className="profile-page-title">
+            <h2>Profilo</h2>
+          </div>
 
-          <div className="form-grid">
-            <div>
-              <label>Nome</label>
-              <input
-                value={profile.name}
-                onChange={(e) => updateProfile("name", e.target.value)}
-                placeholder="Es. Silvia"
-              />
+          <div className="profile-hero-card">
+            <button className="profile-settings" type="button" aria-label="Impostazioni profilo">
+              ...
+            </button>
+            <div className="profile-avatar-large">
+              <span>{profileInitial}</span>
+              <button type="button" aria-label="Modifica immagine profilo">+</button>
             </div>
-
-            <div>
-              <label>Email</label>
-              <input
-                type="email"
-                value={profile.email}
-                onChange={(e) => updateProfile("email", e.target.value)}
-                placeholder="Es. silvia@email.com"
-              />
+            <h2>{profile.name || "Il tuo profilo"}</h2>
+            <p>{profile.target_role || "Ruolo target da definire"}</p>
+            <div className="profile-chip-row">
+              <span>{profile.sector || "Settore"}</span>
+              <span>{profile.experience_level || "Junior"}</span>
             </div>
+            <button className="profile-analysis-button" type="button" onClick={() => transitionToStep("cv-digital")}>
+              Analisi digitale
+              <span>-&gt;</span>
+            </button>
+          </div>
 
+          <div className="profile-section-title">
+            <h3>Traguardi Colloqui</h3>
+          </div>
+
+          <div className="profile-progress-card">
             <div>
-              <label>Cellulare</label>
-              <input
-                type="tel"
-                value={profile.phone}
-                onChange={(e) => updateProfile("phone", e.target.value)}
-                placeholder="Es. +39 333 123 4567"
-              />
+              <strong>Preparazione Generale</strong>
+              <span>{interviewPreparationScore}%</span>
             </div>
-
-            <div className="full">
-              <label>Percorso di studi</label>
-              <input
-                value={profile.education}
-                onChange={(e) => updateProfile("education", e.target.value)}
-                placeholder="Es. Laurea magistrale in Ingegneria Informatica"
-              />
+            <div className="profile-progress-track">
+              <span style={{ width: `${interviewPreparationScore}%` }} />
             </div>
+            <p>
+              {progress?.total_answers
+                ? `${progress.total_answers} risposte valutate finora.`
+                : "Pronta per iniziare i colloqui tecnici."}
+            </p>
+          </div>
 
+          <div className="profile-stats-grid">
             <div>
-              <label>Ruolo target</label>
-              <input
-                value={profile.target_role}
-                onChange={(e) => updateProfile("target_role", e.target.value)}
-                placeholder="Es. Junior Data Analyst"
-              />
+              <span className="profile-stat-icon">^</span>
+              <strong>{progress?.total_answers || 0}</strong>
+              <p>Colloqui Superati</p>
             </div>
-
             <div>
-              <label>Settore</label>
-              <input
-                value={profile.sector}
-                onChange={(e) => updateProfile("sector", e.target.value)}
-                placeholder="Es. AI e Data Science"
-              />
-            </div>
-
-            <div>
-              <label>Livello esperienza</label>
-              <select
-                value={profile.experience_level}
-                onChange={(e) => updateProfile("experience_level", e.target.value)}
-              >
-                <option>Junior</option>
-                <option>Intermedio</option>
-                <option>Senior</option>
-              </select>
-            </div>
-
-            <div>
-              <label>Lingua colloquio</label>
-              <select
-                value={profile.interview_language}
-                onChange={(e) => updateProfile("interview_language", e.target.value)}
-              >
-                <option>Italiano</option>
-                <option>Inglese</option>
-              </select>
+              <span className="profile-stat-icon">*</span>
+              <strong>{digitalCoherenceScore}%</strong>
+              <p>Coerenza Digitale</p>
             </div>
           </div>
 
-          <button className="primary-button" onClick={createProfile} disabled={loading}>
-            Salva profilo e continua
-          </button>
+          <div className="profile-section-title">
+            <h3>Aziende Preferite</h3>
+            <button type="button" onClick={() => transitionToStep("gym")}>Vedi tutte</button>
+          </div>
+
+          <div className="favorite-company-grid">
+            {[company || "TechCorp", "GlobalNet", "EcoInnovate"].map((item) => (
+              <div key={item}>
+                <span>{item.charAt(0).toUpperCase()}</span>
+                <strong>{item}</strong>
+              </div>
+            ))}
+          </div>
+
+          <div className="profile-section-title">
+            <h3>I Tuoi Documenti</h3>
+          </div>
+
+          <div className="document-list">
+            <div className="document-item">
+              <span>CV</span>
+              <div>
+                <strong>CV Master Caricato</strong>
+                <p>{profile.cv_filename || "Carica il tuo CV per iniziare"}</p>
+              </div>
+              <div className="document-actions">
+                <button
+                  type="button"
+                  onClick={() => transitionToStep("cv-view")}
+                  disabled={!profile.cv_filename}
+                  aria-label="Vedi CV caricato"
+                  title="Vedi CV caricato"
+                >
+                  <EyeIcon />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => transitionToStep("cv-upload")}
+                  aria-label="Modifica CV"
+                  title="Modifica CV"
+                >
+                  <PencilIcon />
+                </button>
+              </div>
+            </div>
+            <div>
+              <span>AI</span>
+              <div>
+                <strong>CV Ottimizzato</strong>
+                <p>{digitalAnalysis ? `Versione per ${company || "il tuo ruolo"}` : "Analisi da completare"}</p>
+              </div>
+              <button type="button" onClick={() => transitionToStep("cv-digital")} aria-label="Apri analisi digitale">v</button>
+            </div>
+          </div>
+
         </section>
       )}
 

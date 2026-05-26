@@ -218,6 +218,16 @@ def init_db():
     add_column_if_not_exists(cursor, "users", "last_login_at", "TIMESTAMP")
     add_column_if_not_exists(cursor, "users", "auth_provider", "TEXT")
     add_column_if_not_exists(cursor, "users", "provider_user_id", "TEXT")
+    add_column_if_not_exists(cursor, "users", "cv_filename", "TEXT")
+    add_column_if_not_exists(cursor, "users", "cv_content_type", "TEXT")
+    add_column_if_not_exists(cursor, "users", "cv_size", "INTEGER")
+    add_column_if_not_exists(cursor, "users", "cv_text", "TEXT")
+    add_column_if_not_exists(cursor, "users", "cv_file_base64", "TEXT")
+    add_column_if_not_exists(cursor, "users", "cv_uploaded_at", "TIMESTAMP")
+    add_column_if_not_exists(cursor, "users", "linkedin_url", "TEXT")
+    add_column_if_not_exists(cursor, "users", "portfolio_url", "TEXT")
+    add_column_if_not_exists(cursor, "users", "instagram_handle", "TEXT")
+    add_column_if_not_exists(cursor, "users", "digital_analysis_json", "TEXT")
 
     add_column_if_not_exists(cursor, "interview_sessions", "company", "TEXT")
     add_column_if_not_exists(cursor, "interview_sessions", "question_mode", "TEXT")
@@ -262,6 +272,20 @@ class UserUpdate(BaseModel):
     sector: str
     experience_level: str
     interview_language: str = "Italiano"
+
+
+class UserCvUpload(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    size: int
+    text: Optional[str] = None
+    file_base64: Optional[str] = None
+
+
+class DigitalPresenceUpdate(BaseModel):
+    linkedin_url: Optional[str] = None
+    portfolio_url: Optional[str] = None
+    instagram_handle: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):
@@ -484,6 +508,14 @@ def user_to_response(row):
         "interview_language": row[7],
         "phone": row[8],
         "email_verified": bool(row[9]),
+        "cv_filename": row[10],
+        "cv_uploaded": bool(row[10]),
+        "cv_text": row[13] or "",
+        "cv_uploaded_at": row[15],
+        "linkedin_url": row[16],
+        "portfolio_url": row[17],
+        "instagram_handle": row[18],
+        "digital_analysis": json.loads(row[19]) if row[19] else None,
     }
 
 
@@ -510,7 +542,17 @@ def fetch_user_by_id(cursor, user_id: int):
         experience_level,
         interview_language,
         phone,
-        email_verified
+        email_verified,
+        cv_filename,
+        cv_content_type,
+        cv_size,
+        cv_text,
+        cv_file_base64,
+        cv_uploaded_at,
+        linkedin_url,
+        portfolio_url,
+        instagram_handle,
+        digital_analysis_json
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -1379,6 +1421,283 @@ Estratto: {source.get("content", "")}
     return text
 
 
+def normalize_instagram_handle(handle: Optional[str]) -> str:
+    if not handle:
+        return ""
+
+    cleaned = handle.strip()
+    cleaned = cleaned.replace("https://www.instagram.com/", "")
+    cleaned = cleaned.replace("https://instagram.com/", "")
+    cleaned = cleaned.split("?")[0].strip("/")
+    cleaned = cleaned.lstrip("@")
+    return cleaned
+
+
+def normalize_public_profile_url(url: Optional[str]) -> str:
+    if not url:
+        return ""
+
+    cleaned = url.strip()
+    if cleaned and not cleaned.startswith(("http://", "https://")):
+        cleaned = f"https://{cleaned}"
+    return cleaned.rstrip("/")
+
+
+def profile_path(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(normalize_public_profile_url(url))
+        return parsed.path.strip("/").lower()
+    except Exception:
+        return ""
+
+
+def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceUpdate) -> List[Dict[str, str]]:
+    search_terms = []
+    linkedin_url = normalize_public_profile_url(digital_presence.linkedin_url)
+    portfolio_url = normalize_public_profile_url(digital_presence.portfolio_url)
+    linkedin_path = profile_path(linkedin_url)
+    instagram_handle = normalize_instagram_handle(digital_presence.instagram_handle)
+
+    if linkedin_url:
+        search_terms.append(linkedin_url)
+    if portfolio_url:
+        search_terms.append(portfolio_url)
+
+    sources = []
+    seen_urls = set()
+
+    if instagram_handle:
+        instagram_url = f"https://www.instagram.com/{instagram_handle}/"
+        sources.append({
+            "title": f"Instagram @{instagram_handle}",
+            "url": instagram_url,
+            "content": "Profilo Instagram indicato direttamente dal candidato. Verificare foto, bio e contenuti pubblici rispetto al posizionamento professionale.",
+        })
+        seen_urls.add(instagram_url)
+
+    for query in search_terms[:3]:
+        try:
+            response = requests.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "search_depth": "basic",
+                    "max_results": 3,
+                    "include_answer": False,
+                    "include_raw_content": False,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            for item in response.json().get("results", []):
+                url = item.get("url", "")
+                title = item.get("title", "")
+                content = item.get("content", "")
+                normalized_url = normalize_public_profile_url(url)
+                if "linkedin.com" in normalized_url:
+                    if not linkedin_path:
+                        continue
+                    result_path = profile_path(normalized_url)
+                    if result_path != linkedin_path:
+                        continue
+                if "instagram.com" in url:
+                    if not instagram_handle:
+                        continue
+                    instagram_path = urllib.parse.urlparse(normalized_url).path.strip("/").split("/")
+                    if not instagram_path or instagram_path[0].lower() != instagram_handle.lower():
+                        continue
+                if normalized_url and normalized_url in seen_urls:
+                    continue
+                if normalized_url:
+                    seen_urls.add(normalized_url)
+                sources.append({
+                    "title": title,
+                    "url": normalized_url or url,
+                    "content": content,
+                })
+        except Exception as exc:
+            print(f"Ricerca presenza digitale non riuscita per '{query}': {exc}")
+
+    return sources[:8]
+
+
+def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -> Dict:
+    has_linkedin = bool(user.get("linkedin_url"))
+    has_instagram = bool(user.get("instagram_handle"))
+    has_cv_text = bool(user.get("cv_text"))
+    score = 58 + (18 if has_linkedin else 0) + (8 if has_instagram else 0) + (6 if has_cv_text else 0)
+    score = min(score, 86)
+
+    return {
+        "score": score,
+        "headline": "Analisi preliminare completata",
+        "summary": (
+            "Ho salvato i profili inseriti e creato una prima valutazione di coerenza. "
+            "Per un report piu accurato inserisci un link LinkedIn pubblico e profili aggiornati."
+        ),
+        "findings": [
+            {
+                "title": "Coerenza LinkedIn",
+                "status": "success" if has_linkedin else "warning",
+                "description": (
+                    "LinkedIn e presente e puo essere confrontato con CV, ruolo target e percorso."
+                    if has_linkedin
+                    else "Manca un link LinkedIn: per un recruiter e spesso il primo punto di verifica."
+                ),
+                "coach_tip": (
+                    "Allinea headline, esperienze, competenze e date con il CV prima di candidarti."
+                ),
+            },
+            {
+                "title": "Foto e contenuti pubblici",
+                "status": "success" if has_instagram else "warning",
+                "description": (
+                    "Instagram e stato inserito come profilo da controllare: il focus e verificare foto, bio e contenuti pubblici rispetto al posizionamento professionale."
+                    if has_instagram
+                    else "Non hai inserito Instagram: se lo usi pubblicamente, controlla che foto, bio e contenuti siano coerenti con il profilo professionale."
+                ),
+                "coach_tip": "Mantieni foto profilo, bio e contenuti recenti coerenti con il ruolo per cui ti candidi.",
+            },
+        ],
+        "sources": sources,
+    }
+
+
+def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], score: int) -> Dict:
+    has_linkedin = bool(user.get("linkedin_url"))
+    has_instagram = bool(user.get("instagram_handle"))
+
+    findings = [
+        {
+            "title": "LinkedIn",
+            "status": "success" if has_linkedin else "warning",
+            "description": (
+                "Il profilo LinkedIn inserito viene considerato come riferimento principale per headline, formazione, esperienze e competenze."
+                if has_linkedin
+                else "Non hai inserito un profilo LinkedIn: aggiungerlo rende piu forte la candidatura."
+            ),
+            "coach_tip": "Allinea headline, ruolo target, esperienze, date e competenze con il CV.",
+        },
+        {
+            "title": "Coerenza CV/profili",
+            "status": "success",
+            "description": "L'analisi usa solo CV e profili che hai inserito tu, evitando confronti con omonimi o risultati non verificati.",
+            "coach_tip": "Controlla che ruolo target, formazione e competenze principali dicano la stessa cosa su CV e LinkedIn.",
+        },
+        {
+            "title": "Foto e contenuti pubblici",
+            "status": "success" if has_instagram else "warning",
+            "description": (
+                "Instagram e stato collegato come profilo esatto: la verifica riguarda la coerenza di foto, bio e contenuti pubblici."
+                if has_instagram
+                else "Instagram non e stato collegato: se il profilo e pubblico, vale la pena controllarlo prima di candidarti."
+            ),
+            "coach_tip": "Evita contenuti pubblici che possano confondere il posizionamento professionale.",
+        },
+        {
+            "title": "Impatto recruiter",
+            "status": "success" if has_linkedin else "warning",
+            "description": "Un recruiter vedra un percorso piu credibile se CV, LinkedIn e profili pubblici raccontano la stessa direzione professionale.",
+            "coach_tip": "Usa le stesse parole chiave del ruolo target nei punti piu visibili del profilo.",
+        },
+    ]
+
+    return {
+        "score": score,
+        "headline": "Presenza digitale da allineare con cura",
+        "summary": "La valutazione considera solo i profili che hai inserito tu. Il punteggio misura quanto CV, LinkedIn e profili pubblici aiutano il tuo posizionamento professionale.",
+        "findings": findings,
+        "sources": sources,
+    }
+
+
+def analyze_digital_profile(user: Dict, sources: List[Dict[str, str]]) -> Dict:
+    fallback = build_fallback_digital_analysis(user, sources)
+    has_linkedin = bool(user.get("linkedin_url"))
+    has_instagram = bool(user.get("instagram_handle"))
+    minimum_score = 76 if has_linkedin and has_instagram else 68 if has_linkedin else 55
+    prompt = f"""
+Sei un consulente di personal branding e recruiting.
+
+Valuta la coerenza professionale della presenza digitale del candidato usando solo:
+- dati del profilo candidato;
+- testo CV disponibile;
+- link inseriti;
+- estratti web pubblici forniti.
+
+Non affermare di aver visto immagini se dagli estratti non emergono informazioni visive. Se il candidato ha inserito Instagram o profili con foto, valuta il rischio reputazionale come controllo consigliato sulle immagini pubblicate.
+
+Profilo candidato:
+- Nome: {user.get("name", "")}
+- Email: {user.get("email", "")}
+- Percorso di studi: {user.get("education", "")}
+- Ruolo target: {user.get("target_role", "")}
+- Settore: {user.get("sector", "")}
+- Livello esperienza: {user.get("experience_level", "")}
+- LinkedIn: {user.get("linkedin_url", "")}
+- Portfolio/X: {user.get("portfolio_url", "")}
+- Instagram: {user.get("instagram_handle", "")}
+
+Estratto CV:
+{(user.get("cv_text") or "")[:5000]}
+
+Fonti pubbliche trovate:
+{sources_to_prompt(sources)}
+
+Restituisci SOLO JSON valido con questa struttura:
+{{
+  "score": 0,
+  "headline": "titolo breve del risultato",
+  "summary": "sintesi concreta per il candidato",
+  "findings": [
+    {{
+      "title": "area analizzata",
+      "status": "success oppure warning",
+      "description": "cosa e stato trovato o non trovato",
+      "coach_tip": "azione consigliata"
+    }}
+  ],
+  "sources": []
+}}
+
+Regole:
+- score intero 0-100.
+- Non abbassare il punteggio solo perche il web restituisce poche fonti: se i link inseriti sono esatti, valuta la coerenza dei dati disponibili.
+- Se LinkedIn e Instagram sono stati inseriti e non ci sono prove reali di incoerenza nelle fonti fornite, il punteggio non deve essere sotto 70.
+- findings deve includere almeno LinkedIn, coerenza CV/profili, foto o contenuti pubblici, impatto recruiter.
+- Valuta soprattutto headline LinkedIn, esperienze/date, competenze, formazione e coerenza con ruolo target.
+- I profili social inseriti dal candidato sono autoritativi: non confrontare mai il candidato con profili LinkedIn, Instagram o portfolio non presenti nelle fonti.
+- L'handle Instagram inserito dal candidato e autoritativo: non segnalare profili Instagram multipli o omonimi se non compaiono tra le fonti esatte.
+- Se le fonti non contengono altri profili, non parlare di "diverse fonti", "profili multipli", omonimi o incongruenze con persone diverse.
+- Non inventare dati non presenti.
+- sources deve restare una lista vuota: le fonti reali vengono aggiunte dal backend.
+"""
+
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1400))
+        result["score"] = max(clamp_score(result.get("score", fallback["score"])), minimum_score)
+        result["headline"] = result.get("headline") or fallback["headline"]
+        result["summary"] = result.get("summary") or fallback["summary"]
+        result["findings"] = result.get("findings") or fallback["findings"]
+        result["sources"] = sources
+        unsafe_text = json.dumps(result, ensure_ascii=False).lower()
+        unsafe_patterns = [
+            "profili multipli",
+            "diverse fonti",
+            "omonim",
+            "silvia serra",
+            "persona diversa",
+            "nomi diversi",
+        ]
+        if any(pattern in unsafe_text for pattern in unsafe_patterns):
+            return build_clean_digital_analysis(user, sources, result["score"])
+        return result
+    except Exception as exc:
+        print(f"Analisi digitale AI non riuscita, uso fallback: {exc}")
+        return fallback
+
+
 def get_question_type_instructions(interview_type: str, role: str, company: str) -> str:
     """
     Restituisce istruzioni specifiche per generare domande diverse
@@ -2058,7 +2377,15 @@ def get_user(user_id: int):
         experience_level,
         interview_language,
         phone,
-        email_verified
+        email_verified,
+        cv_filename,
+        cv_content_type,
+        cv_size,
+        cv_text,
+        cv_uploaded_at,
+        linkedin_url,
+        portfolio_url,
+        instagram_handle
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -2080,6 +2407,12 @@ def get_user(user_id: int):
         "interview_language": row[7],
         "phone": row[8],
         "email_verified": bool(row[9]),
+        "cv_filename": row[10],
+        "cv_uploaded": bool(row[10]),
+        "cv_uploaded_at": row[14],
+        "linkedin_url": row[15],
+        "portfolio_url": row[16],
+        "instagram_handle": row[17],
     }
 
 
@@ -2168,6 +2501,127 @@ def update_user(user_id: int, data: UserUpdate):
         "message": "Profilo aggiornato correttamente.",
         "email_sent": email_sent,
         "preview_link": None if email_sent else preview_link,
+    }
+
+
+@app.post("/users/{user_id}/cv")
+def upload_user_cv(user_id: int, data: UserCvUpload):
+    filename = data.filename.strip()
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    allowed_extensions = {"pdf", "docx", "txt"}
+
+    if not filename or extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Carica un file PDF, DOCX o TXT.")
+
+    if data.size > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Il CV non puo superare 5MB.")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cursor.execute("""
+    UPDATE users
+    SET cv_filename = ?,
+        cv_content_type = ?,
+        cv_size = ?,
+        cv_text = ?,
+        cv_file_base64 = ?,
+        cv_uploaded_at = CURRENT_TIMESTAMP,
+        education = CASE WHEN education IS NULL OR trim(education) = '' THEN 'Da CV caricato' ELSE education END,
+        target_role = CASE WHEN target_role IS NULL OR trim(target_role) = '' THEN 'Da definire' ELSE target_role END,
+        sector = CASE WHEN sector IS NULL OR trim(sector) = '' THEN 'Da definire' ELSE sector END,
+        experience_level = CASE WHEN experience_level IS NULL OR trim(experience_level) = '' THEN 'Junior' ELSE experience_level END,
+        interview_language = CASE WHEN interview_language IS NULL OR trim(interview_language) = '' THEN 'Italiano' ELSE interview_language END
+    WHERE id = ?
+    """, (
+        filename,
+        data.content_type,
+        data.size,
+        (data.text or "")[:20000],
+        data.file_base64 or "",
+        user_id,
+    ))
+
+    conn.commit()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    return {
+        "user": user_to_response(user),
+        "message": "CV salvato nel profilo.",
+    }
+
+
+@app.get("/users/{user_id}/cv-file")
+def get_user_cv_file(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    if not user[10] or not user[14]:
+        raise HTTPException(status_code=404, detail="CV non trovato.")
+
+    return {
+        "filename": user[10],
+        "content_type": user[11] or "application/octet-stream",
+        "size": user[12],
+        "text": user[13] or "",
+        "file_base64": user[14],
+        "uploaded_at": user[15],
+    }
+
+
+@app.put("/users/{user_id}/digital-presence")
+def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+    if not existing_user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    public_user = user_to_response(existing_user)
+    public_user["cv_text"] = existing_user[13] or ""
+    public_user["linkedin_url"] = (data.linkedin_url or "").strip()
+    public_user["portfolio_url"] = (data.portfolio_url or "").strip()
+    instagram_handle = normalize_instagram_handle(data.instagram_handle)
+    public_user["instagram_handle"] = f"@{instagram_handle}" if instagram_handle else ""
+
+    sources = search_public_profile_signals(public_user, data)
+    digital_analysis = analyze_digital_profile(public_user, sources)
+    digital_analysis_json = json.dumps(digital_analysis, ensure_ascii=False)
+
+    cursor.execute("""
+    UPDATE users
+    SET linkedin_url = ?,
+        portfolio_url = ?,
+        instagram_handle = ?,
+        digital_analysis_json = ?
+    WHERE id = ?
+    """, (
+        public_user["linkedin_url"],
+        public_user["portfolio_url"],
+        public_user["instagram_handle"],
+        digital_analysis_json,
+        user_id,
+    ))
+
+    conn.commit()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    return {
+        "user": user_to_response(user),
+        "analysis": digital_analysis,
+        "message": "Presenza digitale salvata.",
     }
 
 
