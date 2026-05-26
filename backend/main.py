@@ -2416,6 +2416,55 @@ def get_user(user_id: int):
     }
 
 
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cursor.execute("""
+    DELETE FROM question_web_sources
+    WHERE question_id IN (
+        SELECT q.id
+        FROM questions q
+        JOIN interview_sessions s ON q.session_id = s.id
+        WHERE s.user_id = ?
+    )
+    """, (user_id,))
+
+    cursor.execute("""
+    DELETE FROM answers
+    WHERE question_id IN (
+        SELECT q.id
+        FROM questions q
+        JOIN interview_sessions s ON q.session_id = s.id
+        WHERE s.user_id = ?
+    )
+    """, (user_id,))
+
+    cursor.execute("""
+    DELETE FROM questions
+    WHERE session_id IN (
+        SELECT id
+        FROM interview_sessions
+        WHERE user_id = ?
+    )
+    """, (user_id,))
+
+    cursor.execute("DELETE FROM interview_sessions WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    conn.commit()
+    conn.close()
+
+    return {"message": "Profilo eliminato correttamente."}
+
+
 @app.put("/users/{user_id}")
 def update_user(user_id: int, data: UserUpdate):
     email = validate_email_address(data.email) if data.email else None
@@ -2501,6 +2550,38 @@ def update_user(user_id: int, data: UserUpdate):
         "message": "Profilo aggiornato correttamente.",
         "email_sent": email_sent,
         "preview_link": None if email_sent else preview_link,
+    }
+
+
+@app.delete("/users/{user_id}/cv")
+def delete_user_cv(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cursor.execute("""
+    UPDATE users
+    SET cv_filename = NULL,
+        cv_content_type = NULL,
+        cv_size = NULL,
+        cv_text = NULL,
+        cv_file_base64 = NULL,
+        cv_uploaded_at = NULL,
+        digital_analysis_json = NULL
+    WHERE id = ?
+    """, (user_id,))
+
+    conn.commit()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    return {
+        "user": user_to_response(user),
+        "message": "CV eliminato correttamente.",
     }
 
 

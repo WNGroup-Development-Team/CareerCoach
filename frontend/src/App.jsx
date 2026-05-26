@@ -146,6 +146,18 @@ function PencilIcon() {
   );
 }
 
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M6 6l1 14h10l1-14" />
+      <path d="M10 11v5" />
+      <path d="M14 11v5" />
+    </svg>
+  );
+}
+
 function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [showTransition, setShowTransition] = useState(false);
@@ -693,6 +705,117 @@ function App() {
     }
   };
 
+  const deleteCv = async () => {
+    resetError();
+
+    if (!profile.cv_filename) {
+      setError("Non c'e nessun CV da eliminare.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Vuoi eliminare il CV caricato? Potrai caricarne uno nuovo dal profilo."
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv`, {
+        method: "DELETE",
+      }, 15000);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nell'eliminazione del CV.");
+        return;
+      }
+
+      setProfile((current) => ({
+        ...current,
+        ...data.user,
+        cv_uploaded: false,
+        cv_filename: "",
+        cv_text: "",
+      }));
+      setCvFile(null);
+      setCvPreview(null);
+      setDigitalAnalysis(null);
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deleteProfile = async () => {
+    resetError();
+
+    const confirmed = window.confirm(
+      "Vuoi eliminare definitivamente il profilo? Verranno rimossi account, CV e storico colloqui."
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}`, {
+        method: "DELETE",
+      }, 15000);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nell'eliminazione del profilo.");
+        return;
+      }
+
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+      setAuthToken("");
+      setUserId(null);
+      setProfile({
+        name: "",
+        email: "",
+        phone: "",
+        education: "",
+        target_role: "",
+        sector: "",
+        experience_level: "Junior",
+        interview_language: "Italiano",
+        cv_filename: "",
+        cv_uploaded: false,
+        cv_text: "",
+        linkedin_url: "",
+        portfolio_url: "",
+        instagram_handle: "",
+      });
+      setDigitalPresence({
+        linkedin_url: "",
+        portfolio_url: "",
+        instagram_handle: "",
+      });
+      setDigitalAnalysis(null);
+      setCvFile(null);
+      setCvPreview(null);
+      setHistory([]);
+      setProgress(null);
+      setStepHistory([]);
+      window.history.replaceState({ careerCoachStep: "auth" }, "", window.location.pathname);
+      setStep("auth");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const renderPasswordField = (field, value, placeholder, autoComplete) => (
     <div className="password-field">
       <input
@@ -807,7 +930,7 @@ function App() {
       });
       setCvFile(null);
       setCvPreview(null);
-      transitionToStep("home");
+      transitionToStep("cv-digital");
     } catch (err) {
       console.error(err);
       setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
@@ -1380,8 +1503,8 @@ function App() {
                 le tue possibilita di successo.
               </p>
               <button onClick={startCvPath}>
-                Inizia ottimizzazione
-                <span>-&gt;</span>
+                Inizia Ottimizzazione
+               
               </button>
             </div>
           </div>
@@ -1396,7 +1519,7 @@ function App() {
               </p>
               <button onClick={() => transitionToStep("gym")}>
                 Avvia simulazione
-                <span>-&gt;</span>
+                
               </button>
             </div>
           </div>
@@ -1613,7 +1736,6 @@ function App() {
 
           <button className="cv-next-button" onClick={uploadCv} disabled={loading || !cvFile}>
             Prosegui con l'analisi
-            <span>-&gt;</span>
           </button>
         </section>
       )}
@@ -1659,11 +1781,10 @@ function App() {
 
           <button className="cv-next-button" onClick={analyzeDigitalPresence} disabled={loading}>
             Analizza Coerenza Digitale
-            <span>-&gt;</span>
           </button>
 
-          <button className="cv-skip-button" onClick={() => transitionToStep("gym")}>
-            Salta per ora
+          <button className="cv-skip-button" onClick={() => transitionToStep("profile")}>
+            Salta per ora e aggiorna dal profilo
           </button>
         </section>
       )}
@@ -1729,7 +1850,7 @@ function App() {
 
           <button className="cv-next-button" onClick={() => transitionToStep("gym")}>
             Avanti
-            <span>-&gt;</span>
+            
           </button>
         </section>
       )}
@@ -1805,7 +1926,7 @@ function App() {
             </div>
             <button className="profile-analysis-button" type="button" onClick={() => transitionToStep("cv-digital")}>
               Analisi digitale
-              <span>-&gt;</span>
+            
             </button>
           </div>
 
@@ -1884,6 +2005,16 @@ function App() {
                 >
                   <PencilIcon />
                 </button>
+                <button
+                  className="danger-icon-button"
+                  type="button"
+                  onClick={deleteCv}
+                  disabled={!profile.cv_filename || loading}
+                  aria-label="Elimina CV"
+                  title="Elimina CV"
+                >
+                  <TrashIcon />
+                </button>
               </div>
             </div>
             <div>
@@ -1894,6 +2025,16 @@ function App() {
               </div>
               <button type="button" onClick={() => transitionToStep("cv-digital")} aria-label="Apri analisi digitale">v</button>
             </div>
+          </div>
+
+          <div className="profile-danger-zone">
+            <div>
+              <strong>Elimina profilo</strong>
+              <p>Rimuove account, CV e storico salvato in CareerCoach.</p>
+            </div>
+            <button type="button" onClick={deleteProfile} disabled={loading}>
+              Elimina profilo
+            </button>
           </div>
 
         </section>

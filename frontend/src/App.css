@@ -1934,6 +1934,50 @@ textarea {
   opacity: 0.45;
 }
 
+.document-actions .danger-icon-button {
+  background: #fff1f0;
+  color: #c2413b;
+}
+
+.profile-danger-zone {
+  margin-top: 18px;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
+  border: 1px solid #ffd6d2;
+  border-radius: 8px;
+  background: #fff8f7;
+}
+
+.profile-danger-zone strong {
+  color: #7f1d1d;
+}
+
+.profile-danger-zone p {
+  margin: 4px 0 0;
+  color: #9f4a45;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.profile-danger-zone button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 999px;
+  background: #c2413b;
+  color: #ffffff;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.profile-danger-zone button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .profile-edit-card {
   margin-top: 8px;
 }
@@ -2030,6 +2074,10 @@ textarea {
 
   .document-actions {
     gap: 6px;
+  }
+
+  .profile-danger-zone {
+    grid-template-columns: 1fr;
   }
 
   .auth-page {
