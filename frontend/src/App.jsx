@@ -4,6 +4,13 @@ import logoCareerCoach from "./assets/career-coach-logo.png";
 
 const API_URL = "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
+const INTRO_SPLASH_DURATION_MS = 3000;
+const TRANSITION_DURATION_MS = 2000;
+
+const wait = (duration) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, duration);
+  });
 
 async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
@@ -68,7 +75,34 @@ function isProfileComplete(profile) {
   );
 }
 
+function SplashScreen({
+  slogan = "Allenati oggi, conquista il colloquio di domani",
+  mode = "intro",
+}) {
+  const isLoadingMode = mode === "loading";
+
+  return (
+    <section className={`splash-page splash-page-${mode}`} aria-label="CareerCoach">
+      <div className="splash-brand">
+        <img
+          className="auth-logo splash-logo"
+          src={logoCareerCoach}
+          alt="Logo Career Coach"
+        />
+        <p className="auth-app-title splash-title">CareerCoach</p>
+        {isLoadingMode ? (
+          <div className="splash-spinner" aria-label="Caricamento" />
+        ) : (
+          <p className="splash-slogan">{slogan}</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function App() {
+  const [showSplash, setShowSplash] = useState(true);
+  const [showTransition, setShowTransition] = useState(false);
   const [step, setStep] = useState("auth");
   const [authMode, setAuthMode] = useState("login");
 
@@ -125,6 +159,29 @@ function App() {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    const splashTimer = setTimeout(() => {
+      setShowSplash(false);
+    }, INTRO_SPLASH_DURATION_MS);
+
+    return () => clearTimeout(splashTimer);
+  }, []);
+
+  useEffect(() => {
+    let transitionTimer;
+
+    if (loading) {
+      setShowTransition(true);
+      return () => clearTimeout(transitionTimer);
+    }
+
+    transitionTimer = setTimeout(() => {
+      setShowTransition(false);
+    }, TRANSITION_DURATION_MS);
+
+    return () => clearTimeout(transitionTimer);
+  }, [loading]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const verifyToken = params.get("verify");
     const resetToken = params.get("reset");
@@ -176,6 +233,7 @@ function App() {
   const socialLogin = async (provider) => {
     resetError();
     setLoading(true);
+    let isRedirecting = false;
 
     try {
       const response = await fetchWithTimeout(`${API_URL}/auth/oauth/${provider}/url`, {}, 10000);
@@ -190,12 +248,16 @@ function App() {
         return;
       }
 
+      isRedirecting = true;
+      await wait(TRANSITION_DURATION_MS);
       window.location.href = data.auth_url;
     } catch (err) {
       console.error(err);
       setError("Errore nell'avvio dell'accesso social. Controlla che il backend sia avviato.");
     } finally {
-      setLoading(false);
+      if (!isRedirecting) {
+        setLoading(false);
+      }
     }
   };
 
@@ -210,6 +272,16 @@ function App() {
     setError("");
     setAuthMessage("");
     setPreviewLink("");
+  };
+
+  const transitionToStep = (nextStep) => {
+    resetError();
+    setShowTransition(true);
+
+    setTimeout(() => {
+      setStep(nextStep);
+      setShowTransition(false);
+    }, TRANSITION_DURATION_MS);
   };
 
   const applyAuthenticatedUser = (token, user) => {
@@ -464,7 +536,7 @@ function App() {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     setAuthToken("");
     setUserId(null);
-    setStep("auth");
+    transitionToStep("auth");
 
     if (token) {
       try {
@@ -866,7 +938,7 @@ function App() {
     setFeedback(null);
     setSpeechMetrics(null);
     setAnswerMode("text");
-    setStep("question");
+    transitionToStep("question");
   };
 
   const startNewTraining = () => {
@@ -882,8 +954,12 @@ function App() {
     setCurrentQuestionIndex(0);
     setAllFeedbacks([]);
 
-    setStep("gym");
+    transitionToStep("gym");
   };
+
+  if (showSplash) {
+    return <SplashScreen />;
+  }
 
   return (
     <div className={step === "auth" ? "page auth-page" : "page"}>
@@ -909,14 +985,18 @@ function App() {
 
       {userId && (
         <nav className="navbar">
-          <button onClick={() => setStep("gym")}>Palestra colloqui</button>
+          <button onClick={() => transitionToStep("gym")}>Palestra colloqui</button>
           <button onClick={loadHistory}>Storico</button>
           <button onClick={loadProgress}>Progressi</button>
           <button onClick={logoutUser}>Esci</button>
         </nav>
       )}
 
-      {loading && <div className="loading">Caricamento...</div>}
+      {showTransition && !showSplash && (
+        <SplashScreen
+          mode="loading"
+        />
+      )}
       {error && <div className="error">{error}</div>}
       {authMessage && <div className="success-message">{authMessage}</div>}
       {previewLink && (
@@ -928,14 +1008,16 @@ function App() {
 
       {step === "auth" && (
         <section className="auth-shell">
+          <div className="auth-brand-top">
+            <img
+              className="auth-logo"
+              src={logoCareerCoach}
+              alt="Logo Career Coach"
+            />
+            <p className="auth-app-title">CareerCoach</p>
+          </div>
           <div className="auth-panel">
             <div className="auth-card">
-              <img
-                className="auth-logo"
-                src={logoCareerCoach}
-                alt="Logo Career Coach"
-              />
-              <p className="auth-eyebrow">Area personale</p>
               <h3>
                 {authMode === "register"
                   ? "Crea il tuo account"
@@ -943,20 +1025,16 @@ function App() {
                     ? "Recupera la password"
                     : authMode === "reset"
                       ? "Scegli una nuova password"
-                      : "Bentornato"}
+                      : "Accedi"}
               </h3>
               <p className="auth-intro">
-                Accedi con email, Gmail, Apple o LinkedIn.
+                Accedi con email, Gmail o LinkedIn.
               </p>
 
               <div className="oauth-grid">
                 <button onClick={() => socialLogin("google")} disabled={loading}>
                   <span>G</span>
                   Google
-                </button>
-                <button onClick={() => socialLogin("apple")} disabled={loading}>
-                  <span></span>
-                  Apple
                 </button>
                 <button onClick={() => socialLogin("linkedin")} disabled={loading}>
                   <span>in</span>
@@ -1340,7 +1418,7 @@ function App() {
               Invia risposta
             </button>
 
-            <button className="secondary-button" onClick={() => setStep("gym")}>
+            <button className="secondary-button" onClick={() => transitionToStep("gym")}>
               Torna alla palestra
             </button>
           </div>
@@ -1498,7 +1576,7 @@ function App() {
             </div>
           ))}
 
-          <button className="primary-button" onClick={() => setStep("gym")}>
+          <button className="primary-button" onClick={() => transitionToStep("gym")}>
             Torna alla palestra
           </button>
         </section>
@@ -1561,7 +1639,7 @@ function App() {
             </>
           )}
 
-          <button className="primary-button" onClick={() => setStep("gym")}>
+          <button className="primary-button" onClick={() => transitionToStep("gym")}>
             Torna alla palestra
           </button>
         </section>
