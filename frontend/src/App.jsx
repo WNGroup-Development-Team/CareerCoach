@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
+import logoCareerCoach from "./assets/career-coach-logo.png";
 
 const API_URL = "http://127.0.0.1:8000";
+const AUTH_TOKEN_KEY = "careercoach_auth_token";
 
 async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
@@ -57,14 +59,39 @@ function analyzeSpeech(text, durationSeconds) {
   };
 }
 
+function isProfileComplete(profile) {
+  return Boolean(
+    profile.name.trim() &&
+      profile.education.trim() &&
+      profile.target_role.trim() &&
+      profile.sector.trim()
+  );
+}
+
 function App() {
-  const [step, setStep] = useState("profile");
+  const [step, setStep] = useState("auth");
+  const [authMode, setAuthMode] = useState("login");
 
   const [userId, setUserId] = useState(null);
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem(AUTH_TOKEN_KEY) || "");
+  const [authMessage, setAuthMessage] = useState("");
+  const [previewLink, setPreviewLink] = useState("");
+  const [visiblePasswords, setVisiblePasswords] = useState({});
+
+  const [authForm, setAuthForm] = useState({
+    name: "",
+    email: "",
+    phone: "",
+    password: "",
+    confirmPassword: "",
+    identifier: "",
+    newPassword: ""
+  });
 
   const [profile, setProfile] = useState({
     name: "",
     email: "",
+    phone: "",
     education: "",
     target_role: "",
     sector: "",
@@ -97,6 +124,81 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const verifyToken = params.get("verify");
+    const resetToken = params.get("reset");
+    const oauthToken = params.get("oauth_token");
+
+    if (oauthToken) {
+      localStorage.setItem(AUTH_TOKEN_KEY, oauthToken);
+      setAuthToken(oauthToken);
+      loadSession(oauthToken);
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
+    }
+
+    if (verifyToken) {
+      verifyEmail(verifyToken);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    if (resetToken) {
+      setAuthMode("reset");
+      setAuthForm((current) => ({ ...current, resetToken }));
+      setStep("auth");
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!authToken) {
+      return;
+    }
+
+    loadSession(authToken);
+  }, []);
+
+  const updateAuthForm = (field, value) => {
+    setAuthForm({
+      ...authForm,
+      [field]: value,
+    });
+  };
+
+  const togglePasswordVisibility = (field) => {
+    setVisiblePasswords((current) => ({
+      ...current,
+      [field]: !current[field],
+    }));
+  };
+
+  const socialLogin = async (provider) => {
+    resetError();
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/oauth/${provider}/url`, {}, 10000);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(
+          typeof data.detail === "string"
+            ? data.detail
+            : "Accesso social non configurato."
+        );
+        return;
+      }
+
+      window.location.href = data.auth_url;
+    } catch (err) {
+      console.error(err);
+      setError("Errore nell'avvio dell'accesso social. Controlla che il backend sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const updateProfile = (field, value) => {
     setProfile({
       ...profile,
@@ -106,7 +208,293 @@ function App() {
 
   const resetError = () => {
     setError("");
+    setAuthMessage("");
+    setPreviewLink("");
   };
+
+  const applyAuthenticatedUser = (token, user) => {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+    setAuthToken(token);
+    setUserId(user.id);
+    setProfile({
+      name: user.name || "",
+      email: user.email || "",
+      phone: user.phone || "",
+      education: user.education || "",
+      target_role: user.target_role || "",
+      sector: user.sector || "",
+      experience_level: user.experience_level || "Junior",
+      interview_language: user.interview_language || "Italiano",
+    });
+    setStep(isProfileComplete({
+      name: user.name || "",
+      education: user.education || "",
+      target_role: user.target_role || "",
+      sector: user.sector || "",
+      email: user.email || "",
+      phone: user.phone || "",
+      experience_level: user.experience_level || "Junior",
+      interview_language: user.interview_language || "Italiano",
+    }) ? "gym" : "profile");
+  };
+
+  const loadSession = async (token) => {
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/me`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        setAuthToken("");
+        setUserId(null);
+        setStep("auth");
+        return;
+      }
+
+      applyAuthenticatedUser(token, data.user);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const registerUser = async () => {
+    resetError();
+
+    if (!authForm.name.trim()) {
+      setError("Inserisci il nome.");
+      return;
+    }
+
+    if (!authForm.email.trim()) {
+      setError("Inserisci l'email.");
+      return;
+    }
+
+    if (authForm.password !== authForm.confirmPassword) {
+      setError("Le password non coincidono.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          name: authForm.name,
+          email: authForm.email,
+          phone: authForm.phone,
+          password: authForm.password
+        })
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nella registrazione.");
+        return;
+      }
+
+      setAuthMessage(data.message || "Account creato. Controlla la tua email.");
+      setPreviewLink(data.preview_link || "");
+      setAuthMode("login");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loginUser = async () => {
+    resetError();
+
+    if (!authForm.identifier.trim() || !authForm.password.trim()) {
+      setError("Inserisci email/telefono e password.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          identifier: authForm.identifier,
+          password: authForm.password
+        })
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nell'accesso.");
+        return;
+      }
+
+      applyAuthenticatedUser(data.token, data.user);
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const verifyEmail = async (token) => {
+    resetError();
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/verify-email`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ token })
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Verifica email non riuscita.");
+        setStep("auth");
+        return;
+      }
+
+      setAuthMessage(data.message || "Email verificata.");
+      applyAuthenticatedUser(data.token, data.user);
+    } catch (err) {
+      console.error(err);
+      setError("Errore durante la verifica email.");
+      setStep("auth");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const requestPasswordReset = async () => {
+    resetError();
+
+    if (!authForm.identifier.trim()) {
+      setError("Inserisci email o numero associato all'account.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/forgot-password`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ identifier: authForm.identifier })
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nel recupero password.");
+        return;
+      }
+
+      setAuthMessage(data.message);
+      setPreviewLink(data.preview_link || "");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resetPassword = async () => {
+    resetError();
+
+    if (!authForm.newPassword.trim()) {
+      setError("Inserisci una nuova password.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/auth/reset-password`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          token: authForm.resetToken,
+          password: authForm.newPassword
+        })
+      }, 15000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nel reset password.");
+        return;
+      }
+
+      setAuthMessage(data.message);
+      setAuthMode("login");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const logoutUser = async () => {
+    const token = authToken;
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    setAuthToken("");
+    setUserId(null);
+    setStep("auth");
+
+    if (token) {
+      try {
+        await fetchWithTimeout(`${API_URL}/auth/logout`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ token })
+        }, 10000);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+  };
+
+  const renderPasswordField = (field, value, placeholder, autoComplete) => (
+    <div className="password-field">
+      <input
+        type={visiblePasswords[field] ? "text" : "password"}
+        value={value}
+        onChange={(e) => updateAuthForm(field, e.target.value)}
+        placeholder={placeholder}
+        autoComplete={autoComplete}
+      />
+      <button type="button" onClick={() => togglePasswordVisibility(field)}>
+        {visiblePasswords[field] ? "Nascondi" : "Mostra"}
+      </button>
+    </div>
+  );
 
   const createProfile = async () => {
     resetError();
@@ -134,8 +522,8 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetchWithTimeout(`${API_URL}/users`, {
-        method: "POST",
+      const response = await fetchWithTimeout(`${API_URL}/users${userId ? `/${userId}` : ""}`, {
+        method: userId ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json"
         },
@@ -149,7 +537,22 @@ function App() {
         return;
       }
 
-      setUserId(data.user_id);
+      const updatedUser = data.user;
+      if (updatedUser) {
+        setUserId(updatedUser.id);
+        setProfile({
+          name: updatedUser.name || "",
+          email: updatedUser.email || "",
+          phone: updatedUser.phone || "",
+          education: updatedUser.education || "",
+          target_role: updatedUser.target_role || "",
+          sector: updatedUser.sector || "",
+          experience_level: updatedUser.experience_level || "Junior",
+          interview_language: updatedUser.interview_language || "Italiano",
+        });
+      } else {
+        setUserId(data.user_id);
+      }
       setStep("gym");
     } catch (err) {
       console.error(err);
@@ -483,28 +886,216 @@ function App() {
   };
 
   return (
-    <div className="page">
-      <header className="header">
-        <div className="logo-box">
-          <span className="logo-icon">CC</span>
-        </div>
+    <div className={step === "auth" ? "page auth-page" : "page"}>
+      {step !== "auth" && (
+        <header className="header">
+          <div className="brand">
+            <img
+              className="app-logo"
+              src={logoCareerCoach}
+              alt="Logo Career Coach"
+            />
 
-        <div>
-          <h1>CareerCoach</h1>
-          <p>La palestra intelligente per simulare colloqui reali</p>
-        </div>
-      </header>
+            <div className="brand-copy">
+              <h1 className="brand-title" aria-label="CareerCoach">
+                <span className="brand-title-career">Career</span>
+                <span className="brand-title-coach">Coach</span>
+              </h1>
+              <p>La palestra intelligente per simulare colloqui reali</p>
+            </div>
+          </div>
+        </header>
+      )}
 
       {userId && (
         <nav className="navbar">
           <button onClick={() => setStep("gym")}>Palestra colloqui</button>
           <button onClick={loadHistory}>Storico</button>
           <button onClick={loadProgress}>Progressi</button>
+          <button onClick={logoutUser}>Esci</button>
         </nav>
       )}
 
       {loading && <div className="loading">Caricamento...</div>}
       {error && <div className="error">{error}</div>}
+      {authMessage && <div className="success-message">{authMessage}</div>}
+      {previewLink && (
+        <div className="info-box">
+          Email non configurata in sviluppo. Apri questo link di test:{" "}
+          <a href={previewLink}>{previewLink}</a>
+        </div>
+      )}
+
+      {step === "auth" && (
+        <section className="auth-shell">
+          <div className="auth-panel">
+            <div className="auth-card">
+              <img
+                className="auth-logo"
+                src={logoCareerCoach}
+                alt="Logo Career Coach"
+              />
+              <p className="auth-eyebrow">Area personale</p>
+              <h3>
+                {authMode === "register"
+                  ? "Crea il tuo account"
+                  : authMode === "forgot"
+                    ? "Recupera la password"
+                    : authMode === "reset"
+                      ? "Scegli una nuova password"
+                      : "Bentornato"}
+              </h3>
+              <p className="auth-intro">
+                Accedi con email, Gmail, Apple o LinkedIn.
+              </p>
+
+              <div className="oauth-grid">
+                <button onClick={() => socialLogin("google")} disabled={loading}>
+                  <span>G</span>
+                  Google
+                </button>
+                <button onClick={() => socialLogin("apple")} disabled={loading}>
+                  <span></span>
+                  Apple
+                </button>
+                <button onClick={() => socialLogin("linkedin")} disabled={loading}>
+                  <span>in</span>
+                  LinkedIn
+                </button>
+              </div>
+
+              <div className="auth-divider">oppure</div>
+
+              <div className="auth-tabs">
+                <button
+                  className={authMode === "login" ? "active" : ""}
+                  onClick={() => {
+                    resetError();
+                    setAuthMode("login");
+                  }}
+                >
+                  Accedi
+                </button>
+                <button
+                  className={authMode === "register" ? "active" : ""}
+                  onClick={() => {
+                    resetError();
+                    setAuthMode("register");
+                  }}
+                >
+                  Registrati
+                </button>
+              </div>
+
+              {authMode === "login" && (
+                <div className="auth-form">
+                  <label>Email o cellulare</label>
+                  <input
+                    value={authForm.identifier}
+                    onChange={(e) => updateAuthForm("identifier", e.target.value)}
+                    placeholder="tua.email@esempio.it"
+                    autoComplete="username"
+                  />
+
+                  <label>Password</label>
+                  {renderPasswordField("password", authForm.password, "Almeno 8 caratteri", "current-password")}
+
+                  <button
+                    className="link-button"
+                    onClick={() => {
+                      resetError();
+                      setAuthMode("forgot");
+                    }}
+                  >
+                    Password dimenticata?
+                  </button>
+
+                  <button className="auth-submit" onClick={loginUser} disabled={loading}>
+                    Accedi
+                  </button>
+                </div>
+              )}
+
+              {authMode === "register" && (
+                <div className="auth-form">
+                  <label>Nome</label>
+                  <input
+                    value={authForm.name}
+                    onChange={(e) => updateAuthForm("name", e.target.value)}
+                    placeholder="Il tuo nome"
+                    autoComplete="name"
+                  />
+
+                  <label>Email</label>
+                  <input
+                    type="email"
+                    value={authForm.email}
+                    onChange={(e) => updateAuthForm("email", e.target.value)}
+                    placeholder="tua.email@esempio.it"
+                    autoComplete="email"
+                  />
+
+                  <label>Cellulare opzionale</label>
+                  <input
+                    type="tel"
+                    value={authForm.phone}
+                    onChange={(e) => updateAuthForm("phone", e.target.value)}
+                    placeholder="+39 333 123 4567"
+                    autoComplete="tel"
+                  />
+
+                  <label>Password</label>
+                  {renderPasswordField("password", authForm.password, "Almeno 8 caratteri, lettere e numeri", "new-password")}
+
+                  <label>Conferma password</label>
+                  {renderPasswordField("confirmPassword", authForm.confirmPassword, "Ripeti la password", "new-password")}
+
+                  <button className="auth-submit" onClick={registerUser} disabled={loading}>
+                    Crea account
+                  </button>
+                </div>
+              )}
+
+              {authMode === "forgot" && (
+                <div className="auth-form">
+                  <label>Email o cellulare associato</label>
+                  <input
+                    value={authForm.identifier}
+                    onChange={(e) => updateAuthForm("identifier", e.target.value)}
+                    placeholder="tua.email@esempio.it"
+                    autoComplete="username"
+                  />
+
+                  <button className="auth-submit" onClick={requestPasswordReset} disabled={loading}>
+                    Invia link di recupero
+                  </button>
+
+                  <button
+                    className="link-button centered"
+                    onClick={() => {
+                      resetError();
+                      setAuthMode("login");
+                    }}
+                  >
+                    Torna all'accesso
+                  </button>
+                </div>
+              )}
+
+              {authMode === "reset" && (
+                <div className="auth-form">
+                  <label>Nuova password</label>
+                  {renderPasswordField("newPassword", authForm.newPassword, "Almeno 8 caratteri, lettere e numeri", "new-password")}
+
+                  <button className="auth-submit" onClick={resetPassword} disabled={loading}>
+                    Aggiorna password
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {step === "profile" && (
         <section className="card">
@@ -527,9 +1118,20 @@ function App() {
             <div>
               <label>Email</label>
               <input
+                type="email"
                 value={profile.email}
                 onChange={(e) => updateProfile("email", e.target.value)}
                 placeholder="Es. silvia@email.com"
+              />
+            </div>
+
+            <div>
+              <label>Cellulare</label>
+              <input
+                type="tel"
+                value={profile.phone}
+                onChange={(e) => updateProfile("phone", e.target.value)}
+                placeholder="Es. +39 333 123 4567"
               />
             </div>
 

@@ -1,12 +1,23 @@
 import os
 import json
+import re
+import unicodedata
 import sqlite3
 import requests
+import secrets
+import hashlib
+import hmac
+import smtplib
+import base64
+import urllib.parse
+from datetime import datetime, timedelta
+from email.message import EmailMessage
 from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -21,6 +32,23 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "noreply@careercoach.local")
+SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
+OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL", "http://localhost:8000")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+APPLE_CLIENT_ID = os.getenv("APPLE_CLIENT_ID")
+APPLE_CLIENT_SECRET = os.getenv("APPLE_CLIENT_SECRET")
+APPLE_REDIRECT_URI = os.getenv("APPLE_REDIRECT_URI")
+LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
+LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
+LINKEDIN_REDIRECT_URI = os.getenv("LINKEDIN_REDIRECT_URI")
 
 if not GROQ_API_KEY:
     raise RuntimeError("Manca GROQ_API_KEY nel file .env")
@@ -41,7 +69,6 @@ groq_client = OpenAI(
 # =========================
 
 app = FastAPI(title="CareerCoach API - Interview Gym")
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,6 +186,39 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS oauth_states (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        state TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    add_column_if_not_exists(cursor, "users", "password_hash", "TEXT")
+    add_column_if_not_exists(cursor, "users", "phone", "TEXT")
+    add_column_if_not_exists(cursor, "users", "email_verified", "INTEGER DEFAULT 0")
+    add_column_if_not_exists(cursor, "users", "email_verification_token", "TEXT")
+    add_column_if_not_exists(cursor, "users", "email_verification_expires_at", "TIMESTAMP")
+    add_column_if_not_exists(cursor, "users", "password_reset_token", "TEXT")
+    add_column_if_not_exists(cursor, "users", "password_reset_expires_at", "TIMESTAMP")
+    add_column_if_not_exists(cursor, "users", "created_at", "TIMESTAMP")
+    add_column_if_not_exists(cursor, "users", "last_login_at", "TIMESTAMP")
+    add_column_if_not_exists(cursor, "users", "auth_provider", "TEXT")
+    add_column_if_not_exists(cursor, "users", "provider_user_id", "TEXT")
+
     add_column_if_not_exists(cursor, "interview_sessions", "company", "TEXT")
     add_column_if_not_exists(cursor, "interview_sessions", "question_mode", "TEXT")
 
@@ -185,11 +245,48 @@ init_db()
 class UserCreate(BaseModel):
     name: str
     email: Optional[str] = None
+    phone: Optional[str] = None
     education: str
     target_role: str
     sector: str
     experience_level: str
     interview_language: str = "Italiano"
+
+
+class UserUpdate(BaseModel):
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    education: str
+    target_role: str
+    sector: str
+    experience_level: str
+    interview_language: str = "Italiano"
+
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    phone: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    identifier: str
+    password: str
+
+
+class TokenRequest(BaseModel):
+    token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    identifier: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str
 
 
 class GenerateQuestionRequest(BaseModel):
@@ -219,6 +316,407 @@ class SearchInterviewQuestionsRequest(BaseModel):
     role: str
     interview_type: str
     language: str = "Italiano"
+
+
+# =========================
+# FUNZIONI AUTH / EMAIL
+# =========================
+
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+BLOCKED_EMAIL_DOMAINS = {
+    "example.com",
+    "example.it",
+    "test.com",
+    "test.it",
+    "email.com",
+    "mailinator.com",
+    "tempmail.com",
+    "10minutemail.com",
+}
+
+
+def utc_now() -> datetime:
+    return datetime.utcnow()
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def normalize_phone(phone: Optional[str]) -> Optional[str]:
+    if not phone:
+        return None
+
+    cleaned = re.sub(r"[^\d+]", "", phone.strip())
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    return cleaned or None
+
+
+def validate_email_address(email: str) -> str:
+    normalized = normalize_email(email)
+    domain = normalized.split("@")[-1] if "@" in normalized else ""
+    tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+
+    if (
+        not EMAIL_PATTERN.match(normalized)
+        or len(tld) < 2
+        or domain in BLOCKED_EMAIL_DOMAINS
+        or ".." in normalized
+    ):
+        raise HTTPException(status_code=400, detail="Inserisci un indirizzo email reale e valido.")
+
+    return normalized
+
+
+def validate_password(password: str):
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="La password deve avere almeno 8 caratteri.")
+
+    if not re.search(r"[A-Za-z]", password) or not re.search(r"\d", password):
+        raise HTTPException(status_code=400, detail="La password deve includere almeno una lettera e un numero.")
+
+
+def validate_phone(phone: Optional[str]) -> Optional[str]:
+    normalized = normalize_phone(phone)
+    if not normalized:
+        return None
+
+    digits = re.sub(r"\D", "", normalized)
+    if len(digits) < 8 or len(digits) > 15:
+        raise HTTPException(status_code=400, detail="Inserisci un numero di cellulare valido.")
+
+    return normalized
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000)
+    return f"pbkdf2_sha256$120000${salt}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: Optional[str]) -> bool:
+    if not stored_hash:
+        return False
+
+    try:
+        algorithm, iterations, salt, expected = stored_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        ).hex()
+        return hmac.compare_digest(digest, expected)
+    except ValueError:
+        return False
+
+
+def make_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def make_frontend_link(kind: str, token: str) -> str:
+    return f"{FRONTEND_URL}/?{kind}={token}"
+
+
+def normalize_oauth_provider(provider: str) -> str:
+    return "google" if provider == "gmail" else provider.strip().lower()
+
+
+def make_oauth_callback_url(provider: str) -> str:
+    provider = normalize_oauth_provider(provider)
+    provider_redirects = {
+        "google": GOOGLE_REDIRECT_URI,
+        "apple": APPLE_REDIRECT_URI,
+        "linkedin": LINKEDIN_REDIRECT_URI,
+    }
+
+    return provider_redirects.get(provider) or f"{OAUTH_REDIRECT_BASE_URL}/auth/oauth/{provider}/callback"
+
+
+def make_frontend_oauth_link(token: str) -> str:
+    return f"{FRONTEND_URL}/?oauth_token={token}"
+
+
+def decode_jwt_payload(token: str) -> Dict:
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")))
+    except Exception:
+        return {}
+
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
+        return False
+
+    try:
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = SMTP_FROM
+        message["To"] = to_email
+        message.set_content(body)
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(message)
+
+        return True
+    except Exception as exc:
+        print(f"Invio email non riuscito: {exc}")
+        return False
+
+
+def user_to_response(row):
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2],
+        "education": row[3],
+        "target_role": row[4],
+        "sector": row[5],
+        "experience_level": row[6],
+        "interview_language": row[7],
+        "phone": row[8],
+        "email_verified": bool(row[9]),
+    }
+
+
+def create_session(cursor, user_id: int) -> str:
+    token = make_token()
+    expires_at = utc_now() + timedelta(days=SESSION_DAYS)
+    cursor.execute("""
+    INSERT INTO user_sessions (user_id, token, expires_at)
+    VALUES (?, ?, ?)
+    """, (user_id, token, expires_at.isoformat()))
+    cursor.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", (user_id,))
+    return token
+
+
+def fetch_user_by_id(cursor, user_id: int):
+    cursor.execute("""
+    SELECT
+        id,
+        name,
+        email,
+        education,
+        target_role,
+        sector,
+        experience_level,
+        interview_language,
+        phone,
+        email_verified
+    FROM users
+    WHERE id = ?
+    """, (user_id,))
+    return cursor.fetchone()
+
+
+def get_oauth_config(provider: str) -> Dict:
+    provider = normalize_oauth_provider(provider)
+
+    configs = {
+        "google": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": make_oauth_callback_url("google"),
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "userinfo_url": "https://openidconnect.googleapis.com/v1/userinfo",
+            "scope": "openid email profile",
+        },
+        "apple": {
+            "client_id": APPLE_CLIENT_ID,
+            "client_secret": APPLE_CLIENT_SECRET,
+            "redirect_uri": make_oauth_callback_url("apple"),
+            "auth_url": "https://appleid.apple.com/auth/authorize",
+            "token_url": "https://appleid.apple.com/auth/token",
+            "userinfo_url": None,
+            "scope": "name email",
+        },
+        "linkedin": {
+            "client_id": LINKEDIN_CLIENT_ID,
+            "client_secret": LINKEDIN_CLIENT_SECRET,
+            "redirect_uri": make_oauth_callback_url("linkedin"),
+            "auth_url": "https://www.linkedin.com/oauth/v2/authorization",
+            "token_url": "https://www.linkedin.com/oauth/v2/accessToken",
+            "userinfo_url": "https://api.linkedin.com/v2/userinfo",
+            "scope": "openid profile email",
+            "setup_hint": (
+                "In LinkedIn Developers abilita il prodotto 'Sign In with LinkedIn using OpenID Connect' "
+                "e registra esattamente il redirect URI configurato nel backend."
+            ),
+        },
+    }
+
+    if provider not in configs:
+        raise HTTPException(status_code=404, detail="Provider non supportato.")
+
+    config = configs[provider]
+    if not config["client_id"] or not config["client_secret"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Configura {provider.upper()}_CLIENT_ID e {provider.upper()}_CLIENT_SECRET nel file .env.",
+        )
+
+    return {"provider": provider, **config}
+
+
+def create_oauth_state(cursor, provider: str) -> str:
+    state = make_token()
+    expires_at = utc_now() + timedelta(minutes=10)
+    cursor.execute("""
+    INSERT INTO oauth_states (provider, state, expires_at)
+    VALUES (?, ?, ?)
+    """, (provider, state, expires_at.isoformat()))
+    return state
+
+
+def build_oauth_authorization_url(provider: str, state: str) -> str:
+    config = get_oauth_config(provider)
+    params = {
+        "client_id": config["client_id"],
+        "redirect_uri": config["redirect_uri"],
+        "response_type": "code",
+        "scope": config["scope"],
+        "state": state,
+    }
+
+    if config["provider"] == "apple":
+        params["response_mode"] = "query"
+
+    return f"{config['auth_url']}?{urllib.parse.urlencode(params)}"
+
+
+def consume_oauth_state(cursor, provider: str, state: str):
+    cursor.execute("""
+    SELECT expires_at
+    FROM oauth_states
+    WHERE provider = ? AND state = ?
+    """, (provider, state))
+    row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=400, detail="Sessione OAuth non valida.")
+
+    cursor.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+
+    if datetime.fromisoformat(row[0]) < utc_now():
+        raise HTTPException(status_code=400, detail="Sessione OAuth scaduta.")
+
+
+def fetch_oauth_profile(provider: str, code: str) -> Dict:
+    config = get_oauth_config(provider)
+    provider = config["provider"]
+    token_response = requests.post(
+        config["token_url"],
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": config["redirect_uri"],
+            "client_id": config["client_id"],
+            "client_secret": config["client_secret"],
+        },
+        headers={"Accept": "application/json"},
+        timeout=15,
+    )
+
+    if token_response.status_code >= 400:
+        provider_hint = config.get("setup_hint", "Controlla client id, client secret e redirect URI del provider.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Accesso {provider} non riuscito durante lo scambio del codice. "
+                f"{provider_hint} Dettaglio provider: {token_response.text[:300]}"
+            ),
+        )
+
+    token_data = token_response.json()
+
+    if provider == "apple":
+        profile = decode_jwt_payload(token_data.get("id_token", ""))
+    else:
+        userinfo_response = requests.get(
+            config["userinfo_url"],
+            headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
+            timeout=15,
+        )
+        if userinfo_response.status_code >= 400:
+            provider_hint = config.get("setup_hint", "Controlla permessi e scope del provider.")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Impossibile leggere il profilo {provider}. "
+                    f"{provider_hint} Dettaglio provider: {userinfo_response.text[:300]}"
+                ),
+            )
+        profile = userinfo_response.json()
+
+    email = profile.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Il provider non ha restituito un indirizzo email.")
+
+    name = (
+        profile.get("name")
+        or " ".join(part for part in [profile.get("given_name"), profile.get("family_name")] if part).strip()
+        or email.split("@")[0]
+    )
+
+    return {
+        "provider_user_id": str(profile.get("sub") or profile.get("id") or email),
+        "email": validate_email_address(email),
+        "name": name,
+    }
+
+
+def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
+    cursor.execute("""
+    SELECT id
+    FROM users
+    WHERE auth_provider = ? AND provider_user_id = ?
+    """, (provider, profile["provider_user_id"]))
+    provider_row = cursor.fetchone()
+    if provider_row:
+        return provider_row[0]
+
+    cursor.execute("SELECT id FROM users WHERE lower(email) = lower(?)", (profile["email"],))
+    email_row = cursor.fetchone()
+    if email_row:
+        cursor.execute("""
+        UPDATE users
+        SET auth_provider = ?,
+            provider_user_id = ?,
+            email_verified = 1
+        WHERE id = ?
+        """, (provider, profile["provider_user_id"], email_row[0]))
+        return email_row[0]
+
+    cursor.execute("""
+    INSERT INTO users (
+        name,
+        email,
+        email_verified,
+        auth_provider,
+        provider_user_id,
+        education,
+        target_role,
+        sector,
+        experience_level,
+        interview_language
+    )
+    VALUES (?, ?, 1, ?, ?, '', '', '', 'Junior', 'Italiano')
+    """, (
+        profile["name"],
+        profile["email"],
+        provider,
+        profile["provider_user_id"],
+    ))
+    return cursor.lastrowid
 
 
 # =========================
@@ -403,8 +901,6 @@ def compute_total_score(
     return round(sum(scores) / len(scores))
 
 
-
-
 def build_speaking_feedback_from_metrics(metrics: SpeechMetrics) -> str:
     """
     Costruisce un feedback testuale sul parlato usando le metriche ricevute dal frontend.
@@ -466,58 +962,166 @@ def build_speaking_feedback_from_metrics(metrics: SpeechMetrics) -> str:
     return f"{ritmo} {riempitivi} {struttura}"
 
 
-def is_zero_answer(answer: str, question: str = "") -> bool:
+# =========================
+# FILTRO RISPOSTE NON VALIDE
+# =========================
+
+def normalize_answer_text(text: str) -> str:
     """
-    Riconosce risposte che devono prendere 0:
-    - lettere casuali;
-    - risposta vuota;
-    - 'boh', 'non lo so', 'chi lo sa';
-    - risposta troppo corta;
-    - risposta evidentemente non pertinente.
+    Normalizza il testo per riconoscere meglio risposte non valide:
+    - minuscole;
+    - rimozione accenti;
+    - rimozione punteggiatura;
+    - spazi uniformi.
+    """
+
+    if not text:
+        return ""
+
+    text = text.lower().strip()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(char for char in text if unicodedata.category(char) != "Mn")
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def get_zero_answer_reason(answer: str, question: str = "") -> Optional[str]:
+    """
+    Restituisce il motivo per cui una risposta deve prendere 0.
+    Se la risposta è valutabile, restituisce None.
+
+    Serve per bloccare prima dell'LLM risposte come:
+    - "che criterio usi per valutarmi?";
+    - "quanto mi dai?";
+    - "qual è la risposta giusta?";
+    - "boh", "non lo so";
+    - testo casuale o troppo breve.
     """
 
     if not answer:
-        return True
+        return "Risposta vuota"
 
-    text = answer.strip().lower()
+    original_text = answer.strip()
+    text = normalize_answer_text(original_text)
 
     if len(text) < 3:
-        return True
+        return "Risposta troppo breve"
 
-    zero_phrases = [
+    zero_phrases = {
         "boh",
+        "bo",
+        "mah",
         "non lo so",
         "non so",
         "chi lo sa",
-        "bo",
-        "mah",
+        "non saprei",
         "non ne ho idea",
         "nessuna idea",
-        "non saprei",
         "non mi viene",
         "non mi viene in mente",
         "non voglio rispondere",
         "skip",
         "passo",
         "idk",
-        "i don't know",
+        "i don t know",
         "dont know",
         "no idea"
-    ]
+    }
 
     if text in zero_phrases:
-        return True
-
-    for phrase in zero_phrases:
-        if phrase in text and len(text.split()) <= 6:
-            return True
+        return "Risposta di rinuncia o assenza di contenuto"
 
     words = text.split()
 
     if len(words) < 3:
-        return True
+        return "Risposta troppo breve per essere valutata"
 
-    vowels = "aeiouàèéìòù"
+    for phrase in zero_phrases:
+        if phrase in text and len(words) <= 8:
+            return "Risposta di rinuncia o forte incertezza"
+
+    meta_patterns = [
+        r"\bche criterio\b.*\bvalut",
+        r"\bche criteri\b.*\bvalut",
+        r"\bquale criterio\b.*\bvalut",
+        r"\bquali criteri\b.*\bvalut",
+        r"\bcome\b.*\bvalut",
+        r"\bcome mi valuti\b",
+        r"\bquanto mi dai\b",
+        r"\bquanto mi daresti\b",
+        r"\bche punteggio\b",
+        r"\bche voto\b",
+        r"\bche giudizio\b",
+        r"\bqual e la risposta corretta\b",
+        r"\bqual e la risposta giusta\b",
+        r"\bcosa dovrei rispondere\b",
+        r"\bcosa devo rispondere\b",
+        r"\bmi aiuti\b.*\brispondere\b",
+        r"\bpuoi aiutarmi\b.*\brispondere\b",
+        r"\bpuoi farmi un esempio\b",
+        r"\bfammi un esempio\b",
+        r"\bdammi la risposta\b",
+        r"\bsuggeriscimi\b.*\brisposta\b",
+        r"\bpuoi spiegarmi\b.*\bdomanda\b",
+        r"\bnon ho capito\b.*\bdomanda\b",
+        r"\bcome funziona\b.*\bvalut",
+        r"\bcome funziona\b.*\bsistema\b",
+        r"\bcome funziona\b.*\bcodice\b",
+        r"\bcome e costruito\b.*\bcodice\b",
+        r"\blogica\b.*\bprogetto\b",
+        r"\bsistema di valutazione\b",
+        r"\bcriteri di valutazione\b"
+    ]
+
+    for pattern in meta_patterns:
+        if re.search(pattern, text):
+            return (
+                "Risposta non valida: il candidato fa una domanda sul sistema, "
+                "sulla valutazione o su cosa rispondere"
+            )
+
+    question_words = [
+        "che",
+        "come",
+        "quanto",
+        "quale",
+        "quali",
+        "cosa",
+        "perche",
+        "puoi",
+        "potresti",
+        "sapresti",
+        "mi"
+    ]
+
+    if original_text.endswith("?") and words and words[0] in question_words:
+        return "Risposta non valida: il candidato fa una domanda invece di rispondere"
+
+    irrelevant_short_answers = {
+        "ciao",
+        "ok",
+        "okay",
+        "va bene",
+        "bene",
+        "male",
+        "si",
+        "sì",
+        "no",
+        "forse",
+        "niente",
+        "nulla",
+        "tutto bene",
+        "mi piace",
+        "non mi piace",
+        "dipende"
+    }
+
+    if text in irrelevant_short_answers:
+        return "Risposta troppo generica o non pertinente"
+
+    vowels = "aeiou"
     weird_words = 0
 
     for word in words:
@@ -546,35 +1150,19 @@ def is_zero_answer(answer: str, question: str = "") -> bool:
     weird_ratio = weird_words / len(words)
 
     if weird_ratio >= 0.5:
-        return True
+        return "Risposta indecifrabile o composta da testo casuale"
 
     letters = sum(1 for ch in text if ch.isalpha())
     total = len(text)
 
     if total > 0 and letters / total < 0.45:
-        return True
+        return "Risposta non valutabile perché contiene troppo poco testo significativo"
 
-    irrelevant_short_answers = [
-        "ciao",
-        "ok",
-        "va bene",
-        "bene",
-        "male",
-        "si",
-        "sì",
-        "no",
-        "forse",
-        "niente",
-        "nulla",
-        "tutto bene",
-        "mi piace",
-        "non mi piace"
-    ]
+    return None
 
-    if text in irrelevant_short_answers:
-        return True
 
-    return False
+def is_zero_answer(answer: str, question: str = "") -> bool:
+    return get_zero_answer_reason(answer, question) is not None
 
 
 def build_zero_feedback(
@@ -625,6 +1213,59 @@ def build_zero_feedback(
         ),
         "solution_explanation": solution_explanation
     }
+
+
+def get_speech_metrics_json(metrics: Optional[SpeechMetrics]) -> Optional[str]:
+    if not metrics:
+        return None
+
+    try:
+        return metrics.model_dump_json()
+    except Exception:
+        return metrics.json()
+
+
+def save_answer_result(
+    cursor,
+    question_id: int,
+    user_answer: str,
+    result: Dict,
+    speech_metrics_json: Optional[str]
+):
+    cursor.execute("""
+    INSERT INTO answers (
+        question_id,
+        user_answer,
+        clarity_score,
+        completeness_score,
+        relevance_score,
+        professionalism_score,
+        synthesis_score,
+        speaking_score,
+        total_score,
+        feedback,
+        improved_answer,
+        speaking_feedback,
+        solution_explanation,
+        speech_metrics_json
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        question_id,
+        user_answer,
+        result["clarity_score"],
+        result["completeness_score"],
+        result["relevance_score"],
+        result["professionalism_score"],
+        result["synthesis_score"],
+        result["speaking_score"],
+        result["total_score"],
+        result["feedback"],
+        result["improved_answer"],
+        result["speaking_feedback"],
+        result["solution_explanation"],
+        speech_metrics_json
+    ))
 
 
 def build_search_query(company: str, role: str, interview_type: str, language: str) -> str:
@@ -972,8 +1613,399 @@ def debug():
 # ENDPOINT UTENTI
 # =========================
 
+@app.post("/auth/register")
+def register(data: RegisterRequest):
+    email = validate_email_address(data.email)
+    phone = validate_phone(data.phone)
+    validate_password(data.password)
+
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Inserisci il nome.")
+
+    verification_token = make_token()
+    expires_at = utc_now() + timedelta(hours=24)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id FROM users WHERE lower(email) = lower(?)", (email,))
+    existing_email = cursor.fetchone()
+    if existing_email:
+        conn.close()
+        raise HTTPException(status_code=409, detail="Esiste già un account con questa email.")
+
+    if phone:
+        cursor.execute("SELECT id FROM users WHERE phone = ?", (phone,))
+        existing_phone = cursor.fetchone()
+        if existing_phone:
+            conn.close()
+            raise HTTPException(status_code=409, detail="Questo numero è già associato a un account.")
+
+    cursor.execute("""
+    INSERT INTO users (
+        name,
+        email,
+        phone,
+        password_hash,
+        email_verified,
+        email_verification_token,
+        email_verification_expires_at,
+        education,
+        target_role,
+        sector,
+        experience_level,
+        interview_language
+    )
+    VALUES (?, ?, ?, ?, 0, ?, ?, '', '', '', 'Junior', 'Italiano')
+    """, (
+        name,
+        email,
+        phone,
+        hash_password(data.password),
+        verification_token,
+        expires_at.isoformat(),
+    ))
+
+    conn.commit()
+    conn.close()
+
+    verification_link = make_frontend_link("verify", verification_token)
+    email_sent = send_email(
+        email,
+        "Verifica il tuo account CareerCoach",
+        (
+            "Ciao,\n\n"
+            "per attivare il tuo account CareerCoach apri questo link:\n"
+            f"{verification_link}\n\n"
+            "Il link scade tra 24 ore."
+        ),
+    )
+
+    return {
+        "message": "Account creato. Controlla la tua email per verificare l'accesso.",
+        "email_sent": email_sent,
+        "preview_link": None if email_sent else verification_link,
+    }
+
+
+@app.post("/auth/verify-email")
+def verify_email(data: TokenRequest):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT id, email_verification_expires_at
+    FROM users
+    WHERE email_verification_token = ?
+    """, (data.token,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Link di verifica non valido.")
+
+    user_id, expires_at = row
+    if expires_at and datetime.fromisoformat(expires_at) < utc_now():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Link di verifica scaduto. Registrati di nuovo o richiedi un nuovo link.")
+
+    cursor.execute("""
+    UPDATE users
+    SET email_verified = 1,
+        email_verification_token = NULL,
+        email_verification_expires_at = NULL
+    WHERE id = ?
+    """, (user_id,))
+
+    session_token = create_session(cursor, user_id)
+    user = fetch_user_by_id(cursor, user_id)
+    conn.commit()
+    conn.close()
+
+    return {
+        "token": session_token,
+        "user": user_to_response(user),
+        "message": "Email verificata correttamente.",
+    }
+
+
+@app.post("/auth/login")
+def login(data: LoginRequest):
+    identifier = data.identifier.strip()
+    password = data.password
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if "@" in identifier:
+        identifier = validate_email_address(identifier)
+        cursor.execute("""
+        SELECT id, password_hash, email_verified
+        FROM users
+        WHERE lower(email) = lower(?)
+        """, (identifier,))
+    else:
+        phone = validate_phone(identifier)
+        cursor.execute("""
+        SELECT id, password_hash, email_verified
+        FROM users
+        WHERE phone = ?
+        """, (phone,))
+
+    row = cursor.fetchone()
+    if not row or not verify_password(password, row[1]):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Email/telefono o password non corretti.")
+
+    if not row[2]:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Verifica prima la tua email tramite il link ricevuto.")
+
+    session_token = create_session(cursor, row[0])
+    user = fetch_user_by_id(cursor, row[0])
+    conn.commit()
+    conn.close()
+
+    return {
+        "token": session_token,
+        "user": user_to_response(user),
+    }
+
+
+@app.get("/auth/me")
+def get_current_user(authorization: Optional[str] = Header(default=None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Sessione mancante.")
+
+    token = authorization.replace("Bearer ", "", 1).strip()
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT user_id, expires_at
+    FROM user_sessions
+    WHERE token = ?
+    """, (token,))
+    session = cursor.fetchone()
+
+    if not session:
+        conn.close()
+        raise HTTPException(status_code=401, detail="Sessione non valida.")
+
+    if datetime.fromisoformat(session[1]) < utc_now():
+        cursor.execute("DELETE FROM user_sessions WHERE token = ?", (token,))
+        conn.commit()
+        conn.close()
+        raise HTTPException(status_code=401, detail="Sessione scaduta.")
+
+    user = fetch_user_by_id(cursor, session[0])
+    conn.close()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    return {"user": user_to_response(user)}
+
+
+@app.post("/auth/logout")
+def logout(data: TokenRequest):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_sessions WHERE token = ?", (data.token,))
+    conn.commit()
+    conn.close()
+    return {"message": "Logout effettuato."}
+
+
+@app.get("/auth/oauth/redirect-uris")
+def oauth_redirect_uris():
+    return {
+        "google": make_oauth_callback_url("google"),
+        "apple": make_oauth_callback_url("apple"),
+        "linkedin": make_oauth_callback_url("linkedin"),
+    }
+
+
+@app.get("/auth/oauth/status")
+def oauth_status():
+    providers = ["google", "apple", "linkedin"]
+    status = {}
+
+    for provider in providers:
+        client_id = {
+            "google": GOOGLE_CLIENT_ID,
+            "apple": APPLE_CLIENT_ID,
+            "linkedin": LINKEDIN_CLIENT_ID,
+        }.get(provider)
+        client_secret = {
+            "google": GOOGLE_CLIENT_SECRET,
+            "apple": APPLE_CLIENT_SECRET,
+            "linkedin": LINKEDIN_CLIENT_SECRET,
+        }.get(provider)
+
+        try:
+            config = get_oauth_config(provider)
+            scope = config["scope"]
+            configured = True
+        except HTTPException:
+            scope = None
+            configured = False
+
+        status[provider] = {
+            "configured": configured,
+            "has_client_id": bool(client_id),
+            "has_client_secret": bool(client_secret),
+            "redirect_uri": make_oauth_callback_url(provider),
+            "scope": scope,
+        }
+
+    return status
+
+
+@app.get("/auth/oauth/{provider}/start")
+def start_oauth(provider: str):
+    provider = normalize_oauth_provider(provider)
+    conn = get_connection()
+    cursor = conn.cursor()
+    state = create_oauth_state(cursor, provider)
+    conn.commit()
+    conn.close()
+
+    return RedirectResponse(build_oauth_authorization_url(provider, state))
+
+
+@app.get("/auth/oauth/{provider}/url")
+def get_oauth_url(provider: str):
+    provider = normalize_oauth_provider(provider)
+    conn = get_connection()
+    cursor = conn.cursor()
+    state = create_oauth_state(cursor, provider)
+    auth_url = build_oauth_authorization_url(provider, state)
+    conn.commit()
+    conn.close()
+
+    return {"auth_url": auth_url}
+
+
+@app.get("/auth/oauth/{provider}/callback")
+def oauth_callback(provider: str, code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    provider = normalize_oauth_provider(provider)
+
+    if error:
+        raise HTTPException(status_code=400, detail=f"Accesso social annullato: {error}")
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Risposta OAuth incompleta.")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        consume_oauth_state(cursor, provider, state)
+        profile = fetch_oauth_profile(provider, code)
+        user_id = find_or_create_oauth_user(cursor, provider, profile)
+        session_token = create_session(cursor, user_id)
+        conn.commit()
+    finally:
+        conn.close()
+
+    return RedirectResponse(make_frontend_oauth_link(session_token))
+
+
+@app.get("/auth/linkedin/callback")
+def linkedin_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    return oauth_callback("linkedin", code=code, state=state, error=error)
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(data: ForgotPasswordRequest):
+    identifier = data.identifier.strip()
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if "@" in identifier:
+        identifier = validate_email_address(identifier)
+        cursor.execute("SELECT id, email FROM users WHERE lower(email) = lower(?)", (identifier,))
+    else:
+        phone = validate_phone(identifier)
+        cursor.execute("SELECT id, email FROM users WHERE phone = ?", (phone,))
+
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return {"message": "Se l'account esiste, riceverai un link per reimpostare la password."}
+
+    token = make_token()
+    expires_at = utc_now() + timedelta(hours=1)
+    cursor.execute("""
+    UPDATE users
+    SET password_reset_token = ?,
+        password_reset_expires_at = ?
+    WHERE id = ?
+    """, (token, expires_at.isoformat(), row[0]))
+    conn.commit()
+    conn.close()
+
+    reset_link = make_frontend_link("reset", token)
+    email_sent = send_email(
+        row[1],
+        "Recupero password CareerCoach",
+        (
+            "Ciao,\n\n"
+            "per scegliere una nuova password apri questo link:\n"
+            f"{reset_link}\n\n"
+            "Il link scade tra 1 ora."
+        ),
+    )
+
+    return {
+        "message": "Se l'account esiste, riceverai un link per reimpostare la password.",
+        "email_sent": email_sent,
+        "preview_link": None if email_sent else reset_link,
+    }
+
+
+@app.post("/auth/reset-password")
+def reset_password(data: ResetPasswordRequest):
+    validate_password(data.password)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, password_reset_expires_at
+    FROM users
+    WHERE password_reset_token = ?
+    """, (data.token,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Link di recupero non valido.")
+
+    if row[1] and datetime.fromisoformat(row[1]) < utc_now():
+        conn.close()
+        raise HTTPException(status_code=400, detail="Link di recupero scaduto.")
+
+    cursor.execute("""
+    UPDATE users
+    SET password_hash = ?,
+        password_reset_token = NULL,
+        password_reset_expires_at = NULL
+    WHERE id = ?
+    """, (hash_password(data.password), row[0]))
+    cursor.execute("DELETE FROM user_sessions WHERE user_id = ?", (row[0],))
+    conn.commit()
+    conn.close()
+
+    return {"message": "Password aggiornata. Ora puoi accedere."}
+
+
 @app.post("/users")
 def create_user(data: UserCreate):
+    email = validate_email_address(data.email) if data.email else None
+    phone = validate_phone(data.phone)
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -981,16 +2013,18 @@ def create_user(data: UserCreate):
     INSERT INTO users (
         name,
         email,
+        phone,
         education,
         target_role,
         sector,
         experience_level,
         interview_language
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.name,
-        data.email,
+        email,
+        phone,
         data.education,
         data.target_role,
         data.sector,
@@ -1022,7 +2056,9 @@ def get_user(user_id: int):
         target_role,
         sector,
         experience_level,
-        interview_language
+        interview_language,
+        phone,
+        email_verified
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -1041,7 +2077,97 @@ def get_user(user_id: int):
         "target_role": row[4],
         "sector": row[5],
         "experience_level": row[6],
-        "interview_language": row[7]
+        "interview_language": row[7],
+        "phone": row[8],
+        "email_verified": bool(row[9]),
+    }
+
+
+@app.put("/users/{user_id}")
+def update_user(user_id: int, data: UserUpdate):
+    email = validate_email_address(data.email) if data.email else None
+    phone = validate_phone(data.phone)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, email FROM users WHERE id = ?", (user_id,))
+    existing_user = cursor.fetchone()
+    if not existing_user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    if email:
+        cursor.execute("SELECT id FROM users WHERE lower(email) = lower(?) AND id != ?", (email, user_id))
+        if cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=409, detail="Email già associata a un altro account.")
+
+    if phone:
+        cursor.execute("SELECT id FROM users WHERE phone = ? AND id != ?", (phone, user_id))
+        if cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=409, detail="Numero già associato a un altro account.")
+
+    email_changed = email and existing_user[1] and email.lower() != existing_user[1].lower()
+    verification_token = make_token() if email_changed else None
+    verification_expires = (utc_now() + timedelta(hours=24)).isoformat() if email_changed else None
+
+    cursor.execute("""
+    UPDATE users
+    SET name = ?,
+        email = ?,
+        phone = ?,
+        education = ?,
+        target_role = ?,
+        sector = ?,
+        experience_level = ?,
+        interview_language = ?,
+        email_verified = CASE WHEN ? THEN 0 ELSE email_verified END,
+        email_verification_token = CASE WHEN ? THEN ? ELSE email_verification_token END,
+        email_verification_expires_at = CASE WHEN ? THEN ? ELSE email_verification_expires_at END
+    WHERE id = ?
+    """, (
+        data.name,
+        email,
+        phone,
+        data.education,
+        data.target_role,
+        data.sector,
+        data.experience_level,
+        data.interview_language,
+        1 if email_changed else 0,
+        1 if email_changed else 0,
+        verification_token,
+        1 if email_changed else 0,
+        verification_expires,
+        user_id,
+    ))
+
+    conn.commit()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    preview_link = None
+    email_sent = False
+    if email_changed:
+        preview_link = make_frontend_link("verify", verification_token)
+        email_sent = send_email(
+            email,
+            "Verifica il nuovo indirizzo email CareerCoach",
+            (
+                "Ciao,\n\n"
+                "per confermare il nuovo indirizzo email apri questo link:\n"
+                f"{preview_link}\n\n"
+                "Il link scade tra 24 ore."
+            ),
+        )
+
+    return {
+        "user": user_to_response(user),
+        "message": "Profilo aggiornato correttamente.",
+        "email_sent": email_sent,
+        "preview_link": None if email_sent else preview_link,
     }
 
 
@@ -1447,55 +2573,24 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         interview_language
     ) = row
 
-    if is_zero_answer(data.answer, question_text):
+    speech_metrics_json = get_speech_metrics_json(data.speech_metrics)
+
+    zero_reason = get_zero_answer_reason(data.answer, question_text)
+
+    if zero_reason:
         zero_result = build_zero_feedback(
-            reason="Risposta indecifrabile, non pertinente o priva di contenuto utile",
+            reason=zero_reason,
             question=question_text,
             interview_type=interview_type
         )
 
-        speech_metrics_json = None
-
-        if data.speech_metrics:
-            try:
-                speech_metrics_json = data.speech_metrics.model_dump_json()
-            except Exception:
-                speech_metrics_json = data.speech_metrics.json()
-
-        cursor.execute("""
-        INSERT INTO answers (
-            question_id,
-            user_answer,
-            clarity_score,
-            completeness_score,
-            relevance_score,
-            professionalism_score,
-            synthesis_score,
-            speaking_score,
-            total_score,
-            feedback,
-            improved_answer,
-            speaking_feedback,
-            solution_explanation,
-            speech_metrics_json
+        save_answer_result(
+            cursor=cursor,
+            question_id=question_id,
+            user_answer=data.answer,
+            result=zero_result,
+            speech_metrics_json=speech_metrics_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            question_id,
-            data.answer,
-            zero_result["clarity_score"],
-            zero_result["completeness_score"],
-            zero_result["relevance_score"],
-            zero_result["professionalism_score"],
-            zero_result["synthesis_score"],
-            zero_result["speaking_score"],
-            zero_result["total_score"],
-            zero_result["feedback"],
-            zero_result["improved_answer"],
-            zero_result["speaking_feedback"],
-            zero_result["solution_explanation"],
-            speech_metrics_json
-        ))
 
         cursor.execute("""
         UPDATE interview_sessions
@@ -1557,13 +2652,77 @@ Risposta del candidato:
 
 {speech_info}
 
-Valuta la risposta secondo questi criteri:
+ISTRUZIONE PRIORITARIA:
+Prima di assegnare qualsiasi punteggio, devi decidere internamente se la risposta è una vera risposta alla domanda oppure no.
+
+La classificazione interna può essere solo:
+- VALID_ANSWER
+- NON_ANSWER
+
+NON devi inserire questa classificazione nel JSON finale.
+
+Una risposta è VALID_ANSWER solo se il candidato prova concretamente a rispondere alla domanda del colloquio.
+
+Una risposta è NON_ANSWER se il candidato non fornisce un vero tentativo di risposta alla domanda posta.
+
+Classifica sempre come NON_ANSWER qualsiasi risposta che:
+- faccia una domanda invece di rispondere;
+- chieda come viene valutata la risposta;
+- chieda quali criteri vengono usati per valutare;
+- chieda un voto, un punteggio, un giudizio o una correzione;
+- chieda la risposta corretta;
+- chieda aiuto, suggerimenti o indicazioni su cosa dire;
+- parli del sistema di valutazione, del codice, della logica del progetto o dell'AI invece di rispondere;
+- sia una frase di rinuncia, dubbio o incertezza;
+- sia evasiva, fuori tema o non pertinente;
+- sia troppo generica e non collegata alla domanda originale;
+- sia una richiesta rivolta al recruiter, all'intervistatore o all'assistente;
+- non dimostri alcuna competenza, esperienza, ragionamento o contenuto utile rispetto alla domanda.
+
+Sono NON_ANSWER anche frasi grammaticalmente corrette, educate o comprensibili, se non rispondono alla domanda originale.
+
+Esempi di NON_ANSWER:
+- "che criterio usi per valutare le mie risposte?"
+- "come mi valuti?"
+- "quanto mi dai?"
+- "che voto mi daresti?"
+- "qual è la risposta corretta?"
+- "cosa dovrei rispondere?"
+- "mi aiuti a rispondere?"
+- "puoi farmi un esempio?"
+- "puoi spiegarmi la domanda?"
+- "non lo so"
+- "boh"
+- "non saprei"
+- "non ho idea"
+- "dipende"
+
+REGOLA PRIORITARIA ASSOLUTA:
+Se la risposta viene classificata internamente come NON_ANSWER, devi assegnare obbligatoriamente 0 a TUTTI i punteggi:
+
+clarity_score = 0
+completeness_score = 0
+relevance_score = 0
+professionalism_score = 0
+synthesis_score = 0
+speaking_score = 0
+total_score = 0
+
+Non assegnare mai punteggi parziali a una risposta classificata come NON_ANSWER.
+
+In caso di NON_ANSWER:
+- feedback deve spiegare che il candidato non ha risposto alla domanda posta;
+- improved_answer deve contenere una risposta modello corretta alla domanda originale;
+- speaking_feedback deve spiegare che la risposta non è una risposta valida alla domanda;
+- solution_explanation deve essere compilata solo se la domanda originale è di logica o richiede un ragionamento passo passo, altrimenti deve essere una stringa vuota.
+
+Valuta la risposta sui seguenti criteri:
 1. Chiarezza
 2. Completezza
 3. Pertinenza rispetto al ruolo e all'azienda
 4. Professionalità
 5. Sintesi
-6. Modo di parlare, se sono presenti metriche vocali
+6. Modo di parlare, solo se sono presenti metriche vocali
 
 Restituisci SOLO un JSON valido, senza testo prima e senza testo dopo.
 
@@ -1585,26 +2744,31 @@ La struttura deve essere ESATTAMENTE questa:
 
 Regole di valutazione:
 - Tutti i punteggi devono essere numeri interi compresi tra 0 e 100.
+- Se la risposta è classificata internamente come NON_ANSWER, tutti i punteggi devono essere 0.
 - Se la risposta è incomprensibile, casuale, composta da lettere senza senso o non risponde minimamente alla domanda, assegna 0 a tutti i punteggi.
 - Se la risposta è "boh", "non lo so", "chi lo sa", "non saprei" o simili, assegna 0 a tutti i punteggi.
-- Se la risposta è completamente fuori tema rispetto alla domanda, assegna 0 a pertinenza e un total_score molto basso, massimo 10.
-- Se la risposta è molto vaga ma contiene almeno un minimo di senso, assegna punteggi bassi, tra 5 e 20.
-- Se la risposta usa un lessico povero, confuso o poco professionale, abbassa chiarezza e professionalità.
-- Se la risposta non contiene esempi, motivazioni o contenuti concreti, abbassa completezza.
+- Se la risposta è completamente fuori tema rispetto alla domanda, assegna 0 a tutti i punteggi.
+- Se la risposta fa domande al recruiter, all'intervistatore, all'assistente o all'AI invece di rispondere, assegna 0 a tutti i punteggi.
+- Se la risposta chiede informazioni sulla valutazione, sui criteri, sul punteggio, sul codice o sulla logica del sistema, assegna 0 a tutti i punteggi.
+- Se la risposta è molto vaga ma contiene almeno un minimo tentativo reale di risposta, assegna punteggi bassi, tra 5 e 20.
+- Se la risposta usa un lessico povero, confuso o poco professionale, abbassa clarity_score e professionalism_score.
+- Se la risposta non contiene esempi, motivazioni o contenuti concreti, abbassa completeness_score.
 - Non premiare una risposta solo perché è lunga: deve essere comprensibile, pertinente e utile.
+- Se la risposta è molto prolissa, divaga o contiene molte informazioni non rilevanti, abbassa clarity_score e synthesis_score.
 - improved_answer deve essere SEMPRE valorizzata.
-- Se il candidato non risponde alla domanda, improved_answer deve contenere una risposta modello corretta alla domanda.
+- Se il candidato non risponde alla domanda, improved_answer deve contenere una risposta modello corretta alla domanda originale.
 - Se la domanda è tecnica, improved_answer deve mostrare una risposta tecnica corretta ma credibile per il livello del candidato.
-- Se la domanda è conoscitiva/motivazionale, improved_answer deve mostrare una risposta naturale, professionale e adatta a un colloquio.
+- Se la domanda è conoscitiva o motivazionale, improved_answer deve mostrare una risposta naturale, professionale e adatta a un colloquio.
 - Se la domanda è di logica, improved_answer deve contenere una possibile risposta ragionata e solution_explanation deve contenere la soluzione spiegata passo passo.
-- Se la risposta è errata ma la domanda è di logica, spiega comunque il ragionamento corretto.
-- Se sono presenti metriche vocali, devi obbligatoriamente valutare il modo di parlare usando quei dati.
+- Se la risposta è errata ma la domanda è di logica, spiega comunque il ragionamento corretto in solution_explanation.
+- Se sono presenti metriche vocali e la risposta è valida, devi obbligatoriamente valutare il modo di parlare usando quei dati.
+- Se sono presenti metriche vocali e la risposta è valida, speaking_score deve essere maggiore di 0.
 - Se sono presenti metriche vocali, NON devi mai scrivere che le metriche vocali mancano.
-- Se sono presenti metriche vocali, speaking_score deve essere maggiore di 0, salvo casi di risposta indecifrabile o completamente non valida.
 - Nel campo speaking_feedback devi commentare ritmo, chiarezza espositiva, velocità del parlato, parole riempitive e sicurezza percepita.
-- Se NON ci sono metriche vocali, speaking_score deve essere 0 e speaking_feedback deve dire che la risposta è stata valutata solo sul testo.
+- Se NON ci sono metriche vocali e la risposta è valida, speaking_score deve essere 0 e speaking_feedback deve dire che la risposta è stata valutata solo sul testo.
+- Se la risposta non è valida, speaking_score deve essere 0 anche se sono presenti metriche vocali.
 - Non inventare esperienze personali non presenti nella risposta.
-- La risposta migliorata deve essere naturale e credibile.
+- La risposta migliorata deve essere naturale, credibile e coerente con la domanda originale.
 - Restituisci solo JSON valido.
 """
 
@@ -1624,10 +2788,21 @@ Regole di valutazione:
     professionalism_score = clamp_score(result.get("professionalism_score", 0))
     synthesis_score = clamp_score(result.get("synthesis_score", 0))
 
+    all_textual_scores_are_zero = all(score == 0 for score in [
+        clarity_score,
+        completeness_score,
+        relevance_score,
+        professionalism_score,
+        synthesis_score
+    ])
+
     if has_speech_metrics:
         speaking_score = clamp_score(result.get("speaking_score", 0))
 
-        if speaking_score == 0:
+        # Non trasformare mai lo speaking_score in 60 se il contenuto è già stato valutato 0.
+        if all_textual_scores_are_zero:
+            speaking_score = 0
+        elif speaking_score == 0:
             speaking_score = 60
     else:
         speaking_score = 0
@@ -1640,6 +2815,11 @@ Regole di valutazione:
         synthesis_score,
         speaking_score
     )
+
+    # Se tutti i punteggi testuali sono zero, il totale deve restare zero.
+    if all_textual_scores_are_zero:
+        total_score = 0
+        speaking_score = 0
 
     feedback = result.get("feedback", "")
     improved_answer = result.get("improved_answer", "")
@@ -1663,53 +2843,36 @@ Regole di valutazione:
             or "solo sul contenuto testuale" in speaking_feedback.lower()
         )
 
-        if invalid_speaking_feedback:
+        if all_textual_scores_are_zero:
+            speaking_feedback = "Il modo di parlare non viene valutato perché la risposta non è valida rispetto alla domanda posta."
+        elif invalid_speaking_feedback:
             speaking_feedback = build_speaking_feedback_from_metrics(data.speech_metrics)
     else:
-        speaking_feedback = "La risposta è stata valutata solo sul contenuto testuale perché non sono presenti dati sul parlato."
+        speaking_feedback = (
+            "La risposta è stata valutata solo sul contenuto testuale perché non sono presenti dati sul parlato."
+        )
 
-    speech_metrics_json = None
+    final_result = {
+        "clarity_score": clarity_score,
+        "completeness_score": completeness_score,
+        "relevance_score": relevance_score,
+        "professionalism_score": professionalism_score,
+        "synthesis_score": synthesis_score,
+        "speaking_score": speaking_score,
+        "total_score": total_score,
+        "feedback": feedback,
+        "improved_answer": improved_answer,
+        "speaking_feedback": speaking_feedback,
+        "solution_explanation": solution_explanation
+    }
 
-    if data.speech_metrics:
-        try:
-            speech_metrics_json = data.speech_metrics.model_dump_json()
-        except Exception:
-            speech_metrics_json = data.speech_metrics.json()
-
-    cursor.execute("""
-    INSERT INTO answers (
-        question_id,
-        user_answer,
-        clarity_score,
-        completeness_score,
-        relevance_score,
-        professionalism_score,
-        synthesis_score,
-        speaking_score,
-        total_score,
-        feedback,
-        improved_answer,
-        speaking_feedback,
-        solution_explanation,
-        speech_metrics_json
+    save_answer_result(
+        cursor=cursor,
+        question_id=question_id,
+        user_answer=data.answer,
+        result=final_result,
+        speech_metrics_json=speech_metrics_json
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        question_id,
-        data.answer,
-        clarity_score,
-        completeness_score,
-        relevance_score,
-        professionalism_score,
-        synthesis_score,
-        speaking_score,
-        total_score,
-        feedback,
-        improved_answer,
-        speaking_feedback,
-        solution_explanation,
-        speech_metrics_json
-    ))
 
     cursor.execute("""
     UPDATE interview_sessions
@@ -1725,19 +2888,7 @@ Regole di valutazione:
 
     print("Valutazione salvata e restituita al frontend.")
 
-    return {
-        "clarity_score": clarity_score,
-        "completeness_score": completeness_score,
-        "relevance_score": relevance_score,
-        "professionalism_score": professionalism_score,
-        "synthesis_score": synthesis_score,
-        "speaking_score": speaking_score,
-        "total_score": total_score,
-        "feedback": feedback,
-        "improved_answer": improved_answer,
-        "speaking_feedback": speaking_feedback,
-        "solution_explanation": solution_explanation
-    }
+    return final_result
 
 
 # =========================
