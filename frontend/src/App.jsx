@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import logoCareerCoach from "./assets/career-coach-logo.png";
 
@@ -6,6 +6,12 @@ const API_URL = "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
 const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
+const CV_FLOW_STEPS = [
+  { id: "cv-upload", label: "CV" },
+  { id: "cv-digital", label: "Digitale" },
+  { id: "cv-analysis", label: "Analisi" },
+  { id: "gym", label: "Percorso" },
+];
 
 const wait = (duration) =>
   new Promise((resolve) => {
@@ -158,6 +164,82 @@ function TrashIcon() {
   );
 }
 
+function CvDocumentIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 3h7l4 4v14H7z" />
+      <path d="M14 3v5h5" />
+      <path d="M10 12h5" />
+      <path d="M10 15h3" />
+      <path d="M16.5 14.5l2 2" />
+      <path d="M18.8 12.2a1.6 1.6 0 0 1 2.2 2.2l-4.8 4.8-2.5.5.5-2.5 4.6-5Z" />
+    </svg>
+  );
+}
+
+function InterviewIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 14a4 4 0 0 0 4-4V7a4 4 0 0 0-8 0v3a4 4 0 0 0 4 4Z" />
+      <path d="M5 10a7 7 0 0 0 14 0" />
+      <path d="M12 17v4" />
+      <path d="M8.5 21h7" />
+      <path d="M18 5.5h2.5v4H18" />
+      <path d="M6 5.5H3.5v4H6" />
+    </svg>
+  );
+}
+
+function CvFlowProgress({ currentStep, onStepSelect }) {
+  const activeIndex = Math.max(
+    CV_FLOW_STEPS.findIndex((flowStep) => flowStep.id === currentStep),
+    0
+  );
+  const progress = (activeIndex / (CV_FLOW_STEPS.length - 1)) * 100;
+
+  return (
+    <nav className="progress-steps" aria-label="Avanzamento percorso CV">
+      <div className="progress-steps-track" aria-hidden="true">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+
+      <ol>
+        {CV_FLOW_STEPS.map((flowStep, index) => {
+          const isActive = index === activeIndex;
+          const isComplete = index < activeIndex;
+          const canReturnToStep = isComplete && typeof onStepSelect === "function";
+          const stepContent = (
+            <>
+              <span aria-hidden="true" />
+              <strong>{flowStep.label}</strong>
+            </>
+          );
+
+          return (
+            <li
+              className={[
+                "progress-step",
+                isActive ? "active" : "",
+                isComplete ? "complete" : "",
+              ].filter(Boolean).join(" ")}
+              aria-current={isActive ? "step" : undefined}
+              key={flowStep.id}
+            >
+              {canReturnToStep ? (
+                <button type="button" onClick={() => onStepSelect(flowStep.id)}>
+                  {stepContent}
+                </button>
+              ) : (
+                stepContent
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
 function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [showTransition, setShowTransition] = useState(false);
@@ -200,6 +282,13 @@ function App() {
   const [cvFile, setCvFile] = useState(null);
   const [cvPreview, setCvPreview] = useState(null);
   const [isCvDragging, setIsCvDragging] = useState(false);
+  const cvFileInputRef = useRef(null);
+  const [cvValidation, setCvValidation] = useState({
+    status: "idle",
+    message: "",
+    confidence: 0,
+    detectedSections: [],
+  });
   const [digitalPresence, setDigitalPresence] = useState({
     linkedin_url: "",
     portfolio_url: "",
@@ -860,8 +949,19 @@ function App() {
       reader.readAsDataURL(file);
     });
 
-  const selectCvFile = (file) => {
+  const resetCvValidation = () => {
+    setCvValidation({
+      status: "idle",
+      message: "",
+      confidence: 0,
+      detectedSections: [],
+    });
+  };
+
+  const selectCvFile = async (file) => {
     resetError();
+    setCvFile(null);
+    resetCvValidation();
 
     if (!file) {
       return;
@@ -872,22 +972,103 @@ function App() {
 
     if (!allowedExtensions.includes(extension)) {
       setError("Carica un file PDF, DOCX o TXT.");
+      if (cvFileInputRef.current) {
+        cvFileInputRef.current.value = "";
+      }
       return;
     }
 
     if (file.size > 5 * 1024 * 1024) {
       setError("Il CV non puo superare 5MB.");
+      if (cvFileInputRef.current) {
+        cvFileInputRef.current.value = "";
+      }
       return;
     }
 
-    setCvFile(file);
+    setCvValidation({
+      status: "validating",
+      message: "Verifica del CV in corso...",
+      confidence: 0,
+      detectedSections: [],
+    });
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetchWithTimeout(`${API_URL}/validate-cv-file`, {
+        method: "POST",
+        body: formData,
+      }, 45000);
+      const data = await response.json();
+
+      if (!response.ok) {
+        const detail = typeof data.detail === "string"
+          ? data.detail
+          : "Il file caricato non sembra leggibile o non sembra essere un CV.";
+        setCvValidation({
+          status: "invalid",
+          message: `Il file caricato non sembra leggibile o non sembra essere un CV. Dettaglio: ${detail}`,
+          confidence: 0,
+          detectedSections: [],
+        });
+        if (cvFileInputRef.current) {
+          cvFileInputRef.current.value = "";
+        }
+        return;
+      }
+
+      if (!data.is_cv) {
+        const detail = data.reason || "Carica un CV valido in formato PDF, DOCX o TXT.";
+        setCvValidation({
+          status: "invalid",
+          message: `Il file caricato non sembra leggibile o non sembra essere un CV. Dettaglio: ${detail}`,
+          confidence: data.confidence || 0,
+          detectedSections: data.detected_sections || [],
+        });
+        if (cvFileInputRef.current) {
+          cvFileInputRef.current.value = "";
+        }
+        return;
+      }
+
+      setCvFile(file);
+      setCvValidation({
+        status: "valid",
+        message: "CV riconosciuto correttamente.",
+        confidence: data.confidence || 0,
+        detectedSections: data.detected_sections || [],
+      });
+    } catch (err) {
+      console.error(err);
+      setCvValidation({
+        status: "invalid",
+        message: "Non siamo riusciti a verificare il contenuto del file. Riprova con un CV valido in formato PDF, DOCX o TXT.",
+        confidence: 0,
+        detectedSections: [],
+      });
+      if (cvFileInputRef.current) {
+        cvFileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const removeSelectedCvFile = () => {
+    resetError();
+    setCvFile(null);
+    resetCvValidation();
+
+    if (cvFileInputRef.current) {
+      cvFileInputRef.current.value = "";
+    }
   };
 
   const uploadCv = async () => {
     resetError();
 
-    if (!cvFile) {
-      setError("Seleziona o trascina il tuo CV.");
+    if (!cvFile || cvValidation.status !== "valid") {
+      setError("Carica un CV valido prima di continuare.");
       return;
     }
 
@@ -1415,19 +1596,31 @@ function App() {
   return (
     <div className={step === "auth" ? "page auth-page" : "page"}>
       {step !== "auth" && (
-        <div className="top-controls">
-          <button
-            className="back-button"
-            onClick={goBack}
-            disabled={!canGoBack}
-            aria-label="Torna indietro"
-            title="Torna indietro"
-          >
-            &lt;
-          </button>
+        <header className="app-navbar">
+          <div className="navbar-left">
+            <button
+              className="navbar-back-btn"
+              onClick={goBack}
+              disabled={!canGoBack}
+              aria-label="Torna indietro"
+              title="Torna indietro"
+            >
+              <span aria-hidden="true">←</span>
+              <strong>Indietro</strong>
+            </button>
+
+            <div className="navbar-brand">
+              <img
+                className="navbar-logo"
+                src={logoCareerCoach}
+                alt="Logo CareerCoach"
+              />
+              <span className="navbar-title">CareerCoach</span>
+            </div>
+          </div>
 
           {userId && (
-            <div className="profile-menu">
+            <div className="profile-menu navbar-user">
               <button
                 className="profile-trigger"
                 onClick={() => setIsProfileMenuOpen((current) => !current)}
@@ -1453,7 +1646,7 @@ function App() {
               )}
             </div>
           )}
-        </div>
+        </header>
       )}
 
       {userId && !["home", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
@@ -1481,48 +1674,76 @@ function App() {
 
       {step === "home" && (
         <section className="home-page">
-          <div className="home-brand">
-            <img
-              src={logoCareerCoach}
-              alt="Logo Career Coach"
-            />
-            <strong>Career Coach</strong>
-          </div>
-
           <div className="home-heading">
             <h2>Cosa vuoi fare oggi?</h2>
-            <p>Seleziona un'attivita per continuare il tuo percorso.</p>
+            <p>Seleziona un’attività per continuare il tuo percorso.</p>
+            <p className="activity-orientation-text">
+              Puoi iniziare migliorando il CV oppure allenarti subito con una simulazione personalizzata.
+            </p>
           </div>
 
-          <div className="home-action-card">
-            <div className="home-action-icon">CV</div>
-            <div>
-              <h3>Ottimizza il tuo CV</h3>
-              <p>
-                Adatta il tuo curriculum agli annunci con l'AI per massimizzare
-                le tue possibilita di successo.
-              </p>
-              <button onClick={startCvPath}>
-                Inizia Ottimizzazione
-               
-              </button>
+          <div className="activity-cards-grid">
+            <div
+              className="home-action-card"
+              onClick={startCvPath}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  startCvPath();
+                }
+              }}
+            >
+              <span className="recommended-badge">Consigliato</span>
+              <div className="home-action-icon action-card-icon cv-action-icon">
+                <CvDocumentIcon />
+              </div>
+              <div className="action-card-content">
+                <h3 className="action-card-title">Ottimizza il tuo CV</h3>
+                <p className="action-card-description">
+                  Ricevi suggerimenti personalizzati per migliorare struttura,
+                  competenze e coerenza con gli annunci.
+                </p>
+                <button className="action-card-button" onClick={startCvPath}>
+                  <span>Inizia Ottimizzazione</span>
+                  <span className="button-arrow" aria-hidden="true">→</span>
+                </button>
+              </div>
+            </div>
+
+            <div
+              className="home-action-card"
+              onClick={() => transitionToStep("gym")}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  transitionToStep("gym");
+                }
+              }}
+            >
+              <div className="home-action-icon action-card-icon interview interview-action-icon">
+                <InterviewIcon />
+              </div>
+              <div className="action-card-content">
+                <h3 className="action-card-title">Preparati al Colloquio</h3>
+                <p className="action-card-description">
+                  Allenati con domande realistiche e ricevi feedback su contenuto,
+                  chiarezza e modo di parlare.
+                </p>
+                <button className="action-card-button" onClick={() => transitionToStep("gym")}>
+                  <span>Avvia simulazione</span>
+                  <span className="button-arrow" aria-hidden="true">→</span>
+                </button>
+              </div>
             </div>
           </div>
 
-          <div className="home-action-card">
-            <div className="home-action-icon interview">AI</div>
-            <div>
-              <h3>Preparati al Colloquio</h3>
-              <p>
-                Esercitati con simulazioni realistiche per affrontare ogni
-                domanda con sicurezza.
-              </p>
-              <button onClick={() => transitionToStep("gym")}>
-                Avvia simulazione
-                
-              </button>
-            </div>
-          </div>
+          <p className="activity-footer-note">
+            Potrai modificare il tuo percorso in qualsiasi momento.
+          </p>
         </section>
       )}
 
@@ -1697,16 +1918,33 @@ function App() {
 
       {step === "cv-upload" && (
         <section className="cv-onboarding">
+          <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
+
           <div className="cv-onboarding-copy">
-            <h2>Mappiamo il tuo percorso</h2>
+            <h2>Costruiamo il tuo profilo professionale</h2>
             <p>
-              Carica il tuo CV attuale per aiutarci a capire il tuo background.
-              Non preoccuparti se non e perfetto: siamo qui per aiutarti a migliorarlo.
+              Carica il tuo CV: CareerCoach analizzerà esperienze, competenze e coerenza con il ruolo che vuoi raggiungere.
             </p>
           </div>
 
+          <div className="cv-hero-graphic" aria-hidden="true">
+            <div className="cv-graphic-document">
+              <span className="cv-graphic-badge">AI</span>
+              <span className="cv-graphic-line wide" />
+              <span className="cv-graphic-line" />
+              <span className="cv-graphic-line short" />
+              <div className="cv-graphic-growth">
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+            <div className="cv-graphic-sparkle one" />
+            <div className="cv-graphic-sparkle two" />
+          </div>
+
           <div
-            className={isCvDragging ? "cv-dropzone active" : "cv-dropzone"}
+            className={isCvDragging ? "cv-upload-card active" : "cv-upload-card"}
             onDragOver={(event) => {
               event.preventDefault();
               setIsCvDragging(true);
@@ -1720,28 +1958,67 @@ function App() {
           >
             <div className="cv-upload-icon">CV</div>
             <h3>Trascina qui il tuo CV</h3>
-            <p>PDF, DOCX, o TXT (Max 5MB)</p>
-            {cvFile && <span className="cv-file-pill">{cvFile.name}</span>}
+            <p>PDF, DOCX o TXT fino a 5 MB</p>
             <div className="cv-divider"><span>oppure</span></div>
             <input
               id="cv-file-input"
+              ref={cvFileInputRef}
               type="file"
               accept=".pdf,.docx,.txt"
               onChange={(event) => selectCvFile(event.target.files?.[0])}
             />
-            <label className="cv-browse-button" htmlFor="cv-file-input">
+            <label className="browse-file-btn" htmlFor="cv-file-input">
               Sfoglia file
             </label>
           </div>
 
-          <button className="cv-next-button" onClick={uploadCv} disabled={loading || !cvFile}>
-            Prosegui con l'analisi
+          {cvFile && (
+            <div className="uploaded-file-preview">
+              <div className="uploaded-file-icon" aria-hidden="true">CV</div>
+              <div className="uploaded-file-copy">
+                <strong>{cvFile.name}</strong>
+                <p>File caricato correttamente</p>
+              </div>
+              <button
+                type="button"
+                className="remove-file-btn"
+                onClick={removeSelectedCvFile}
+                aria-label="Rimuovi file caricato"
+                title="Rimuovi file"
+              >
+                ×
+              </button>
+            </div>
+          )}
+
+          {cvValidation.status !== "idle" && (
+            <div className={`cv-validation-message ${cvValidation.status}`}>
+              <span aria-hidden="true">
+                {cvValidation.status === "validating" ? "i" : cvValidation.status === "valid" ? "✓" : "!"}
+              </span>
+              <p>{cvValidation.message}</p>
+            </div>
+          )}
+
+          <div className="cv-edit-info">
+            <span className="cv-edit-info-icon" aria-hidden="true">✓</span>
+            <span>Potrai sempre modificare le informazioni estratte prima di continuare.</span>
+          </div>
+
+          <button
+            className={`analyze-cv-btn ${cvFile && cvValidation.status === "valid" ? "active" : "disabled"}`}
+            onClick={uploadCv}
+            disabled={loading || !cvFile || cvValidation.status !== "valid"}
+          >
+            {cvFile ? "Analizza il mio CV" : "Prosegui con l'analisi"}
           </button>
         </section>
       )}
 
       {step === "cv-digital" && (
         <section className="cv-flow-page">
+          <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
+
           <div className="cv-success-hero">
             <div className="cv-success-icon">CV</div>
             <h2>CV Caricato!</h2>
@@ -1791,6 +2068,8 @@ function App() {
 
       {step === "cv-analysis" && (
         <section className="cv-flow-page">
+          <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
+
           <div className="cv-analysis-heading">
             <h2>Analisi Coerenza Digitale</h2>
             <p>Confronto tra il tuo CV e i profili online.</p>

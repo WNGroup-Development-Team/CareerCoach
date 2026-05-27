@@ -10,12 +10,13 @@ import hmac
 import smtplib
 import base64
 import urllib.parse
+import io
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from openai import OpenAI
@@ -819,6 +820,249 @@ def extract_json(text: str):
             return json.loads(text[start:end])
 
         raise ValueError(f"JSON non valido restituito dal modello: {text}")
+
+
+CV_SECTION_KEYWORDS = {
+    "contatti": [
+        "contatti", "telefono", "email", "e-mail", "linkedin", "indirizzo",
+        "numero", "cellulare", "mobile", "phone"
+    ],
+    "profilo personale": [
+        "profilo personale", "profilo professionale", "personal profile",
+        "chi sono", "summary", "about me", "presentazione", "obiettivo",
+        "career objective"
+    ],
+    "esperienze professionali": [
+        "esperienze professionali", "esperienza professionale", "esperienza",
+        "esperienze", "experience", "work experience", "employment", "lavoro",
+        "azienda", "tirocinio", "stage", "internship", "ruolo", "position"
+    ],
+    "formazione": [
+        "formazione", "formazione accademica", "istruzione", "education",
+        "universita", "università", "university", "laurea", "laurea magistrale",
+        "laurea triennale", "diploma", "liceo", "master", "degree"
+    ],
+    "competenze": [
+        "competenze", "competenze tecniche", "skills", "technical skills",
+        "hard skills", "soft skills", "capacita", "capacità", "tecnologie",
+        "linguaggi", "software", "tools", "python", "sql", "java", "c++",
+        "machine learning", " ai ", " ml "
+    ],
+    "lingue": ["lingue", "languages", "italiano", "inglese", "francese", "spagnolo"],
+    "certificazioni": [
+        "certificazioni", "certifications", "certificate", "attestati",
+        "abilitazioni"
+    ],
+    "progetti": ["progetti", "projects", "project work", "tesi", "tirocinio"],
+    "linkedin": ["linkedin", "linkedin.com"],
+    "github": ["github", "github.com"],
+    "portfolio": ["portfolio", "website", "sito personale", "behance", "dribbble"],
+}
+
+
+def decode_text_bytes(content: bytes) -> str:
+    for encoding in ("utf-8", "utf-16", "latin-1", "cp1252"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="ignore")
+
+
+def clean_extracted_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def normalize_for_cv_detection(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text.lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return f" {normalized} "
+
+
+def extract_pdf_with_pymupdf(file_bytes: bytes) -> str:
+    text_parts = []
+
+    try:
+        import fitz
+
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        for page in doc:
+            page_text = page.get_text("text")
+            if page_text:
+                text_parts.append(page_text)
+        doc.close()
+        return "\n".join(text_parts).strip()
+    except Exception as exc:
+        print("Errore PyMuPDF:", exc)
+        return ""
+
+
+def extract_pdf_with_pypdf(file_bytes: bytes) -> str:
+    text_parts = []
+
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(file_bytes))
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_parts.append(page_text)
+        return "\n".join(text_parts).strip()
+    except Exception as exc:
+        print("Errore pypdf:", exc)
+        return ""
+
+
+def extract_text_from_file_bytes(file_bytes: bytes, filename: str) -> tuple[str, str]:
+    lower_filename = filename.lower()
+
+    if lower_filename.endswith(".pdf"):
+        text = extract_pdf_with_pymupdf(file_bytes)
+        if len(text.strip()) >= 50:
+            return text, "pymupdf"
+
+        text = extract_pdf_with_pypdf(file_bytes)
+        if len(text.strip()) >= 50:
+            return text, "pypdf"
+
+        return text, "pdf_failed_or_scanned"
+
+    if lower_filename.endswith(".docx"):
+        try:
+            from docx import Document
+
+            document = Document(io.BytesIO(file_bytes))
+            text_parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+            text_parts.extend(
+                cell.text
+                for table in document.tables
+                for row in table.rows
+                for cell in row.cells
+                if cell.text
+            )
+            return "\n".join(text_parts).strip(), "docx"
+        except Exception as exc:
+            print("Errore DOCX:", exc)
+            return "", "failed"
+
+    if lower_filename.endswith(".txt"):
+        return decode_text_bytes(file_bytes).strip(), "txt"
+
+    return "", "failed"
+
+
+def extract_text_with_method(file_bytes: bytes, filename: str) -> Dict:
+    text, method = extract_text_from_file_bytes(file_bytes, filename)
+    return {"text": text, "method": method, "errors": []}
+
+
+def extract_text_from_cv_upload(filename: str, content: bytes) -> str:
+    text, _method = extract_text_from_file_bytes(content, filename)
+    return text
+
+
+def analyze_cv_heuristics(text: str) -> Dict:
+    normalized = normalize_for_cv_detection(text)
+    detected_sections = []
+    signals = []
+
+    has_email = bool(re.search(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", normalized))
+    has_phone = bool(re.search(r"(?:\+?\d[\s().-]*){8,}", normalized))
+    has_name_like_line = any(
+        2 <= len(re.findall(r"\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+\b", line)) <= 4
+        for line in text.splitlines()[:8]
+    )
+
+    if has_email:
+        detected_sections.append("email")
+        detected_sections.append("contatti")
+        signals.append("email")
+        signals.append("contatti")
+    if has_phone or "numero" in normalized:
+        detected_sections.append("telefono")
+        detected_sections.append("contatti")
+        signals.append("telefono")
+        signals.append("contatti")
+    if has_name_like_line:
+        signals.append("nome e cognome")
+
+    for section, keywords in CV_SECTION_KEYWORDS.items():
+        if any(keyword in normalized for keyword in keywords):
+            detected_sections.append(section)
+            signals.append(section)
+
+    unique_sections = sorted(set(detected_sections))
+    unique_signals = sorted(set(signals))
+
+    score = 0
+    score += 15 if "email" in unique_signals else 0
+    score += 15 if "telefono" in unique_signals else 0
+    score += 10 if "linkedin" in unique_signals else 0
+    score += 20 if "esperienze professionali" in unique_signals else 0
+    score += 20 if "formazione" in unique_signals else 0
+    score += 20 if "competenze" in unique_signals else 0
+    score += 10 if "lingue" in unique_signals else 0
+
+    optional_sections = {"certificazioni", "progetti", "github", "portfolio"}
+    score += 10 if optional_sections.intersection(unique_signals) else 0
+    score += 10 if "profilo personale" in unique_signals else 0
+    score = min(score, 100)
+
+    reason = "Il documento e leggibile, ma non contiene abbastanza elementi tipici di un curriculum."
+    if score >= 45:
+        reason = (
+            "Il documento contiene elementi tipici di un CV: "
+            f"{', '.join(unique_sections[:8])}."
+        )
+    elif 35 <= score <= 49 and ("email" in unique_signals or "telefono" in unique_signals):
+        reason = (
+            "Il documento contiene alcuni elementi tipici di un CV e almeno un contatto: "
+            f"{', '.join(unique_sections[:8])}."
+        )
+
+    return {
+        "score": score,
+        "confidence": score,
+        "detected_sections": unique_sections,
+        "signals": unique_signals,
+        "reason": reason,
+    }
+
+
+def classify_cv_with_llm(text: str) -> Optional[Dict]:
+    prompt = f"""
+Devi stabilire se il documento seguente e un curriculum vitae.
+
+Classifica il documento come:
+- CV valido
+- probabilmente CV
+- non CV
+
+Restituisci SOLO JSON valido con questa struttura:
+{{
+  "is_cv": true,
+  "confidence": 0,
+  "reason": "spiegazione breve",
+  "detected_sections": []
+}}
+
+Testo estratto dal documento:
+{text[:6000]}
+"""
+
+    try:
+        raw_output = call_groq(prompt, temperature=0.1, max_tokens=500)
+        result = extract_json(raw_output)
+        return {
+            "is_cv": bool(result.get("is_cv")),
+            "confidence": clamp_score(result.get("confidence", 0)),
+            "reason": str(result.get("reason", "")).strip(),
+            "detected_sections": result.get("detected_sections", []),
+        }
+    except Exception as exc:
+        print(f"Classificazione LLM CV non disponibile: {exc}")
+        return None
 
 
 def extract_questions_list(text: str) -> List[str]:
@@ -2585,6 +2829,98 @@ def delete_user_cv(user_id: int):
     }
 
 
+@app.post("/validate-cv-file")
+async def validate_cv_file(file: UploadFile = File(...)):
+    filename = (file.filename or "").strip()
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    allowed_extensions = {"pdf", "docx", "txt"}
+
+    if not filename or extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Carica un file PDF, DOCX o TXT.")
+
+    file_bytes = await file.read()
+
+    print("=== VALIDAZIONE CV ===")
+    print("Filename:", file.filename)
+    print("Content type:", file.content_type)
+    print("File size:", len(file_bytes))
+
+    if len(file_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Il CV non puo superare 5MB.")
+
+    debug = {
+        "filename": filename,
+        "content_type": file.content_type,
+        "file_size": len(file_bytes),
+        "extension": extension,
+        "text_length": 0,
+        "extraction_method": "",
+    }
+
+    if not file_bytes:
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": "Il file e vuoto.",
+            "detected_sections": [],
+            "debug": debug,
+        }
+
+    extracted_text, extraction_method = extract_text_from_file_bytes(file_bytes, filename)
+    normalized_text = clean_extracted_text(extracted_text)
+    debug["text_length"] = len(normalized_text)
+    debug["extraction_method"] = extraction_method
+
+    print("Extraction method:", extraction_method)
+    print("Text length:", len(normalized_text))
+    print("Text preview:", normalized_text[:1000])
+
+    if len(normalized_text) == 0:
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": "Non riesco a estrarre testo dal file. Potrebbe essere un PDF scannerizzato o composto da immagini.",
+            "detected_sections": [],
+            "debug": debug,
+        }
+
+    heuristic = analyze_cv_heuristics(normalized_text)
+    heuristic_score = heuristic["score"]
+
+    if len(normalized_text) < 50 and heuristic_score < 35:
+        return {
+            "is_cv": False,
+            "confidence": heuristic_score,
+            "reason": "Il testo estratto e molto breve e non contiene abbastanza elementi tipici di un curriculum.",
+            "detected_sections": heuristic["detected_sections"],
+            "debug": debug,
+        }
+
+    strong_cv_sections = {"contatti", "formazione", "esperienze professionali", "competenze", "lingue"}
+    strong_section_count = len(strong_cv_sections.intersection(set(heuristic["detected_sections"])))
+
+    if heuristic_score >= 45:
+        is_cv = True
+        confidence = heuristic_score
+        reason = heuristic["reason"]
+    elif heuristic_score >= 35 and strong_section_count >= 2:
+        is_cv = True
+        confidence = heuristic_score
+        reason = heuristic["reason"]
+    else:
+        is_cv = False
+        confidence = heuristic_score
+        reason = "Il documento e leggibile, ma non contiene abbastanza elementi tipici di un curriculum."
+
+    return {
+        "is_cv": is_cv,
+        "confidence": clamp_score(confidence),
+        "reason": reason,
+        "detected_sections": heuristic["detected_sections"],
+        "debug": debug,
+    }
+
+
 @app.post("/users/{user_id}/cv")
 def upload_user_cv(user_id: int, data: UserCvUpload):
     filename = data.filename.strip()
@@ -3580,3 +3916,57 @@ def get_question_sources(question_id: int):
         "question_id": question_id,
         "sources": sources
     }
+from fastapi import UploadFile, File
+from io import BytesIO
+import fitz
+from pypdf import PdfReader
+
+@app.post("/debug-cv-read")
+async def debug_cv_read(file: UploadFile = File(...)):
+    file_bytes = await file.read()
+
+    result = {
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "file_size": len(file_bytes),
+        "pymupdf_text_length": 0,
+        "pymupdf_preview": "",
+        "pypdf_text_length": 0,
+        "pypdf_preview": "",
+    }
+
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text_parts = []
+
+        for page in doc:
+            page_text = page.get_text("text")
+            if page_text:
+                text_parts.append(page_text)
+
+        doc.close()
+
+        pymupdf_text = "\n".join(text_parts).strip()
+        result["pymupdf_text_length"] = len(pymupdf_text)
+        result["pymupdf_preview"] = pymupdf_text[:1000]
+
+    except Exception as e:
+        result["pymupdf_error"] = str(e)
+
+    try:
+        reader = PdfReader(BytesIO(file_bytes))
+        text_parts = []
+
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_parts.append(page_text)
+
+        pypdf_text = "\n".join(text_parts).strip()
+        result["pypdf_text_length"] = len(pypdf_text)
+        result["pypdf_preview"] = pypdf_text[:1000]
+
+    except Exception as e:
+        result["pypdf_error"] = str(e)
+
+    return result
