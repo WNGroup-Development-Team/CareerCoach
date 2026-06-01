@@ -11,16 +11,20 @@ import smtplib
 import base64
 import urllib.parse
 import io
+import ipaddress
+import socket
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from html.parser import HTMLParser
 from typing import Optional, List, Dict
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File
+from dotenv import dotenv_values, load_dotenv
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from openai import OpenAI
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 
 # =========================
@@ -28,9 +32,14 @@ from pydantic import BaseModel
 # =========================
 
 load_dotenv()
+ENV_FILE_VALUES = dotenv_values()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
+VISION_PROVIDER = ENV_FILE_VALUES.get("VISION_PROVIDER", "ollama").strip().lower()
+OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_VISION_MODEL = ENV_FILE_VALUES.get("OLLAMA_VISION_MODEL", "moondream")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
@@ -55,7 +64,7 @@ if not GROQ_API_KEY:
     raise RuntimeError("Manca GROQ_API_KEY nel file .env")
 
 if not TAVILY_API_KEY:
-    raise RuntimeError("Manca TAVILY_API_KEY nel file .env")
+    print("Avviso: TAVILY_API_KEY non configurata. Le ricerche web saranno disabilitate.")
 
 
 groq_client = OpenAI(
@@ -63,6 +72,9 @@ groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     timeout=30.0
 )
+
+openai_moderation_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+openai_visual_rate_limited_until = None
 
 
 # =========================
@@ -229,6 +241,9 @@ def init_db():
     add_column_if_not_exists(cursor, "users", "portfolio_url", "TEXT")
     add_column_if_not_exists(cursor, "users", "instagram_handle", "TEXT")
     add_column_if_not_exists(cursor, "users", "digital_analysis_json", "TEXT")
+    add_column_if_not_exists(cursor, "users", "linkedin_profile_filename", "TEXT")
+    add_column_if_not_exists(cursor, "users", "linkedin_profile_text", "TEXT")
+    add_column_if_not_exists(cursor, "users", "linkedin_oauth_profile_json", "TEXT")
 
     add_column_if_not_exists(cursor, "interview_sessions", "company", "TEXT")
     add_column_if_not_exists(cursor, "interview_sessions", "question_mode", "TEXT")
@@ -517,6 +532,9 @@ def user_to_response(row):
         "portfolio_url": row[17],
         "instagram_handle": row[18],
         "digital_analysis": json.loads(row[19]) if row[19] else None,
+        "linkedin_profile_filename": row[20],
+        "linkedin_profile_uploaded": bool(row[20]),
+        "linkedin_oauth_profile": json.loads(row[22]) if row[22] else None,
     }
 
 
@@ -553,7 +571,10 @@ def fetch_user_by_id(cursor, user_id: int):
         linkedin_url,
         portfolio_url,
         instagram_handle,
-        digital_analysis_json
+        digital_analysis_json,
+        linkedin_profile_filename,
+        linkedin_profile_text,
+        linkedin_oauth_profile_json
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -714,10 +735,17 @@ def fetch_oauth_profile(provider: str, code: str) -> Dict:
         "provider_user_id": str(profile.get("sub") or profile.get("id") or email),
         "email": validate_email_address(email),
         "name": name,
+        "oauth_profile": {
+            "name": name,
+            "picture": profile.get("picture"),
+            "locale": profile.get("locale"),
+            "email_verified": bool(profile.get("email_verified")),
+        },
     }
 
 
 def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
+    oauth_profile_json = json.dumps(profile.get("oauth_profile") or {}, ensure_ascii=False)
     cursor.execute("""
     SELECT id
     FROM users
@@ -725,6 +753,12 @@ def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
     """, (provider, profile["provider_user_id"]))
     provider_row = cursor.fetchone()
     if provider_row:
+        if provider == "linkedin":
+            cursor.execute("""
+            UPDATE users
+            SET linkedin_oauth_profile_json = ?
+            WHERE id = ?
+            """, (oauth_profile_json, provider_row[0]))
         return provider_row[0]
 
     cursor.execute("SELECT id FROM users WHERE lower(email) = lower(?)", (profile["email"],))
@@ -734,9 +768,10 @@ def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
         UPDATE users
         SET auth_provider = ?,
             provider_user_id = ?,
-            email_verified = 1
+            email_verified = 1,
+            linkedin_oauth_profile_json = CASE WHEN ? = 'linkedin' THEN ? ELSE linkedin_oauth_profile_json END
         WHERE id = ?
-        """, (provider, profile["provider_user_id"], email_row[0]))
+        """, (provider, profile["provider_user_id"], provider, oauth_profile_json, email_row[0]))
         return email_row[0]
 
     cursor.execute("""
@@ -746,18 +781,20 @@ def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
         email_verified,
         auth_provider,
         provider_user_id,
+        linkedin_oauth_profile_json,
         education,
         target_role,
         sector,
         experience_level,
         interview_language
     )
-    VALUES (?, ?, 1, ?, ?, '', '', '', 'Junior', 'Italiano')
+    VALUES (?, ?, 1, ?, ?, ?, '', '', '', 'Junior', 'Italiano')
     """, (
         profile["name"],
         profile["email"],
         provider,
         profile["provider_user_id"],
+        oauth_profile_json if provider == "linkedin" else None,
     ))
     return cursor.lastrowid
 
@@ -795,10 +832,16 @@ def call_groq(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> 
         return response.choices[0].message.content.strip()
 
     except Exception as e:
-        print(f"Errore Groq: {e}")
+        error_text = str(e)
+        if "invalid api key" in error_text.lower() or "invalid_api_key" in error_text.lower():
+            print("Errore Groq: chiave API non valida. Aggiorna GROQ_API_KEY nel file .env e riavvia il backend.")
+            detail = "Chiave GroqCloud non valida. Aggiorna GROQ_API_KEY nel file .env e riavvia il backend."
+        else:
+            print(f"Errore Groq: {e}")
+            detail = f"Errore durante la chiamata a GroqCloud: {str(e)}"
         raise HTTPException(
             status_code=500,
-            detail=f"Errore durante la chiamata a GroqCloud: {str(e)}"
+            detail=detail
         )
 
 
@@ -960,6 +1003,34 @@ def extract_text_with_method(file_bytes: bytes, filename: str) -> Dict:
 def extract_text_from_cv_upload(filename: str, content: bytes) -> str:
     text, _method = extract_text_from_file_bytes(content, filename)
     return text
+
+
+def recover_saved_cv_text(cursor, user_row) -> str:
+    existing_text = clean_extracted_text(user_row[13] or "")
+    if existing_text:
+        return existing_text
+
+    filename = user_row[10] or ""
+    file_base64 = user_row[14] or ""
+    if not filename or not file_base64:
+        return ""
+
+    try:
+        file_bytes = base64.b64decode(file_base64, validate=True)
+        extracted_text, _method = extract_text_from_file_bytes(file_bytes, filename)
+        normalized_text = clean_extracted_text(extracted_text)[:20000]
+    except Exception as exc:
+        print(f"Recupero testo CV salvato non riuscito: {exc}")
+        return ""
+
+    if normalized_text:
+        cursor.execute("""
+        UPDATE users
+        SET cv_text = ?
+        WHERE id = ?
+        """, (normalized_text, user_row[0]))
+
+    return normalized_text
 
 
 def analyze_cv_heuristics(text: str) -> Dict:
@@ -1608,6 +1679,10 @@ def search_web_interview_questions(
     interview_type: str,
     language: str = "Italiano"
 ) -> List[Dict[str, str]]:
+    if not TAVILY_API_KEY:
+        print("Ricerca Tavily saltata: TAVILY_API_KEY non configurata.")
+        return []
+
     query = build_search_query(company, role, interview_type, language)
 
     try:
@@ -1695,31 +1770,160 @@ def profile_path(url: str) -> str:
         return ""
 
 
+def canonical_public_url(url: Optional[str]) -> str:
+    normalized = normalize_public_profile_url(url)
+    if not normalized:
+        return ""
+
+    parsed = urllib.parse.urlparse(normalized)
+    hostname = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/").lower()
+    return f"{hostname}{path}"
+
+
+def url_belongs_to_public_profile(profile_url: str, result_url: str) -> bool:
+    profile = urllib.parse.urlparse(normalize_public_profile_url(profile_url))
+    result = urllib.parse.urlparse(normalize_public_profile_url(result_url))
+    profile_host = (profile.hostname or "").lower().removeprefix("www.")
+    result_host = (result.hostname or "").lower().removeprefix("www.")
+    profile_path = profile.path.rstrip("/").lower()
+    result_path = result.path.rstrip("/").lower()
+
+    if not profile_host or profile_host != result_host:
+        return False
+
+    return not profile_path or result_path == profile_path or result_path.startswith(f"{profile_path}/")
+
+
+def normalize_identity_tokens(value: Optional[str]) -> set[str]:
+    if not value:
+        return set()
+
+    normalized = unicodedata.normalize("NFKD", value.lower())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", normalized)
+        if len(token) >= 2
+    }
+
+
+def normalize_linkedin_profile_url(url: Optional[str]) -> str:
+    normalized = normalize_public_profile_url(url)
+    if not normalized:
+        return ""
+
+    parsed = urllib.parse.urlparse(normalized)
+    hostname = (parsed.hostname or "").lower()
+    path_parts = [part for part in parsed.path.strip("/").split("/") if part]
+
+    if hostname not in {"linkedin.com", "www.linkedin.com"}:
+        raise HTTPException(status_code=400, detail="Inserisci un link LinkedIn valido.")
+
+    if len(path_parts) != 2 or path_parts[0].lower() != "in":
+        raise HTTPException(
+            status_code=400,
+            detail="Inserisci il link pubblico del profilo LinkedIn nel formato https://www.linkedin.com/in/tuo-profilo.",
+        )
+
+    return f"https://www.linkedin.com/in/{path_parts[1]}"
+
+
+def build_linkedin_basic_info(linkedin_url: str) -> Optional[Dict[str, str]]:
+    if not linkedin_url:
+        return None
+
+    public_identifier = profile_path(linkedin_url).split("/", 1)[-1]
+    return {
+        "profile_url": linkedin_url,
+        "public_identifier": public_identifier,
+        "access_level": "basic_public",
+        "message": (
+            "CareerCoach puo verificare il link e usare solo dati base o snippet pubblici. "
+            "Esperienze, competenze e formazione complete richiedono autorizzazioni LinkedIn."
+        ),
+    }
+
+
 def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceUpdate) -> List[Dict[str, str]]:
-    search_terms = []
-    linkedin_url = normalize_public_profile_url(digital_presence.linkedin_url)
+    search_targets = []
+    linkedin_url = normalize_linkedin_profile_url(digital_presence.linkedin_url)
     portfolio_url = normalize_public_profile_url(digital_presence.portfolio_url)
     linkedin_path = profile_path(linkedin_url)
     instagram_handle = normalize_instagram_handle(digital_presence.instagram_handle)
 
     if linkedin_url:
-        search_terms.append(linkedin_url)
+        search_targets.append((linkedin_url, "linkedin"))
     if portfolio_url:
-        search_terms.append(portfolio_url)
+        search_targets.append((portfolio_url, "additional_link"))
+    if instagram_handle:
+        search_targets.append((f"https://www.instagram.com/{instagram_handle}/", "instagram"))
 
     sources = []
-    seen_urls = set()
+    seen_snippet_urls = set()
+
+    if user.get("linkedin_profile_text"):
+        sources.append({
+            "title": "Esportazione profilo LinkedIn caricata dal candidato",
+            "url": linkedin_url,
+            "content": user["linkedin_profile_text"][:6000],
+            "kind": "linkedin_export",
+        })
+
+    linkedin_oauth_profile = user.get("linkedin_oauth_profile") or {}
+    if linkedin_oauth_profile:
+        sources.append({
+            "title": "Dati base LinkedIn autorizzati tramite login",
+            "url": linkedin_url,
+            "content": (
+                f"Nome: {linkedin_oauth_profile.get('name', '')}. "
+                f"Locale: {linkedin_oauth_profile.get('locale', '')}. "
+                f"Foto profilo disponibile: {bool(linkedin_oauth_profile.get('picture'))}."
+            ),
+            "kind": "linkedin_oauth_profile",
+        })
+
+    if linkedin_url:
+        linkedin_identifier = linkedin_path.split("/", 1)[-1]
+        sources.append({
+            "title": f"LinkedIn pubblico: {linkedin_identifier}",
+            "url": linkedin_url,
+            "content": (
+                "Profilo LinkedIn indicato direttamente dal candidato. "
+                "Sono disponibili il link pubblico e l'identificativo del profilo; "
+                "eventuali altri dati possono essere usati solo se presenti negli snippet pubblici."
+            ),
+            "kind": "linkedin_reference",
+        })
 
     if instagram_handle:
         instagram_url = f"https://www.instagram.com/{instagram_handle}/"
         sources.append({
             "title": f"Instagram @{instagram_handle}",
             "url": instagram_url,
-            "content": "Profilo Instagram indicato direttamente dal candidato. Verificare foto, bio e contenuti pubblici rispetto al posizionamento professionale.",
+            "content": (
+                "Profilo Instagram indicato direttamente dal candidato. "
+                "Bio, foto e contenuti possono essere valutati solo se risultano pubblicamente accessibili."
+            ),
+            "kind": "instagram_reference",
         })
-        seen_urls.add(instagram_url)
 
-    for query in search_terms[:3]:
+    if portfolio_url:
+        sources.append({
+            "title": "Link aggiuntivo indicato dal candidato",
+            "url": portfolio_url,
+            "content": (
+                "Link pubblico indicato direttamente dal candidato. "
+                "L'analisi usa eventuali snippet pubblici trovati e non inventa contenuti non accessibili."
+            ),
+            "kind": "other_profile_reference",
+        })
+
+    if not TAVILY_API_KEY:
+        print("Ricerca presenza digitale Tavily saltata: TAVILY_API_KEY non configurata.")
+        return sources[:8]
+
+    for query, target_kind in search_targets[:3]:
         try:
             response = requests.post(
                 "https://api.tavily.com/search",
@@ -1739,26 +1943,39 @@ def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceU
                 title = item.get("title", "")
                 content = item.get("content", "")
                 normalized_url = normalize_public_profile_url(url)
-                if "linkedin.com" in normalized_url:
+                if target_kind == "linkedin":
                     if not linkedin_path:
                         continue
                     result_path = profile_path(normalized_url)
                     if result_path != linkedin_path:
                         continue
-                if "instagram.com" in url:
+                if target_kind == "instagram":
                     if not instagram_handle:
                         continue
                     instagram_path = urllib.parse.urlparse(normalized_url).path.strip("/").split("/")
                     if not instagram_path or instagram_path[0].lower() != instagram_handle.lower():
                         continue
-                if normalized_url and normalized_url in seen_urls:
+                if (
+                    target_kind == "additional_link"
+                    and not url_belongs_to_public_profile(portfolio_url, normalized_url)
+                ):
                     continue
-                if normalized_url:
-                    seen_urls.add(normalized_url)
+                canonical_url = canonical_public_url(normalized_url)
+                if canonical_url and canonical_url in seen_snippet_urls:
+                    continue
+                if canonical_url:
+                    seen_snippet_urls.add(canonical_url)
                 sources.append({
                     "title": title,
                     "url": normalized_url or url,
                     "content": content,
+                    "kind": (
+                        "instagram_public_metadata"
+                        if target_kind == "instagram"
+                        else "linkedin_public_snippet"
+                        if target_kind == "linkedin"
+                        else "other_profile_public_snippet"
+                    ),
                 })
         except Exception as exc:
             print(f"Ricerca presenza digitale non riuscita per '{query}': {exc}")
@@ -1766,27 +1983,650 @@ def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceU
     return sources[:8]
 
 
+def has_public_instagram_metadata(sources: List[Dict[str, str]]) -> bool:
+    return any(source.get("kind") == "instagram_public_metadata" for source in sources)
+
+
+def has_public_other_profile_signals(sources: List[Dict[str, str]]) -> bool:
+    return any(source.get("kind") == "other_profile_public_snippet" for source in sources)
+
+
+class PublicImageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.image_urls = []
+
+    def handle_starttag(self, tag: str, attrs):
+        attributes = dict(attrs)
+        if tag == "meta" and attributes.get("property") in {"og:image", "og:image:url"}:
+            self.image_urls.append({"url": attributes.get("content", ""), "kind": "public_preview"})
+        elif tag == "meta" and attributes.get("name") in {"twitter:image", "twitter:image:src"}:
+            self.image_urls.append({"url": attributes.get("content", ""), "kind": "public_preview"})
+        elif tag == "img":
+            self.image_urls.append({"url": attributes.get("src", ""), "kind": "page_image"})
+
+
+def is_safe_public_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        hostname = parsed.hostname.lower()
+        if hostname == "localhost" or hostname.endswith(".local"):
+            return False
+        for info in socket.getaddrinfo(hostname, None):
+            address = ipaddress.ip_address(info[4][0])
+            if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def collect_public_image_urls(user: Dict) -> Dict:
+    instagram_handle = normalize_instagram_handle(user.get("instagram_handle"))
+    profile_urls = []
+    if instagram_handle:
+        profile_urls.append(f"https://www.instagram.com/{instagram_handle}/")
+    if user.get("portfolio_url"):
+        profile_urls.append(normalize_public_profile_url(user["portfolio_url"]))
+
+    image_urls = []
+    pages_checked = []
+    seen_urls = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; CareerCoach/1.0; public-profile-check)",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    for profile_url in profile_urls[:3]:
+        if not is_safe_public_url(profile_url):
+            continue
+        try:
+            response = requests.get(profile_url, headers=headers, timeout=8)
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            pages_checked.append(profile_url)
+            if "html" not in content_type.lower():
+                continue
+            parser = PublicImageParser()
+            parser.feed(response.text[:1_000_000])
+            for candidate in parser.image_urls:
+                candidate_url = candidate["url"]
+                image_url = urllib.parse.urljoin(profile_url, candidate_url)
+                canonical_url = canonical_public_url(image_url)
+                if (
+                    not candidate_url
+                    or not canonical_url
+                    or canonical_url in seen_urls
+                    or not is_safe_public_url(image_url)
+                ):
+                    continue
+                seen_urls.add(canonical_url)
+                image_urls.append({
+                    "url": image_url,
+                    "kind": candidate["kind"],
+                    "profile_url": profile_url,
+                })
+                if len(image_urls) >= 8:
+                    break
+        except Exception as exc:
+            print(f"Recupero media pubblici non riuscito per '{profile_url}': {exc}")
+        if len(image_urls) >= 8:
+            break
+
+    return {"pages_checked": pages_checked, "image_urls": image_urls}
+
+
+def extract_image_base64(image_input: Dict) -> str:
+    data_url = image_input.get("image_url", {}).get("url", "")
+    if not data_url.startswith("data:image/") or "," not in data_url:
+        return ""
+    return data_url.split(",", 1)[1]
+
+
+def build_visual_analysis_result(
+    source: str,
+    discovered_count: int,
+    analyzed: List[Dict],
+    failed_count: int,
+    content_count: Optional[int] = None,
+) -> Dict:
+    flagged_results = [result for result in analyzed if result.get("flagged")]
+    categories = sorted({
+        category
+        for result in flagged_results
+        for category in result.get("categories", [])
+    })
+    incomplete_message = f" {failed_count} media non sono risultati leggibili." if failed_count else ""
+    analyzed_content_count = len(analyzed) if content_count is None else content_count
+    preview_count = max(0, len(analyzed) - analyzed_content_count)
+    analyzed_label = "contenuto caricato" if len(analyzed) == 1 else "contenuti caricati"
+    preview_label = "anteprima pubblica" if len(analyzed) == 1 else "anteprime pubbliche"
+    scope_message = (
+        f"Controllo visuale preliminare locale completato su {len(analyzed)} {analyzed_label}"
+        if source == "uploaded_screenshots"
+        else f"Controllo visuale preliminare locale completato su {len(analyzed)} {preview_label}"
+    )
+    return {
+        "status": "completed",
+        "provider": VISION_PROVIDER,
+        "source": source,
+        "discovered_count": discovered_count,
+        "analyzed_count": len(analyzed),
+        "analyzed_content_count": analyzed_content_count,
+        "analyzed_preview_count": preview_count,
+        "flagged_count": len(flagged_results),
+        "failed_count": failed_count,
+        "flagged_categories": categories,
+        "message": (
+            f"{scope_message}: {len(flagged_results)} richiedono una verifica manuale.{incomplete_message}"
+            if flagged_results
+            else (
+                f"{scope_message}: "
+                f"non sono emersi contenuti sensibili evidenti.{incomplete_message}"
+            )
+        ),
+    }
+
+
+def analyze_image_with_ollama(image_input: Dict) -> Dict:
+    encoded_image = extract_image_base64(image_input)
+    if not encoded_image:
+        raise ValueError("Immagine Base64 non disponibile.")
+
+    uses_lightweight_description = OLLAMA_VISION_MODEL.split(":", 1)[0] == "moondream"
+    if uses_lightweight_description:
+        prompt = "Describe only what is visibly present in this image in one short factual sentence."
+    else:
+        prompt = (
+            "Review the image. Return JSON only: "
+            '{"flagged": boolean, "categories": string[], "summary": string}. '
+            "Use categories only from: nudita, contenuto sessuale esplicito, violenza, "
+            "armi, droghe, linguaggio offensivo visibile. Keep summary brief and factual."
+        )
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": [encoded_image],
+        }],
+    }
+    if not uses_lightweight_description:
+        payload["format"] = "json"
+
+    response = requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json=payload,
+        timeout=240,
+    )
+    if not response.ok:
+        try:
+            error_message = response.json().get("error", response.text)
+        except ValueError:
+            error_message = response.text
+        raise RuntimeError(f"Ollama: {error_message}")
+    content = response.json().get("message", {}).get("content", "").strip()
+    if uses_lightweight_description:
+        description = content.lower()
+        category_keywords = {
+            "nudita": ("nude", "nudity", "naked", "topless"),
+            "contenuto sessuale esplicito": ("explicit sexual", "sexual act", "sexually explicit"),
+            "violenza": ("violence", "violent", "blood", "injury", "wound"),
+            "armi": ("weapon", "gun", "rifle", "knife", "firearm"),
+            "droghe": ("drug", "cocaine", "heroin", "marijuana", "syringe"),
+            "linguaggio offensivo visibile": ("offensive language", "slur", "insult"),
+        }
+        categories = [
+            category
+            for category, keywords in category_keywords.items()
+            if any(keyword in description for keyword in keywords)
+        ]
+        return {
+            "flagged": bool(categories),
+            "categories": categories,
+            "summary": content,
+        }
+
+    result = extract_json(content)
+    allowed_categories = {
+        "nudita",
+        "contenuto sessuale esplicito",
+        "violenza",
+        "armi",
+        "droghe",
+        "linguaggio offensivo visibile",
+    }
+    categories = [
+        str(category)
+        for category in result.get("categories") or []
+        if str(category).lower() in allowed_categories
+    ]
+    return {
+        "flagged": bool(result.get("flagged")),
+        "categories": categories,
+        "summary": str(result.get("summary", "")).strip(),
+    }
+
+
+def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_count: int) -> Dict:
+    global openai_visual_rate_limited_until
+
+    if not image_inputs:
+        return {
+            "status": "no_media_found",
+            "provider": VISION_PROVIDER,
+            "source": source,
+            "discovered_count": discovered_count,
+            "analyzed_count": 0,
+            "flagged_count": 0,
+            "message": "Non sono stati recuperati media analizzabili automaticamente.",
+        }
+
+    if VISION_PROVIDER == "ollama":
+        analyzed = []
+        failed_count = 0
+        last_error = ""
+        for image_input in image_inputs[:8]:
+            try:
+                analyzed.append(analyze_image_with_ollama(image_input))
+            except Exception as exc:
+                failed_count += 1
+                last_error = str(exc)
+                print(f"Analisi visuale Ollama non riuscita per un media: {exc}")
+                if (
+                    "connection" in last_error.lower()
+                    or "connessione" in last_error.lower()
+                    or last_error.startswith("Ollama:")
+                ):
+                    break
+        if analyzed:
+            return build_visual_analysis_result(source, discovered_count, analyzed, failed_count)
+        return {
+            "status": "provider_unavailable",
+            "provider": "ollama",
+            "source": source,
+            "discovered_count": discovered_count,
+            "analyzed_count": 0,
+            "flagged_count": 0,
+            "failed_count": failed_count,
+            "message": (
+                "Ollama non risponde oppure il modello visuale non e disponibile. "
+                f"Avvia Ollama e scarica {OLLAMA_VISION_MODEL}. "
+                f"Dettaglio: {last_error}"
+            ),
+        }
+
+    if VISION_PROVIDER != "openai" or not openai_moderation_client:
+        return {
+            "status": "provider_not_configured",
+            "provider": VISION_PROVIDER,
+            "source": source,
+            "discovered_count": discovered_count,
+            "analyzed_count": 0,
+            "flagged_count": 0,
+            "message": "Provider visuale non configurato. Usa VISION_PROVIDER=ollama oppure configura OpenAI.",
+        }
+    if openai_visual_rate_limited_until and datetime.utcnow() < openai_visual_rate_limited_until:
+        return {
+            "status": "rate_limited",
+            "provider": "openai",
+            "source": source,
+            "discovered_count": discovered_count,
+            "analyzed_count": 0,
+            "flagged_count": 0,
+            "message": "Il servizio OpenAI ha raggiunto il limite temporaneo. Attendi qualche minuto.",
+        }
+
+    analyzed = []
+    failed_count = 0
+    for image_input in image_inputs[:8]:
+        try:
+            response = openai_moderation_client.moderations.create(
+                model="omni-moderation-latest",
+                input=[image_input],
+            )
+            for result in response.results:
+                analyzed.append({
+                    "flagged": bool(result.flagged),
+                    "categories": [
+                        category
+                        for category, flagged in result.categories.model_dump().items()
+                        if flagged
+                    ],
+                })
+        except Exception as exc:
+            failed_count += 1
+            error_text = str(exc)
+            print(f"Moderazione visuale OpenAI non riuscita per un media: {exc}")
+            if "429" in error_text or "too many requests" in error_text.lower():
+                openai_visual_rate_limited_until = datetime.utcnow() + timedelta(minutes=5)
+                break
+    if analyzed:
+        return build_visual_analysis_result(source, discovered_count, analyzed, failed_count)
+    return {
+        "status": "analysis_failed",
+        "provider": "openai",
+        "source": source,
+        "discovered_count": discovered_count,
+        "analyzed_count": 0,
+        "flagged_count": 0,
+        "failed_count": failed_count,
+        "message": "I media sono stati trovati, ma l'analisi visuale OpenAI non e riuscita.",
+    }
+
+
+def public_image_url_to_input(image_url: str) -> Optional[Dict]:
+    if not is_safe_public_url(image_url):
+        return None
+
+    try:
+        response = requests.get(
+            image_url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CareerCoach/1.0; public-media-check)"},
+            timeout=8,
+            stream=True,
+        )
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            return None
+
+        content = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            content.extend(chunk)
+            if len(content) > 5 * 1024 * 1024:
+                return None
+        if not content:
+            return None
+
+        encoded = base64.b64encode(bytes(content)).decode("ascii")
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:{content_type};base64,{encoded}"},
+        }
+    except Exception as exc:
+        print(f"Download media pubblico non riuscito per '{image_url}': {exc}")
+        return None
+
+
+def analyze_public_social_media(user: Dict) -> Dict:
+    discovered = collect_public_image_urls(user)
+    instagram_images = [
+        image
+        for image in discovered["image_urls"]
+        if "instagram.com" in (urllib.parse.urlparse(image["profile_url"]).hostname or "").lower()
+    ]
+    image_inputs = [
+        image_input
+        for image in instagram_images
+        if (image_input := public_image_url_to_input(image["url"]))
+    ]
+    analysis = moderate_visual_inputs(image_inputs, "public_links", len(instagram_images))
+    analysis["analyzed_content_count"] = 0
+    analysis["analyzed_preview_count"] = analysis.get("analyzed_count", 0)
+    analysis["pages_checked"] = discovered["pages_checked"]
+    return analysis
+
+
+def describe_visual_media_analysis(evidence: Dict, has_instagram: bool) -> str:
+    media_analysis = evidence.get("visual_media_analysis") or {}
+    if media_analysis.get("status") == "completed":
+        return media_analysis["message"]
+    if media_analysis.get("status") == "provider_not_configured":
+        return media_analysis["message"]
+    if has_instagram and evidence.get("instagram_metadata_found"):
+        return (
+            "Il profilo Instagram risulta rintracciabile sul web, ma non sono stati recuperati media "
+            "analizzabili automaticamente. Puoi caricare uno o piu screenshot per completare il controllo."
+        )
+    if has_instagram:
+        return (
+            "Instagram e stato collegato, ma foto e post non risultano accessibili automaticamente. "
+            "Puoi caricare uno o piu screenshot per completare il controllo."
+        )
+    return "Non sono stati trovati media pubblici da analizzare automaticamente."
+
+
+def visual_media_finding_status(evidence: Dict) -> str:
+    media_analysis = evidence.get("visual_media_analysis") or {}
+    if media_analysis.get("status") == "completed" and not media_analysis.get("flagged_count"):
+        return "success"
+    return "warning"
+
+
+VISUAL_PROFILE_LABELS = {
+    "instagram": "Instagram",
+    "facebook": "Facebook",
+    "other": "Altro profilo",
+}
+
+
+def calculate_visual_score_adjustment(profile_analyses: Dict[str, Dict]) -> int:
+    adjustment = 0
+    for analysis in profile_analyses.values():
+        if analysis.get("status") != "completed" or analysis.get("analyzed_content_count", 0) <= 0:
+            continue
+        adjustment += -6 if analysis.get("flagged_count", 0) else 3
+    return max(-18, min(9, adjustment))
+
+
+def describe_profile_screenshot_analyses(profile_analyses: Dict[str, Dict]) -> str:
+    descriptions = []
+    for profile_type, analysis in profile_analyses.items():
+        label = VISUAL_PROFILE_LABELS.get(profile_type, "Profilo")
+        descriptions.append(f"{label}: {analysis.get('message', '')}")
+    return " ".join(descriptions)
+
+
+def classify_additional_link(url: str, sources: List[Dict[str, str]], identity: Dict) -> Dict:
+    if not url:
+        return {
+            "status": "not_provided",
+            "type": "none",
+            "message": "Non hai inserito un link aggiuntivo.",
+        }
+
+    if not has_public_other_profile_signals(sources):
+        hostname = (urllib.parse.urlparse(normalize_public_profile_url(url)).hostname or "").lower()
+        blocked_note = (
+            " Facebook spesso richiede il login e impedisce il recupero automatico dei contenuti."
+            if hostname.endswith("facebook.com")
+            else ""
+        )
+        return {
+            "status": "unverified",
+            "type": "unknown",
+            "message": (
+                "Il link aggiuntivo e stato registrato, ma non risultano contenuti pubblici accessibili."
+                f"{blocked_note}"
+            ),
+        }
+
+    hostname = (urllib.parse.urlparse(normalize_public_profile_url(url)).hostname or "").lower().removeprefix("www.")
+    social_hosts = {
+        "linkedin.com", "instagram.com", "x.com", "twitter.com", "github.com", "behance.net", "dribbble.com",
+        "facebook.com", "tiktok.com", "youtube.com", "medium.com",
+    }
+    link_type = "profilo personale" if hostname in social_hosts else "sito o pagina pubblica"
+
+    if identity["status"] == "matched":
+        return {
+            "status": "matched",
+            "type": link_type,
+            "message": (
+                f"Il link aggiuntivo risulta essere un {link_type} compatibile con il nome del candidato. "
+                "L'analisi usa solo testo pubblico indicizzato: eventuali foto, video e post non sono stati analizzati."
+                if hostname in social_hosts
+                else f"Il link aggiuntivo risulta essere un {link_type} compatibile con il nome del candidato."
+            ),
+        }
+
+    return {
+        "status": identity["status"],
+        "type": link_type,
+        "message": (
+            f"Il link risulta essere un {link_type}, ma non posso attribuirlo con certezza al candidato."
+            if identity["status"] == "unverified"
+            else f"Il link risulta essere un {link_type}, ma le evidenze sembrano appartenere a un'altra persona."
+        ),
+    }
+
+
+def evaluate_profile_identity(user: Dict, sources: List[Dict[str, str]], kinds: set[str], label: str) -> Dict:
+    candidate_tokens = normalize_identity_tokens(user.get("name"))
+    evidence = [
+        (source.get("title", label), source.get("content", ""))
+        for source in sources
+        if source.get("kind") in kinds
+    ]
+
+    if not evidence or not candidate_tokens:
+        return {
+            "status": "unverified",
+            "message": f"Non ci sono abbastanza dati per verificare che il {label} appartenga al candidato.",
+        }
+
+    matching_sources = []
+    conflicting_sources = []
+    for title, text in evidence:
+        source_tokens = normalize_identity_tokens(f"{title} {text}")
+        common_tokens = candidate_tokens.intersection(source_tokens)
+        if len(common_tokens) >= min(2, len(candidate_tokens)):
+            matching_sources.append(title)
+        elif source_tokens:
+            conflicting_sources.append(title)
+
+    if matching_sources:
+        return {
+            "status": "matched",
+            "message": f"Le evidenze disponibili per il {label} sono compatibili con il nome del candidato.",
+        }
+
+    if conflicting_sources:
+        return {
+            "status": "mismatch",
+            "message": f"Le evidenze disponibili per il {label} non sembrano appartenere al candidato. Verifica il dato inserito.",
+        }
+
+    return {
+        "status": "unverified",
+        "message": f"Non ci sono abbastanza dati per verificare che il {label} appartenga al candidato.",
+    }
+
+
+def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
+    linkedin_export_identity = evaluate_profile_identity(user, sources, {"linkedin_export"}, "PDF LinkedIn")
+    linkedin_public_identity = evaluate_profile_identity(user, sources, {"linkedin_public_snippet"}, "profilo LinkedIn pubblico")
+    instagram_identity = evaluate_profile_identity(user, sources, {"instagram_public_metadata"}, "profilo Instagram")
+    other_profile_identity = evaluate_profile_identity(user, sources, {"other_profile_public_snippet"}, "profilo aggiuntivo")
+    additional_link = classify_additional_link(user.get("portfolio_url", ""), sources, other_profile_identity)
+    linkedin_export_verified = linkedin_export_identity["status"] == "matched"
+    linkedin_public_verified = linkedin_public_identity["status"] == "matched"
+    linkedin_public_link_present = bool(user.get("linkedin_url"))
+    linkedin_verified = linkedin_public_verified if linkedin_public_link_present else linkedin_export_verified
+    instagram_verified = False
+    other_profile_verified = other_profile_identity["status"] == "matched"
+    visual_media_analysis = user.get("visual_media_analysis") or {
+        "status": "not_requested",
+        "discovered_count": 0,
+        "analyzed_count": 0,
+        "flagged_count": 0,
+    }
+    verified_profiles = [
+        profile
+        for profile, verified in [
+            ("linkedin", linkedin_verified),
+            ("instagram", instagram_verified),
+            ("other_profile", other_profile_verified),
+        ]
+        if verified
+    ]
+    return {
+        "cv_profile_loaded": bool(user.get("cv_text")),
+        "cv_filename": user.get("cv_filename") or "",
+        "linkedin_identity": linkedin_public_identity if linkedin_public_link_present else linkedin_export_identity,
+        "linkedin_export_identity": linkedin_export_identity,
+        "linkedin_public_identity": linkedin_public_identity,
+        "instagram_identity": instagram_identity,
+        "instagram_metadata_found": has_public_instagram_metadata(sources),
+        "instagram_media_analyzed": visual_media_analysis.get("analyzed_content_count", 0) > 0,
+        "public_preview_analyzed": visual_media_analysis.get("analyzed_preview_count", 0) > 0,
+        "visual_media_analysis": visual_media_analysis,
+        "other_profile_identity": other_profile_identity,
+        "additional_link": additional_link,
+        "linkedin_export_compared": bool(user.get("linkedin_profile_text")),
+        "linkedin_export_filename": user.get("linkedin_profile_filename") or "",
+        "linkedin_export_verified": linkedin_export_verified,
+        "linkedin_public_link_present": linkedin_public_link_present,
+        "linkedin_public_verified": linkedin_public_verified,
+        "linkedin_public_snippet_found": any(source.get("kind") == "linkedin_public_snippet" for source in sources),
+        "other_profile_public_snippet_found": other_profile_verified,
+        "verified_profiles": verified_profiles,
+        "verified_profile_count": len(verified_profiles),
+        "can_compare_with_cv": bool(verified_profiles),
+        "zero_score_reason": (
+            ""
+            if verified_profiles
+            else "Nessun profilo pubblico verificabile e disponibile per il confronto con il CV."
+        ),
+    }
+
+
+def describe_linkedin_evidence(evidence: Dict) -> str:
+    messages = []
+
+    if evidence["linkedin_export_compared"]:
+        messages.append(f"PDF LinkedIn: {evidence['linkedin_export_identity']['message']}")
+
+    if evidence["linkedin_public_link_present"]:
+        messages.append(f"Link pubblico LinkedIn: {evidence['linkedin_public_identity']['message']}")
+
+    return " ".join(messages)
+
+
 def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     has_linkedin = bool(user.get("linkedin_url"))
+    has_linkedin_export = bool(user.get("linkedin_profile_text"))
+    has_linkedin_input = has_linkedin or has_linkedin_export
     has_instagram = bool(user.get("instagram_handle"))
+    has_public_instagram = has_public_instagram_metadata(sources)
+    has_other_profile = bool(user.get("portfolio_url"))
+    has_public_other_profile = has_public_other_profile_signals(sources)
     has_cv_text = bool(user.get("cv_text"))
-    score = 58 + (18 if has_linkedin else 0) + (8 if has_instagram else 0) + (6 if has_cv_text else 0)
-    score = min(score, 86)
+    evidence = build_analysis_evidence(user, sources)
+    linkedin_identity = evidence["linkedin_identity"]
+    instagram_identity = evidence["instagram_identity"]
+    other_profile_identity = evidence["other_profile_identity"]
+    instagram_verified = False
+    other_profile_verified = other_profile_identity["status"] == "matched"
+    linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
+    if not evidence["can_compare_with_cv"]:
+        score = 0
+    else:
+        score = 24 + (12 if has_cv_text else 0)
+        score += 18 if has_linkedin_export and evidence["linkedin_export_verified"] else 0
+        score += 18 if evidence["linkedin_public_verified"] else 0
+        score += 10 if instagram_verified else 0
+        score += 8 if other_profile_verified else 0
+        score = clamp_score(score)
 
     return {
         "score": score,
-        "headline": "Analisi preliminare completata",
+        "headline": "Analisi preliminare completata" if evidence["can_compare_with_cv"] else "Analisi non disponibile",
         "summary": (
-            "Ho salvato i profili inseriti e creato una prima valutazione di coerenza. "
-            "Per un report piu accurato inserisci un link LinkedIn pubblico e profili aggiornati."
+            "Ho confrontato il CV con i profili pubblici verificabili disponibili."
+            if evidence["can_compare_with_cv"]
+            else evidence["zero_score_reason"]
         ),
         "findings": [
             {
                 "title": "Coerenza LinkedIn",
-                "status": "success" if has_linkedin else "warning",
+                "status": "success" if linkedin_identity["status"] == "matched" else "warning",
                 "description": (
-                    "LinkedIn e presente e puo essere confrontato con CV, ruolo target e percorso."
-                    if has_linkedin
+                    describe_linkedin_evidence(evidence)
+                    if has_linkedin_input
                     else "Manca un link LinkedIn: per un recruiter e spesso il primo punto di verifica."
                 ),
                 "coach_tip": (
@@ -1795,64 +2635,103 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
             },
             {
                 "title": "Foto e contenuti pubblici",
-                "status": "success" if has_instagram else "warning",
-                "description": (
-                    "Instagram e stato inserito come profilo da controllare: il focus e verificare foto, bio e contenuti pubblici rispetto al posizionamento professionale."
-                    if has_instagram
-                    else "Non hai inserito Instagram: se lo usi pubblicamente, controlla che foto, bio e contenuti siano coerenti con il profilo professionale."
-                ),
+                "status": visual_media_finding_status(evidence),
+                "description": describe_visual_media_analysis(evidence, has_instagram),
                 "coach_tip": "Mantieni foto profilo, bio e contenuti recenti coerenti con il ruolo per cui ti candidi.",
+            },
+            {
+                "title": "Link aggiuntivo",
+                "status": "success" if other_profile_verified else "warning",
+                "description": (
+                    evidence["additional_link"]["message"]
+                    if other_profile_verified
+                    else evidence["additional_link"]["message"]
+                    if has_public_other_profile
+                    else evidence["additional_link"]["message"]
+                    if has_other_profile
+                    else "Non hai inserito un link aggiuntivo."
+                ),
+                "coach_tip": "Verifica manualmente cosa puo vedere un recruiter non autenticato.",
             },
         ],
         "sources": sources,
+        "linkedin_basic_info": linkedin_basic_info,
+        "analysis_evidence": evidence,
     }
 
 
 def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], score: int) -> Dict:
     has_linkedin = bool(user.get("linkedin_url"))
+    has_linkedin_export = bool(user.get("linkedin_profile_text"))
+    has_linkedin_input = has_linkedin or has_linkedin_export
     has_instagram = bool(user.get("instagram_handle"))
+    has_public_instagram = has_public_instagram_metadata(sources)
+    has_other_profile = bool(user.get("portfolio_url"))
+    has_public_other_profile = has_public_other_profile_signals(sources)
+    evidence = build_analysis_evidence(user, sources)
+    linkedin_identity = evidence["linkedin_identity"]
+    instagram_identity = evidence["instagram_identity"]
+    other_profile_identity = evidence["other_profile_identity"]
+    instagram_verified = False
+    other_profile_verified = other_profile_identity["status"] == "matched"
+    can_compare_with_cv = evidence["can_compare_with_cv"]
+    linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
 
     findings = [
         {
             "title": "LinkedIn",
-            "status": "success" if has_linkedin else "warning",
+            "status": "success" if linkedin_identity["status"] == "matched" else "warning",
             "description": (
-                "Il profilo LinkedIn inserito viene considerato come riferimento principale per headline, formazione, esperienze e competenze."
-                if has_linkedin
+                describe_linkedin_evidence(evidence)
+                if has_linkedin_input
                 else "Non hai inserito un profilo LinkedIn: aggiungerlo rende piu forte la candidatura."
             ),
             "coach_tip": "Allinea headline, ruolo target, esperienze, date e competenze con il CV.",
         },
         {
             "title": "Coerenza CV/profili",
-            "status": "success",
-            "description": "L'analisi usa solo CV e profili che hai inserito tu, evitando confronti con omonimi o risultati non verificati.",
+            "status": "success" if can_compare_with_cv else "warning",
+            "description": (
+                "L'analisi usa solo CV e profili pubblici verificabili, evitando confronti con omonimi o risultati non verificati."
+                if can_compare_with_cv
+                else evidence["zero_score_reason"]
+            ),
             "coach_tip": "Controlla che ruolo target, formazione e competenze principali dicano la stessa cosa su CV e LinkedIn.",
         },
         {
             "title": "Foto e contenuti pubblici",
-            "status": "success" if has_instagram else "warning",
-            "description": (
-                "Instagram e stato collegato come profilo esatto: la verifica riguarda la coerenza di foto, bio e contenuti pubblici."
-                if has_instagram
-                else "Instagram non e stato collegato: se il profilo e pubblico, vale la pena controllarlo prima di candidarti."
-            ),
+            "status": visual_media_finding_status(evidence),
+            "description": describe_visual_media_analysis(evidence, has_instagram),
             "coach_tip": "Evita contenuti pubblici che possano confondere il posizionamento professionale.",
         },
         {
-            "title": "Impatto recruiter",
-            "status": "success" if has_linkedin else "warning",
-            "description": "Un recruiter vedra un percorso piu credibile se CV, LinkedIn e profili pubblici raccontano la stessa direzione professionale.",
-            "coach_tip": "Usa le stesse parole chiave del ruolo target nei punti piu visibili del profilo.",
+            "title": "Link aggiuntivo",
+            "status": "success" if other_profile_verified else "warning",
+            "description": (
+                evidence["additional_link"]["message"]
+                if other_profile_verified
+                else evidence["additional_link"]["message"]
+                if has_public_other_profile
+                else evidence["additional_link"]["message"]
+                if has_other_profile
+                else "Non e stato collegato un link aggiuntivo."
+            ),
+            "coach_tip": "Controlla visibilita, descrizione e contenuti pubblici prima di candidarti.",
         },
     ]
 
     return {
         "score": score,
-        "headline": "Presenza digitale da allineare con cura",
-        "summary": "La valutazione considera solo i profili che hai inserito tu. Il punteggio misura quanto CV, LinkedIn e profili pubblici aiutano il tuo posizionamento professionale.",
+        "headline": "Presenza digitale da allineare con cura" if can_compare_with_cv else "Analisi non disponibile",
+        "summary": (
+            "La valutazione considera solo i profili pubblici verificabili che hai inserito."
+            if can_compare_with_cv
+            else evidence["zero_score_reason"]
+        ),
         "findings": findings,
         "sources": sources,
+        "linkedin_basic_info": linkedin_basic_info,
+        "analysis_evidence": evidence,
     }
 
 
@@ -1860,7 +2739,13 @@ def analyze_digital_profile(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     fallback = build_fallback_digital_analysis(user, sources)
     has_linkedin = bool(user.get("linkedin_url"))
     has_instagram = bool(user.get("instagram_handle"))
-    minimum_score = 76 if has_linkedin and has_instagram else 68 if has_linkedin else 55
+    has_public_instagram = has_public_instagram_metadata(sources)
+    has_other_profile = bool(user.get("portfolio_url"))
+    has_public_other_profile = has_public_other_profile_signals(sources)
+    evidence = fallback["analysis_evidence"]
+    linkedin_identity = evidence["linkedin_identity"]
+    instagram_identity = evidence["instagram_identity"]
+    other_profile_identity = evidence["other_profile_identity"]
     prompt = f"""
 Sei un consulente di personal branding e recruiting.
 
@@ -1870,7 +2755,10 @@ Valuta la coerenza professionale della presenza digitale del candidato usando so
 - link inseriti;
 - estratti web pubblici forniti.
 
-Non affermare di aver visto immagini se dagli estratti non emergono informazioni visive. Se il candidato ha inserito Instagram o profili con foto, valuta il rischio reputazionale come controllo consigliato sulle immagini pubblicate.
+Non affermare di aver analizzato foto o post Instagram se visual_media_analysis.analyzed_content_count e 0. Le immagini recuperate automaticamente sono soltanto anteprime pubbliche della pagina: non provano che i post siano stati analizzati. Riporta soltanto l'esito verificato dal backend senza inventare dettagli sulle immagini.
+LinkedIn protegge molte sezioni del profilo. Non affermare di aver letto headline, esperienze, date, competenze o formazione da LinkedIn se queste informazioni non compaiono esplicitamente negli estratti pubblici forniti.
+Se Instagram e indicato ma non sono presenti metadati pubblici, segnala che il profilo potrebbe essere privato o non accessibile. La presenza di metadati o anteprime non prova che foto o post siano stati analizzati: usa sempre visual_media_analysis.analyzed_content_count.
+Se un link aggiuntivo e indicato ma non sono presenti snippet pubblici, segnala che il contenuto non e accessibile. Non affermare di averne analizzato testi, immagini o post.
 
 Profilo candidato:
 - Nome: {user.get("name", "")}
@@ -1880,14 +2768,20 @@ Profilo candidato:
 - Settore: {user.get("sector", "")}
 - Livello esperienza: {user.get("experience_level", "")}
 - LinkedIn: {user.get("linkedin_url", "")}
-- Portfolio/X: {user.get("portfolio_url", "")}
+- Link aggiuntivo: {user.get("portfolio_url", "")}
 - Instagram: {user.get("instagram_handle", "")}
 
 Estratto CV:
 {(user.get("cv_text") or "")[:5000]}
 
+Esportazione LinkedIn caricata dal candidato:
+{(user.get("linkedin_profile_text") or "Non disponibile")[:6000]}
+
 Fonti pubbliche trovate:
 {sources_to_prompt(sources)}
+
+Evidenze verificate dal backend:
+{json.dumps(evidence, ensure_ascii=False)}
 
 Restituisci SOLO JSON valido con questa struttura:
 {{
@@ -1907,24 +2801,82 @@ Restituisci SOLO JSON valido con questa struttura:
 
 Regole:
 - score intero 0-100.
-- Non abbassare il punteggio solo perche il web restituisce poche fonti: se i link inseriti sono esatti, valuta la coerenza dei dati disponibili.
-- Se LinkedIn e Instagram sono stati inseriti e non ci sono prove reali di incoerenza nelle fonti fornite, il punteggio non deve essere sotto 70.
-- findings deve includere almeno LinkedIn, coerenza CV/profili, foto o contenuti pubblici, impatto recruiter.
-- Valuta soprattutto headline LinkedIn, esperienze/date, competenze, formazione e coerenza con ruolo target.
-- I profili social inseriti dal candidato sono autoritativi: non confrontare mai il candidato con profili LinkedIn, Instagram o portfolio non presenti nelle fonti.
+- Se can_compare_with_cv e false, score deve essere 0: non ci sono profili pubblici verificabili da confrontare con il CV.
+- Se il web restituisce poche fonti, esplicita che l'analisi e limitata e non premiare la sola presenza di un link.
+- Se linkedin_identity.status e mismatch, segnala chiaramente che il link LinkedIn potrebbe appartenere a un'altra persona. Se non restano altri profili verificati, score deve essere 0.
+- findings deve includere almeno LinkedIn, coerenza CV/profili, foto o contenuti pubblici, link aggiuntivo, impatto recruiter.
+- Per LinkedIn considera sempre il link pubblico e l'identificativo del profilo. Considera headline, esperienze/date, competenze e formazione solo se compaiono esplicitamente negli estratti pubblici.
+- Analizza solo i profili social inseriti dal candidato e gli snippet che corrispondono esattamente a quei link.
 - L'handle Instagram inserito dal candidato e autoritativo: non segnalare profili Instagram multipli o omonimi se non compaiono tra le fonti esatte.
 - Se le fonti non contengono altri profili, non parlare di "diverse fonti", "profili multipli", omonimi o incongruenze con persone diverse.
+- Per ogni confronto descrivi elementi concreti realmente presenti nelle fonti, ad esempio ruolo, formazione, esperienze, date o competenze.
+- Se non sono disponibili contenuti sufficienti per un confronto concreto, dichiaralo esplicitamente invece di formulare una valutazione generica.
+- Non premiare la semplice presenza di URL: un link collegato ma non leggibile non dimostra coerenza con il CV.
 - Non inventare dati non presenti.
 - sources deve restare una lista vuota: le fonti reali vengono aggiunte dal backend.
 """
 
     try:
         result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1400))
-        result["score"] = max(clamp_score(result.get("score", fallback["score"])), minimum_score)
+        ai_score = clamp_score(result.get("score", fallback["score"]))
+        score_cap = (
+            fallback["score"]
+            if evidence["linkedin_public_link_present"] and not evidence["linkedin_public_verified"]
+            else 95
+        )
+        if not evidence["can_compare_with_cv"]:
+            result["score"] = 0
+        else:
+            result["score"] = min(round((ai_score + fallback["score"]) / 2), score_cap)
         result["headline"] = result.get("headline") or fallback["headline"]
         result["summary"] = result.get("summary") or fallback["summary"]
         result["findings"] = result.get("findings") or fallback["findings"]
         result["sources"] = sources
+        result["linkedin_basic_info"] = fallback["linkedin_basic_info"]
+        result["analysis_evidence"] = evidence
+        if (
+            has_instagram
+            and not evidence["instagram_media_analyzed"]
+            and "instagram" in str(result.get("summary", "")).lower()
+        ):
+            result["summary"] = (
+                "Il confronto usa il CV e i profili pubblici verificabili disponibili. "
+                "Per Instagram risultano accessibili soltanto metadati o anteprime pubbliche: "
+                "foto e post non sono stati analizzati."
+            )
+        if not evidence["can_compare_with_cv"]:
+            result["headline"] = "Analisi non disponibile"
+            result["summary"] = evidence["zero_score_reason"]
+        if has_linkedin or evidence["linkedin_export_compared"]:
+            for finding in result["findings"]:
+                title = str(finding.get("title", "")).lower()
+                if "linkedin" in title:
+                    finding["status"] = "success" if linkedin_identity["status"] == "matched" else "warning"
+                    finding["description"] = describe_linkedin_evidence(evidence)
+                    finding["coach_tip"] = (
+                        "Controlla separatamente che il PDF LinkedIn caricato e il link pubblico appartengano al candidato."
+                    )
+        if has_instagram:
+            for finding in result["findings"]:
+                title = str(finding.get("title", "")).lower()
+                if "instagram" in title or "foto" in title or "contenuti pubblici" in title:
+                    finding["status"] = visual_media_finding_status(evidence)
+                    finding["description"] = describe_visual_media_analysis(evidence, has_instagram)
+                    finding["coach_tip"] = (
+                        "Controlla manualmente cosa risulta visibile a chi non segue il profilo. "
+                        "Per un controllo automatico dei contenuti servono media realmente accessibili."
+                    )
+        if has_other_profile:
+            for finding in result["findings"]:
+                title = str(finding.get("title", "")).lower()
+                if "portfolio" in title or "altri profili" in title or "link aggiuntivo" in title:
+                    finding["status"] = (
+                        "success"
+                        if evidence["additional_link"]["status"] == "matched"
+                        else "warning"
+                    )
+                    finding["description"] = evidence["additional_link"]["message"]
+                    finding["coach_tip"] = "Controlla manualmente cosa puo vedere un recruiter non autenticato."
         unsafe_text = json.dumps(result, ensure_ascii=False).lower()
         unsafe_patterns = [
             "profili multipli",
@@ -2829,28 +3781,20 @@ def delete_user_cv(user_id: int):
     }
 
 
-@app.post("/validate-cv-file")
-async def validate_cv_file(file: UploadFile = File(...)):
-    filename = (file.filename or "").strip()
+def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:
+    filename = filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     allowed_extensions = {"pdf", "docx", "txt"}
 
     if not filename or extension not in allowed_extensions:
         raise HTTPException(status_code=400, detail="Carica un file PDF, DOCX o TXT.")
 
-    file_bytes = await file.read()
-
-    print("=== VALIDAZIONE CV ===")
-    print("Filename:", file.filename)
-    print("Content type:", file.content_type)
-    print("File size:", len(file_bytes))
-
     if len(file_bytes) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Il CV non puo superare 5MB.")
 
     debug = {
         "filename": filename,
-        "content_type": file.content_type,
+        "content_type": content_type,
         "file_size": len(file_bytes),
         "extension": extension,
         "text_length": 0,
@@ -2870,10 +3814,6 @@ async def validate_cv_file(file: UploadFile = File(...)):
     normalized_text = clean_extracted_text(extracted_text)
     debug["text_length"] = len(normalized_text)
     debug["extraction_method"] = extraction_method
-
-    print("Extraction method:", extraction_method)
-    print("Text length:", len(normalized_text))
-    print("Text preview:", normalized_text[:1000])
 
     if len(normalized_text) == 0:
         return {
@@ -2921,6 +3861,12 @@ async def validate_cv_file(file: UploadFile = File(...)):
     }
 
 
+@app.post("/validate-cv-file")
+async def validate_cv_file(file: UploadFile = File(...)):
+    file_bytes = await file.read()
+    return validate_cv_content(file.filename or "", file_bytes, file.content_type)
+
+
 @app.post("/users/{user_id}/cv")
 def upload_user_cv(user_id: int, data: UserCvUpload):
     filename = data.filename.strip()
@@ -2932,6 +3878,26 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
 
     if data.size > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Il CV non puo superare 5MB.")
+
+    if not data.file_base64:
+        raise HTTPException(status_code=400, detail="Il contenuto del CV non e disponibile.")
+
+    try:
+        file_bytes = base64.b64decode(data.file_base64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Il contenuto del CV non e valido.")
+
+    if len(file_bytes) != data.size:
+        raise HTTPException(status_code=400, detail="Il file ricevuto non corrisponde al CV selezionato.")
+
+    validation = validate_cv_content(filename, file_bytes, data.content_type)
+    if not validation["is_cv"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Il file caricato non sembra essere un CV. {validation['reason']}",
+        )
+
+    extracted_text, _extraction_method = extract_text_from_file_bytes(file_bytes, filename)
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -2958,7 +3924,7 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
         filename,
         data.content_type,
         data.size,
-        (data.text or "")[:20000],
+        clean_extracted_text(extracted_text or data.text or "")[:20000],
         data.file_base64 or "",
         user_id,
     ))
@@ -2996,6 +3962,80 @@ def get_user_cv_file(user_id: int):
     }
 
 
+@app.post("/users/{user_id}/linkedin-profile")
+async def upload_linkedin_profile(user_id: int, file: UploadFile = File(...)):
+    filename = (file.filename or "").strip()
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    allowed_extensions = {"pdf", "docx", "txt"}
+
+    if not filename or extension not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Carica l'esportazione LinkedIn in formato PDF, DOCX o TXT.")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Il file LinkedIn e vuoto.")
+
+    if len(file_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="L'esportazione LinkedIn non puo superare 5MB.")
+
+    extracted_text, _extraction_method = extract_text_from_file_bytes(file_bytes, filename)
+    normalized_text = clean_extracted_text(extracted_text)
+    if len(normalized_text) < 80:
+        raise HTTPException(
+            status_code=400,
+            detail="Non riesco a leggere abbastanza testo dal file LinkedIn. Esporta il profilo come PDF oppure usa un file TXT.",
+        )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cursor.execute("""
+    UPDATE users
+    SET linkedin_profile_filename = ?,
+        linkedin_profile_text = ?,
+        digital_analysis_json = NULL
+    WHERE id = ?
+    """, (filename, normalized_text[:30000], user_id))
+    conn.commit()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    return {
+        "user": user_to_response(user),
+        "message": "Esportazione LinkedIn caricata correttamente.",
+    }
+
+
+@app.delete("/users/{user_id}/linkedin-profile")
+def delete_linkedin_profile(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cursor.execute("""
+    UPDATE users
+    SET linkedin_profile_filename = NULL,
+        linkedin_profile_text = NULL,
+        digital_analysis_json = NULL
+    WHERE id = ?
+    """, (user_id,))
+    conn.commit()
+    user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    return {
+        "user": user_to_response(user),
+        "message": "Esportazione LinkedIn rimossa.",
+    }
+
+
 @app.put("/users/{user_id}/digital-presence")
 def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
     conn = get_connection()
@@ -3006,11 +4046,13 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
         raise HTTPException(status_code=404, detail="Utente non trovato.")
 
     public_user = user_to_response(existing_user)
-    public_user["cv_text"] = existing_user[13] or ""
-    public_user["linkedin_url"] = (data.linkedin_url or "").strip()
+    public_user["cv_text"] = recover_saved_cv_text(cursor, existing_user)
+    public_user["linkedin_profile_text"] = existing_user[21] or ""
+    public_user["linkedin_url"] = normalize_linkedin_profile_url(data.linkedin_url)
     public_user["portfolio_url"] = (data.portfolio_url or "").strip()
     instagram_handle = normalize_instagram_handle(data.instagram_handle)
     public_user["instagram_handle"] = f"@{instagram_handle}" if instagram_handle else ""
+    public_user["visual_media_analysis"] = analyze_public_social_media(public_user)
 
     sources = search_public_profile_signals(public_user, data)
     digital_analysis = analyze_digital_profile(public_user, sources)
@@ -3039,6 +4081,112 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
         "user": user_to_response(user),
         "analysis": digital_analysis,
         "message": "Presenza digitale salvata.",
+    }
+
+
+@app.post("/users/{user_id}/social-screenshots")
+async def analyze_social_screenshots(
+    user_id: int,
+    profile_type: str = Form("instagram"),
+    files: List[UploadFile] = File(...),
+):
+    profile_type = profile_type.strip().lower()
+    if profile_type not in VISUAL_PROFILE_LABELS:
+        raise HTTPException(status_code=400, detail="Tipo di profilo non valido.")
+    if not files or len(files) > 8:
+        raise HTTPException(status_code=400, detail="Carica da 1 a 8 screenshot.")
+
+    image_inputs = []
+    for file in files:
+        content_type = (file.content_type or "").lower()
+        if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise HTTPException(status_code=400, detail="Usa screenshot JPG, PNG o WEBP.")
+        content = await file.read()
+        if not content or len(content) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Ogni screenshot deve pesare al massimo 5 MB.")
+        encoded = base64.b64encode(content).decode("ascii")
+        image_inputs.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{content_type};base64,{encoded}"},
+        })
+
+    screenshot_analysis = await run_in_threadpool(
+        moderate_visual_inputs,
+        image_inputs,
+        "uploaded_screenshots",
+        len(image_inputs),
+    )
+    if screenshot_analysis.get("status") == "rate_limited":
+        raise HTTPException(status_code=429, detail=screenshot_analysis["message"])
+    if screenshot_analysis.get("status") in {"provider_not_configured", "provider_unavailable"}:
+        raise HTTPException(status_code=503, detail=screenshot_analysis["message"])
+    conn = get_connection()
+    cursor = conn.cursor()
+    user = fetch_user_by_id(cursor, user_id)
+    if not user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    digital_analysis = json.loads(user[19]) if user[19] else {
+        "score": 0,
+        "headline": "Analisi screenshot completata",
+        "summary": screenshot_analysis["message"],
+        "findings": [],
+        "sources": [],
+        "analysis_evidence": {},
+    }
+    evidence = digital_analysis.setdefault("analysis_evidence", {})
+    previous_adjustment = int(evidence.get("visual_score_adjustment", 0) or 0)
+    profile_analyses = evidence.setdefault("visual_media_analyses", {})
+    screenshot_analysis["profile_type"] = profile_type
+    screenshot_analysis["profile_label"] = VISUAL_PROFILE_LABELS[profile_type]
+    profile_analyses[profile_type] = screenshot_analysis
+    visual_score_adjustment = calculate_visual_score_adjustment(profile_analyses)
+    evidence["visual_score_adjustment"] = visual_score_adjustment
+    evidence["visual_media_analysis"] = screenshot_analysis
+    evidence["instagram_media_analyzed"] = (
+        profile_analyses.get("instagram", {}).get("analyzed_content_count", 0) > 0
+    )
+    evidence["profile_screenshots_analyzed"] = sorted(profile_analyses)
+    if evidence.get("can_compare_with_cv"):
+        digital_analysis["score"] = clamp_score(
+            int(digital_analysis.get("score", 0) or 0) - previous_adjustment + visual_score_adjustment
+        )
+    findings = digital_analysis.setdefault("findings", [])
+    media_finding = next(
+        (
+            finding
+            for finding in findings
+            if "foto" in str(finding.get("title", "")).lower()
+            or "contenuti pubblici" in str(finding.get("title", "")).lower()
+        ),
+        None,
+    )
+    if not media_finding:
+        media_finding = {"title": "Foto e contenuti pubblici", "coach_tip": ""}
+        findings.append(media_finding)
+    media_finding["status"] = (
+        "warning"
+        if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
+        else "success"
+    )
+    media_finding["description"] = describe_profile_screenshot_analyses(profile_analyses)
+    media_finding["coach_tip"] = "Rivedi manualmente i contenuti segnalati prima di candidarti."
+
+    cursor.execute(
+        "UPDATE users SET digital_analysis_json = ? WHERE id = ?",
+        (json.dumps(digital_analysis, ensure_ascii=False), user_id),
+    )
+    conn.commit()
+    updated_user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+    return {
+        "user": user_to_response(updated_user),
+        "analysis": digital_analysis,
+        "message": (
+            f"{VISUAL_PROFILE_LABELS[profile_type]}: {screenshot_analysis['message']} "
+            f"Contributo visuale al punteggio: {visual_score_adjustment:+d}."
+        ),
     }
 
 

@@ -984,6 +984,67 @@ textarea {
   font-weight: 600;
 }
 
+.linkedin-access-note {
+  margin: -4px 0 8px;
+  color: #657586;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.linkedin-basic-card {
+  margin-bottom: 14px;
+}
+
+.linkedin-export-box {
+  margin: 12px 0 6px;
+  padding: 14px;
+  border: 1px solid #dceffa;
+  border-radius: 8px;
+  background: #f8fcff;
+}
+
+.linkedin-export-box p {
+  margin: 5px 0 10px;
+  font-size: 12px;
+}
+
+.linkedin-export-box input[type="file"] {
+  display: none;
+}
+
+#social-screenshot-files {
+  display: none;
+}
+
+.linkedin-export-button,
+.linkedin-export-status button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #0f76bb;
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: #ffffff;
+  color: #0f76bb;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.linkedin-export-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #526173;
+  font-size: 12px;
+}
+
+.linkedin-upload-message {
+  color: #23724c;
+  font-weight: 700;
+}
+
 .cv-skip-button {
   border: none;
   background: transparent;
@@ -1867,6 +1928,63 @@ textarea {
   margin-bottom: 16px;
   color: #6b5200;
   font-weight: 700;
+}
+
+.linkedin-export-button.disabled {
+  opacity: 0.62;
+  cursor: wait;
+  pointer-events: none;
+}
+
+.screenshot-upload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.screenshot-upload-box {
+  padding: 15px;
+  border: 1px solid #d8e8f5;
+  border-radius: 13px;
+  background: #fbfdff;
+}
+
+.screenshot-upload-box h4 {
+  margin: 0 0 6px;
+  color: #17395d;
+}
+
+.screenshot-upload-box p {
+  margin: 0 0 12px;
+  line-height: 1.45;
+}
+
+.screenshot-analysis-progress {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: #1e3a5f;
+}
+
+.screenshot-analysis-progress p {
+  margin: 5px 0 0;
+  line-height: 1.45;
+}
+
+.screenshot-analysis-spinner {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border: 3px solid #bfdbfe;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: splash-spinner-spin 0.85s linear infinite;
 }
 
 .error {

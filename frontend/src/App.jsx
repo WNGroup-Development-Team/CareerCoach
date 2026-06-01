@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import logoCareerCoach from "./assets/career-coach-logo.png";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
 const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
@@ -101,11 +101,49 @@ function normalizeProfileUrl(value = "") {
   return withProtocol.replace(/\/$/, "").toLowerCase();
 }
 
+function normalizeDigitalAnalysis(analysis) {
+  if (!analysis?.findings || analysis.analysis_evidence?.instagram_media_analyzed === true) {
+    return analysis;
+  }
+
+  const mediaAnalysis = analysis.analysis_evidence?.visual_media_analysis;
+  const instagramMessage = mediaAnalysis?.message || (
+    analysis.analysis_evidence?.instagram_metadata_found
+      ? "Il profilo Instagram risulta rintracciabile sul web. Questa versione analizza solo metadati testuali indicizzati: foto, video e post non sono stati analizzati, anche se il profilo e pubblico."
+      : "Instagram e stato collegato, ma non risultano contenuti pubblici accessibili. Se il profilo e privato, foto, bio e post non possono essere analizzati."
+  );
+
+  return {
+    ...analysis,
+    findings: analysis.findings.map((finding) => {
+      const title = String(finding.title || "").toLowerCase();
+      if (!title.includes("instagram") && !title.includes("foto") && !title.includes("contenuti pubblici")) {
+        return finding;
+      }
+
+      return {
+        ...finding,
+        status: "warning",
+        description: instagramMessage,
+      };
+    }),
+  };
+}
+
 function getProfilePath(value = "") {
   try {
     return new URL(normalizeProfileUrl(value)).pathname.replace(/^\/|\/$/g, "").toLowerCase();
   } catch {
     return "";
+  }
+}
+
+function getCanonicalProfileKey(value = "") {
+  try {
+    const url = new URL(normalizeProfileUrl(value));
+    return `${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/+$/, "").toLowerCase()}`;
+  } catch {
+    return normalizeProfileUrl(value).split("?")[0].replace(/\/+$/, "");
   }
 }
 
@@ -275,6 +313,8 @@ function App() {
     cv_uploaded: false,
     cv_text: "",
     linkedin_url: "",
+    linkedin_profile_filename: "",
+    linkedin_profile_uploaded: false,
     portfolio_url: "",
     instagram_handle: "",
   });
@@ -283,6 +323,15 @@ function App() {
   const [cvPreview, setCvPreview] = useState(null);
   const [isCvDragging, setIsCvDragging] = useState(false);
   const cvFileInputRef = useRef(null);
+  const linkedinFileInputRef = useRef(null);
+  const [linkedinUploadMessage, setLinkedinUploadMessage] = useState("");
+  const [socialScreenshotMessages, setSocialScreenshotMessages] = useState({});
+  const [screenshotAnalysisProgress, setScreenshotAnalysisProgress] = useState({
+    active: false,
+    fileCount: 0,
+    elapsedSeconds: 0,
+    profileType: "",
+  });
   const [cvValidation, setCvValidation] = useState({
     status: "idle",
     message: "",
@@ -345,6 +394,21 @@ function App() {
 
     return () => clearTimeout(transitionTimer);
   }, [loading]);
+
+  useEffect(() => {
+    if (!screenshotAnalysisProgress.active) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      setScreenshotAnalysisProgress((current) => ({
+        ...current,
+        elapsedSeconds: current.elapsedSeconds + 1,
+      }));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [screenshotAnalysisProgress.active]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -534,6 +598,8 @@ function App() {
       cv_uploaded: Boolean(user.cv_uploaded),
       cv_text: user.cv_text || "",
       linkedin_url: user.linkedin_url || "",
+      linkedin_profile_filename: user.linkedin_profile_filename || "",
+      linkedin_profile_uploaded: Boolean(user.linkedin_profile_uploaded),
       portfolio_url: user.portfolio_url || "",
       instagram_handle: user.instagram_handle || "",
     });
@@ -542,7 +608,7 @@ function App() {
       portfolio_url: user.portfolio_url || "",
       instagram_handle: user.instagram_handle || "",
     });
-    setDigitalAnalysis(user.digital_analysis || null);
+    setDigitalAnalysis(normalizeDigitalAnalysis(user.digital_analysis || null));
     setStepHistory([]);
     const firstStep = isProfileComplete(user) ? "home" : "cv-upload";
     window.history.replaceState({ careerCoachStep: firstStep }, "", window.location.pathname);
@@ -881,6 +947,8 @@ function App() {
         cv_uploaded: false,
         cv_text: "",
         linkedin_url: "",
+        linkedin_profile_filename: "",
+        linkedin_profile_uploaded: false,
         portfolio_url: "",
         instagram_handle: "",
       });
@@ -1127,6 +1195,80 @@ function App() {
     }));
   };
 
+  const uploadLinkedinProfile = async (file) => {
+    resetError();
+    setLinkedinUploadMessage("");
+
+    if (!file) {
+      return;
+    }
+
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    if (!["pdf", "docx", "txt"].includes(extension)) {
+      setError("Carica l'esportazione LinkedIn in formato PDF, DOCX o TXT.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/linkedin-profile`, {
+        method: "POST",
+        body: formData,
+      }, 45000);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nel caricamento del profilo LinkedIn.");
+        return;
+      }
+
+      setProfile((current) => ({
+        ...current,
+        ...data.user,
+      }));
+      setLinkedinUploadMessage("Esportazione LinkedIn pronta per il confronto con il CV.");
+    } catch (err) {
+      console.error(err);
+      setError("Errore nel caricamento dell'esportazione LinkedIn.");
+    } finally {
+      setLoading(false);
+      if (linkedinFileInputRef.current) {
+        linkedinFileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const deleteLinkedinProfile = async () => {
+    resetError();
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/linkedin-profile`, {
+        method: "DELETE",
+      }, 15000);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nella rimozione del profilo LinkedIn.");
+        return;
+      }
+
+      setProfile((current) => ({
+        ...current,
+        ...data.user,
+      }));
+      setLinkedinUploadMessage("Esportazione LinkedIn rimossa.");
+    } catch (err) {
+      console.error(err);
+      setError("Errore nella rimozione dell'esportazione LinkedIn.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const analyzeDigitalPresence = async () => {
     resetError();
     setLoading(true);
@@ -1151,13 +1293,65 @@ function App() {
         ...current,
         ...data.user,
       }));
-      setDigitalAnalysis(data.analysis || data.user?.digital_analysis || null);
+      setDigitalAnalysis(normalizeDigitalAnalysis(data.analysis || data.user?.digital_analysis || null));
       transitionToStep("cv-analysis");
     } catch (err) {
       console.error(err);
       setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const analyzeSocialScreenshots = async (profileType, files) => {
+    resetError();
+    setSocialScreenshotMessages((current) => ({ ...current, [profileType]: "" }));
+
+    const selectedFiles = Array.from(files || []);
+    if (!selectedFiles.length) {
+      return;
+    }
+
+    setScreenshotAnalysisProgress({
+      active: true,
+      fileCount: selectedFiles.length,
+      elapsedSeconds: 0,
+      profileType,
+    });
+    try {
+      const formData = new FormData();
+      formData.append("profile_type", profileType);
+      selectedFiles.forEach((file) => formData.append("files", file));
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/social-screenshots`, {
+        method: "POST",
+        body: formData,
+      }, 300000);
+      const data = await response.json();
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi degli screenshot.");
+        return;
+      }
+
+      setProfile((current) => ({ ...current, ...data.user }));
+      setDigitalAnalysis(normalizeDigitalAnalysis(data.analysis || data.user?.digital_analysis || null));
+      setSocialScreenshotMessages((current) => ({
+        ...current,
+        [profileType]: data.message || "Screenshot analizzati.",
+      }));
+    } catch (err) {
+      console.error(err);
+      setError(
+        err?.name === "AbortError"
+          ? "L'analisi locale degli screenshot sta richiedendo troppo tempo. Prova con meno immagini."
+          : "Errore di connessione durante l'analisi degli screenshot. Controlla che FastAPI e Ollama siano avviati."
+      );
+    } finally {
+      setScreenshotAnalysisProgress({
+        active: false,
+        fileCount: 0,
+        elapsedSeconds: 0,
+        profileType: "",
+      });
     }
   };
 
@@ -1562,36 +1756,33 @@ function App() {
   const profileInitial = (profile.name || profile.email || "U").trim().charAt(0).toUpperCase();
   const firstName = (profile.name || "Silvia").trim().split(/\s+/)[0];
   const interviewPreparationScore = progress?.average_total_score ?? 0;
-  const digitalCoherenceScore = digitalAnalysis?.score ?? 0;
+  const displayedDigitalAnalysis = normalizeDigitalAnalysis(digitalAnalysis);
+  const digitalCoherenceScore = displayedDigitalAnalysis?.score ?? 0;
   const exactInstagramHandle = normalizeInstagramHandle(digitalPresence.instagram_handle || profile.instagram_handle || "");
-  const exactLinkedinPath = getProfilePath(digitalPresence.linkedin_url || profile.linkedin_url || "");
-  const visibleDigitalSources = (digitalAnalysis?.sources || []).filter((source) => {
-    const url = source.url || "";
-    const title = source.title || "";
-
-    if (title.toLowerCase() === "linkedin inserito dal candidato") {
-      return false;
-    }
-
-    if (url.includes("linkedin.com")) {
-      return Boolean(exactLinkedinPath) && getProfilePath(url) === exactLinkedinPath;
-    }
-
-    if (url.includes("instagram.com")) {
-      if (!exactInstagramHandle) {
-        return false;
-      }
-
-      try {
-        const pathHandle = new URL(url).pathname.replace(/^\/|\/$/g, "").split("/")[0]?.toLowerCase();
-        return pathHandle === exactInstagramHandle;
-      } catch {
-        return url.toLowerCase().includes(`instagram.com/${exactInstagramHandle}`);
-      }
-    }
-
-    return true;
-  });
+  const linkedinProfileUrl = digitalPresence.linkedin_url || profile.linkedin_url || "";
+  const otherProfileUrl = digitalPresence.portfolio_url || profile.portfolio_url || "";
+  const connectedDigitalProfiles = [
+    linkedinProfileUrl ? { title: "Link LinkedIn pubblico", url: normalizeProfileUrl(linkedinProfileUrl) } : null,
+    exactInstagramHandle ? { title: `Instagram @${exactInstagramHandle}`, url: `https://www.instagram.com/${exactInstagramHandle}/` } : null,
+    otherProfileUrl ? { title: "Link aggiuntivo", url: normalizeProfileUrl(otherProfileUrl) } : null,
+  ].filter(Boolean);
+  const screenshotUploadBoxes = [
+    {
+      type: "instagram",
+      title: "Screenshot Instagram",
+      description: "Carica schermate del profilo, della bio o dei post pubblici visibili.",
+    },
+    {
+      type: "facebook",
+      title: "Screenshot Facebook",
+      description: "Utile quando Facebook richiede il login e impedisce il recupero automatico.",
+    },
+    {
+      type: "other",
+      title: "Screenshot di un altro profilo",
+      description: "Puoi caricare schermate di TikTok, GitHub, portfolio o altri profili pubblici.",
+    },
+  ];
 
   return (
     <div className={step === "auth" ? "page auth-page" : "page"}>
@@ -2040,13 +2231,57 @@ function App() {
               onChange={(event) => updateDigitalPresence("linkedin_url", event.target.value)}
               placeholder="https://linkedin.com/in/tuonome"
             />
+            <p className="linkedin-access-note">
+              Dal link pubblico possiamo verificare il profilo e leggere solo dati base o
+              snippet pubblici. Le sezioni complete di LinkedIn richiedono autorizzazioni dedicate.
+            </p>
 
-            <label>Portfolio o X (Twitter)</label>
+            <div className="linkedin-export-box">
+              <div>
+                <strong>Confronto completo con LinkedIn</strong>
+                <p>
+                  Carica l'esportazione PDF del tuo profilo LinkedIn per confrontare
+                  esperienze, formazione e competenze con il CV.
+                </p>
+              </div>
+
+              <input
+                id="linkedin-profile-file"
+                ref={linkedinFileInputRef}
+                type="file"
+                accept=".pdf,.docx,.txt"
+                onChange={(event) => uploadLinkedinProfile(event.target.files?.[0])}
+              />
+
+              {profile.linkedin_profile_uploaded ? (
+                <div className="linkedin-export-status">
+                  <span>
+                    File pronto: <strong>{profile.linkedin_profile_filename}</strong>
+                  </span>
+                  <button type="button" onClick={deleteLinkedinProfile} disabled={loading}>
+                    Rimuovi
+                  </button>
+                </div>
+              ) : (
+                <label className="linkedin-export-button" htmlFor="linkedin-profile-file">
+                  Carica esportazione LinkedIn
+                </label>
+              )}
+
+              {linkedinUploadMessage && <p className="linkedin-upload-message">{linkedinUploadMessage}</p>}
+            </div>
+
+            <label>Link aggiuntivo <span>(opzionale)</span></label>
             <input
               value={digitalPresence.portfolio_url}
               onChange={(event) => updateDigitalPresence("portfolio_url", event.target.value)}
-              placeholder="https://tuoportfolio.com"
+              placeholder="https://..."
             />
+            <p className="linkedin-access-note">
+              Puoi inserire qualsiasi URL pubblico: un altro profilo social, un sito
+              personale o una pagina professionale. Se il contenuto non e accessibile,
+              viene segnalato senza inventare un'analisi.
+            </p>
 
             <label>Instagram <span>(opzionale)</span></label>
             <input
@@ -2054,6 +2289,11 @@ function App() {
               onChange={(event) => updateDigitalPresence("instagram_handle", event.target.value)}
               placeholder="@tuo_handle"
             />
+            <p className="linkedin-access-note">
+              Proviamo automaticamente a recuperare i media visibili dal link pubblico.
+              Se Instagram blocca il recupero o il profilo e privato, potrai caricare
+              screenshot nella schermata successiva.
+            </p>
           </div>
 
           <button className="cv-next-button" onClick={analyzeDigitalPresence} disabled={loading}>
@@ -2093,7 +2333,64 @@ function App() {
 
           <h3 className="cv-detail-title">Dettagli Analisi</h3>
 
-          {(digitalAnalysis?.findings || []).map((finding, index) => (
+          {digitalAnalysis?.analysis_evidence && (
+            <div className="cv-analysis-card linkedin-basic-card">
+              <h3>Cosa abbiamo confrontato davvero</h3>
+              <p>
+                CV del profilo:{" "}
+                {digitalAnalysis.analysis_evidence.cv_profile_loaded
+                  ? `caricato (${digitalAnalysis.analysis_evidence.cv_filename || profile.cv_filename || "CV"})`
+                  : "non disponibile"}
+              </p>
+              <p>
+                PDF LinkedIn:{" "}
+                {digitalAnalysis.analysis_evidence.linkedin_export_compared
+                  ? `caricato e confrontato (${digitalAnalysis.analysis_evidence.linkedin_export_filename || profile.linkedin_profile_filename || "PDF LinkedIn"})`
+                  : "non caricato"}
+              </p>
+              <p>
+                Link LinkedIn pubblico: {digitalAnalysis.analysis_evidence.linkedin_public_identity?.message}
+              </p>
+              <p>
+                Profili pubblici verificati:{" "}
+                <strong>{digitalAnalysis.analysis_evidence.verified_profile_count || 0}</strong>
+              </p>
+              {!digitalAnalysis.analysis_evidence.can_compare_with_cv && (
+                <p>
+                  {digitalAnalysis.analysis_evidence.zero_score_reason}
+                </p>
+              )}
+              <p>
+                Instagram:{" "}
+                {digitalAnalysis.analysis_evidence.instagram_media_analyzed
+                  ? "screenshot o contenuti caricati analizzati"
+                  : digitalAnalysis.analysis_evidence.public_preview_analyzed
+                    ? "analizzata solo un'anteprima pubblica del profilo; foto e post non sono stati analizzati"
+                  : digitalAnalysis.analysis_evidence.instagram_metadata_found
+                    ? "profilo rintracciabile sul web: foto, video e post non sono stati analizzati"
+                    : "profilo non accessibile: foto e post non sono stati analizzati"}
+              </p>
+              <p>
+                Anteprime o screenshot analizzati:{" "}
+                <strong>
+                  {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_count || 0}
+                </strong>
+              </p>
+              <p>
+                Contributo delle analisi visuali al punteggio:{" "}
+                <strong>
+                  {(digitalAnalysis.analysis_evidence.visual_score_adjustment || 0) >= 0 ? "+" : ""}
+                  {digitalAnalysis.analysis_evidence.visual_score_adjustment || 0}
+                </strong>
+              </p>
+              <p>
+                Link aggiuntivo:{" "}
+                {digitalAnalysis.analysis_evidence.additional_link?.message}
+              </p>
+            </div>
+          )}
+
+          {(displayedDigitalAnalysis?.findings || []).map((finding, index) => (
             <div
               className={`cv-detail-card ${finding.status === "warning" ? "warning" : "success"}`}
               key={`${finding.title}-${index}`}
@@ -2109,16 +2406,89 @@ function App() {
             </div>
           ))}
 
-          {visibleDigitalSources.length > 0 && (
+          {["provider_not_configured", "provider_unavailable"].includes(
+            digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
+          ) && (
+            <div className="cv-analysis-card linkedin-basic-card">
+              <h3>Analisi visuale da configurare</h3>
+              <p>
+                Per analizzare gratuitamente le immagini in locale, installa Ollama, esegui
+                <strong> ollama pull moondream</strong> e assicurati che il servizio
+                Ollama sia avviato.
+              </p>
+              {digitalAnalysis?.analysis_evidence?.visual_media_analysis?.message && (
+                <p>{digitalAnalysis.analysis_evidence.visual_media_analysis.message}</p>
+              )}
+            </div>
+          )}
+
+          {!["provider_not_configured", "provider_unavailable"].includes(
+              digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
+            ) && (
+            <div className="cv-analysis-card linkedin-basic-card">
+              <h3>Completa il controllo delle immagini</h3>
+              <p>
+                Puoi caricare fino a 8 screenshot per ciascun profilo. Le immagini vengono
+                analizzate senza essere salvate come file e il risultato contribuisce al
+                punteggio complessivo.
+              </p>
+              <div className="screenshot-upload-grid">
+                {screenshotUploadBoxes.map((box) => {
+                  const isCurrentAnalysis =
+                    screenshotAnalysisProgress.active && screenshotAnalysisProgress.profileType === box.type;
+                  return (
+                    <div className="screenshot-upload-box" key={box.type}>
+                      <h4>{box.title}</h4>
+                      <p>{box.description}</p>
+                      <input
+                        id={`social-screenshot-files-${box.type}`}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        multiple
+                        disabled={screenshotAnalysisProgress.active}
+                        onChange={(event) => {
+                          analyzeSocialScreenshots(box.type, event.target.files);
+                          event.target.value = "";
+                        }}
+                      />
+                      <label
+                        className={`linkedin-export-button ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
+                        htmlFor={`social-screenshot-files-${box.type}`}
+                      >
+                        {isCurrentAnalysis ? "Analisi in corso..." : "Carica screenshot"}
+                      </label>
+                      {isCurrentAnalysis && (
+                        <div className="screenshot-analysis-progress" role="status">
+                          <div className="screenshot-analysis-spinner" />
+                          <div>
+                            <strong>
+                              Analisi locale di {screenshotAnalysisProgress.fileCount}{" "}
+                              {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
+                            </strong>
+                            <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
+                          </div>
+                        </div>
+                      )}
+                      {socialScreenshotMessages[box.type] && (
+                        <p className="linkedin-upload-message">{socialScreenshotMessages[box.type]}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {connectedDigitalProfiles.length > 0 && (
             <div className="cv-analysis-card">
-              <h3>Profili analizzati</h3>
+              <h3>Profili collegati</h3>
               <div className="source-list">
-                {visibleDigitalSources.slice(0, 4).map((source, index) => (
+                {connectedDigitalProfiles.map((source) => (
                   <a
                     href={source.url}
                     target="_blank"
                     rel="noreferrer"
-                    key={`${source.url}-${index}`}
+                    key={getCanonicalProfileKey(source.url)}
                   >
                     {source.title || source.url}
                   </a>
