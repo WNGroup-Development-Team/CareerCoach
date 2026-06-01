@@ -210,7 +210,7 @@ function CvFlowProgress({ currentStep, onStepSelect }) {
           const canReturnToStep = isComplete && typeof onStepSelect === "function";
           const stepContent = (
             <>
-              <span aria-hidden="true" />
+              <span aria-hidden="true">{isComplete ? "✓" : ""}</span>
               <strong>{flowStep.label}</strong>
             </>
           );
@@ -277,6 +277,7 @@ function App() {
     linkedin_url: "",
     portfolio_url: "",
     instagram_handle: "",
+    auth_provider: "",
   });
 
   const [cvFile, setCvFile] = useState(null);
@@ -536,6 +537,7 @@ function App() {
       linkedin_url: user.linkedin_url || "",
       portfolio_url: user.portfolio_url || "",
       instagram_handle: user.instagram_handle || "",
+      auth_provider: user.auth_provider || "",
     });
     setDigitalPresence({
       linkedin_url: user.linkedin_url || "",
@@ -1129,6 +1131,11 @@ function App() {
 
   const analyzeDigitalPresence = async () => {
     resetError();
+
+    if (!canAnalyzeDigitalPresence) {
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -1137,7 +1144,10 @@ function App() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(digitalPresence)
+        body: JSON.stringify({
+          ...digitalPresence,
+          linkedin_connected: isLinkedInConnected,
+        })
       }, 60000);
 
       const data = await response.json();
@@ -1563,6 +1573,13 @@ function App() {
   const firstName = (profile.name || "Silvia").trim().split(/\s+/)[0];
   const interviewPreparationScore = progress?.average_total_score ?? 0;
   const digitalCoherenceScore = digitalAnalysis?.score ?? 0;
+  const isLinkedInConnected = profile.auth_provider === "linkedin";
+  const hasAnyDigitalProfile = Boolean(
+    digitalPresence.linkedin_url.trim() ||
+    digitalPresence.portfolio_url.trim() ||
+    digitalPresence.instagram_handle.trim()
+  );
+  const canAnalyzeDigitalPresence = isLinkedInConnected || hasAnyDigitalProfile;
   const exactInstagramHandle = normalizeInstagramHandle(digitalPresence.instagram_handle || profile.instagram_handle || "");
   const exactLinkedinPath = getProfilePath(digitalPresence.linkedin_url || profile.linkedin_url || "");
   const visibleDigitalSources = (digitalAnalysis?.sources || []).filter((source) => {
@@ -2016,25 +2033,36 @@ function App() {
       )}
 
       {step === "cv-digital" && (
-        <section className="cv-flow-page">
+        <section className="cv-flow-page digital-profile-page">
           <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
 
-          <div className="cv-success-hero">
-            <div className="cv-success-icon">CV</div>
-            <h2>CV Caricato!</h2>
-            <p>
-              Il tuo file <strong>{profile.cv_filename || "CV"}</strong> e pronto.
-            </p>
+          <div className="cv-loaded-card">
+            <span className="cv-loaded-check" aria-hidden="true">✓</span>
+            <div>
+              <h2>CV caricato correttamente</h2>
+              <p>
+                <strong>{profile.cv_filename || "CV"}</strong> è pronto per l'analisi.
+              </p>
+            </div>
           </div>
 
-          <div className="cv-analysis-card">
-            <h3>Analisi Presenza Digitale</h3>
+          <div className="cv-analysis-card digital-profile-card">
+            <h3 className="digital-profile-title">Collega i tuoi profili online</h3>
             <p>
               Rafforza la tua candidatura. Collega i tuoi profili social per permettere
               all'AI di analizzare la coerenza tra il tuo CV e la tua presenza online.
             </p>
 
             <label>LinkedIn Profile Link</label>
+            {isLinkedInConnected && (
+              <div className="linkedin-connected-badge">
+                <span aria-hidden="true">✓</span>
+                <div>
+                  <strong>LinkedIn collegato</strong>
+                  <p>Accesso effettuato tramite LinkedIn.</p>
+                </div>
+              </div>
+            )}
             <input
               value={digitalPresence.linkedin_url}
               onChange={(event) => updateDigitalPresence("linkedin_url", event.target.value)}
@@ -2054,10 +2082,26 @@ function App() {
               onChange={(event) => updateDigitalPresence("instagram_handle", event.target.value)}
               placeholder="@tuo_handle"
             />
+
+            <p className="privacy-note">
+              <span aria-hidden="true">i</span>
+              I profili inseriti verranno usati solo per valutare la coerenza professionale del tuo percorso.
+            </p>
+
+            {!canAnalyzeDigitalPresence && (
+              <p className="digital-profile-help">
+                Inserisci almeno un profilo online oppure salta questo passaggio.
+              </p>
+            )}
           </div>
 
-          <button className="cv-next-button" onClick={analyzeDigitalPresence} disabled={loading}>
-            Analizza Coerenza Digitale
+          <button
+            className="cv-next-button digital-analyze-btn"
+            onClick={analyzeDigitalPresence}
+            disabled={loading || !canAnalyzeDigitalPresence}
+          >
+            <span>Analizza Coerenza Digitale</span>
+            <span className="button-arrow" aria-hidden="true">→</span>
           </button>
 
           <button className="cv-skip-button" onClick={() => transitionToStep("profile")}>
