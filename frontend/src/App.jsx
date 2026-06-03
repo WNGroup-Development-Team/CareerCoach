@@ -1821,7 +1821,7 @@ function App() {
     setPersonalizeForm((current) => ({
       goal: current.goal,
       company: current.company || (company === "Generica" ? "" : company),
-      role: current.role || profile.target_role || "",
+      role: current.role.toLowerCase() === "da definire" ? "" : current.role,
       link: current.link,
     }));
   };
@@ -1849,6 +1849,17 @@ function App() {
     event.preventDefault();
     resetError();
 
+    const hasInterviewContext = Boolean(
+      personalizeForm.goal.trim() ||
+      personalizeForm.company.trim() ||
+      (personalizeForm.role.trim() && personalizeForm.role.trim().toLowerCase() !== "da definire") ||
+      personalizeForm.link.trim()
+    );
+
+    if (!hasInterviewContext) {
+      return;
+    }
+
     const nextCompany = personalizeForm.company.trim() || "Generica";
     const nextRole = personalizeForm.role.trim();
 
@@ -1872,6 +1883,16 @@ function App() {
     }
 
     transitionToStep("gym");
+  };
+
+  const goToMainDashboard = () => {
+    if (step === "home") {
+      resetError();
+      setIsProfileMenuOpen(false);
+      return;
+    }
+
+    transitionToStep("home");
   };
 
   if (showSplash) {
@@ -1933,14 +1954,20 @@ function App() {
               <strong>Indietro</strong>
             </button>
 
-            <div className="navbar-brand">
+            <button
+              type="button"
+              className="navbar-brand"
+              onClick={goToMainDashboard}
+              aria-label="Torna alla dashboard principale"
+              title="Torna alla dashboard principale"
+            >
               <img
                 className="navbar-logo"
                 src={logoCareerCoach}
                 alt="Logo CareerCoach"
               />
               <span className="navbar-title">CareerCoach</span>
-            </div>
+            </button>
           </div>
 
           {userId && (
@@ -1973,7 +2000,7 @@ function App() {
         </header>
       )}
 
-      {userId && !["home", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
+      {userId && !["home", "personalize", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
         <nav className="navbar">
           <button onClick={() => transitionToStep("home")}>Home</button>
           <button onClick={() => transitionToStep("gym")}>Palestra colloqui</button>

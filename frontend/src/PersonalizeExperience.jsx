@@ -39,23 +39,43 @@ export default function PersonalizeExperience({
   role,
   submitLabel = "Continua",
 }) {
+  const normalizedRole = role.trim();
+  const hasRole = normalizedRole && normalizedRole.toLowerCase() !== "da definire";
+  const hasInterviewContext = Boolean(
+    goal.trim() ||
+    company.trim() ||
+    hasRole ||
+    link.trim()
+  );
+
+  const handleSubmit = (event) => {
+    if (!hasInterviewContext) {
+      event.preventDefault();
+      return;
+    }
+
+    onSubmit(event);
+  };
+
   return (
     <section className="personalize-page">
       <div className="personalize-heading">
-        <h2>Personalizza la tua esperienza</h2>
-        <p>Fornisci i dettagli per permettere all'IA di supportarti al meglio.</p>
+        <h2>Personalizza la simulazione</h2>
+        <p>Inserisci il ruolo o l'annuncio per ricevere domande e feedback piu mirati.</p>
       </div>
 
-      <form className="personalize-card" onSubmit={onSubmit}>
-        <label htmlFor="goal">Cosa vuoi fare?</label>
+      <form className="personalize-card" onSubmit={handleSubmit}>
+        <div className="quick-method-label">Metodo rapido</div>
+        <label htmlFor="goal">Per quale colloquio vuoi prepararti?</label>
         <textarea
           id="goal"
+          className="interview-textarea"
           value={goal}
           onChange={(event) => onChange("goal", event.target.value)}
-          placeholder="Descrivi il lavoro per cui vuoi prepararti (es. 'Voglio prepararmi per un colloquio in Google come UX Designer')."
+          placeholder="Es. Voglio prepararmi per un colloquio da Data Analyst in Google."
         />
 
-        <div className="personalize-divider">OPPURE FORNISCI DETTAGLI SPECIFICI</div>
+        <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
         <label htmlFor="personalize-company">Nome Azienda</label>
         <div className="personalize-field">
@@ -75,7 +95,7 @@ export default function PersonalizeExperience({
             id="personalize-role"
             value={role}
             onChange={(event) => onChange("role", event.target.value)}
-            placeholder="es. Junior UX Researcher"
+            placeholder="Es. UX Designer, Data Analyst, Software Engineer"
           />
         </div>
 
@@ -89,12 +109,28 @@ export default function PersonalizeExperience({
             placeholder="https://..."
           />
         </div>
-        <p className="personalize-hint">Opzionale, ma aiuta a fornire risposte piu mirate.</p>
+        <p className="personalize-hint form-helper-text">
+          Facoltativo: se inserisci l'annuncio, le domande saranno piu aderenti alla posizione.
+        </p>
 
         <div className="personalize-actions">
-          <button type="button" className="secondary-button" onClick={onBack}>Indietro</button>
-          <button type="submit" className="primary-button">{submitLabel}</button>
+          <button type="button" className="secondary-button card-back-btn" onClick={onBack}>
+            <span aria-hidden="true">&larr;</span>
+            Indietro
+          </button>
+          <button
+            type="submit"
+            className={`primary-button continue-cv-btn ${hasInterviewContext ? "active" : "disabled"}`}
+            disabled={!hasInterviewContext}
+          >
+            {submitLabel}
+          </button>
         </div>
+        {!hasInterviewContext && (
+          <p className="continue-helper-text">
+            Inserisci almeno una descrizione o un ruolo per continuare.
+          </p>
+        )}
       </form>
     </section>
   );

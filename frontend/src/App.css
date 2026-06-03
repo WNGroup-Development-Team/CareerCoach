@@ -1654,6 +1654,23 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  border: 0;
+  border-radius: 12px;
+  padding: 2px 4px;
+  background: transparent;
+  cursor: pointer;
+  transition: opacity 180ms ease, transform 180ms ease, background-color 180ms ease;
+}
+
+.navbar-brand:hover {
+  background: rgba(19, 159, 242, 0.08);
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.navbar-brand:focus-visible {
+  outline: 3px solid rgba(19, 159, 242, 0.24);
+  outline-offset: 3px;
 }
 
 .navbar-logo {
@@ -2114,10 +2131,10 @@ textarea {
 }
 
 .personalize-page {
-  width: min(100%, 430px);
+  width: min(100%, 580px);
   margin: 0 auto;
   display: grid;
-  gap: 34px;
+  gap: 26px;
 }
 
 .personalize-heading {
@@ -2125,7 +2142,7 @@ textarea {
 }
 
 .personalize-heading h2 {
-  max-width: 390px;
+  max-width: 560px;
   margin: 0 auto;
   color: #0f76a8;
   font-size: 42px;
@@ -2134,16 +2151,16 @@ textarea {
 }
 
 .personalize-heading p {
-  max-width: 390px;
-  margin: 18px auto 0;
+  max-width: 520px;
+  margin: 14px auto 0;
   color: #5f6f80;
-  font-size: 21px;
+  font-size: 19px;
   font-weight: 800;
   line-height: 1.45;
 }
 
 .personalize-card {
-  padding: 38px 28px 30px;
+  padding: 36px 32px 30px;
   border: 1px solid #dceffa;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.94);
@@ -2159,15 +2176,30 @@ textarea {
   letter-spacing: 0.01em;
 }
 
+.quick-method-label,
+.details-section-label {
+  color: #61758a;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.quick-method-label {
+  margin-bottom: 10px;
+}
+
 .personalize-card textarea {
-  min-height: 136px;
+  min-height: 150px;
   margin-bottom: 28px;
-  padding: 18px;
+  padding: 18px 20px;
   border-color: #cfd9e4;
   border-radius: 8px;
   color: #263548;
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 700;
+  line-height: 1.45;
+  overflow-y: auto;
   resize: vertical;
 }
 
@@ -2181,11 +2213,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0 0 14px;
-  color: #8a94a1;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.04em;
+  margin: 2px 0 18px;
 }
 
 .personalize-divider::after {
@@ -2230,9 +2258,9 @@ textarea {
 }
 
 .personalize-hint {
-  margin: -10px 0 22px;
-  color: #7b8794;
-  font-size: 15px;
+  margin: -12px 0 22px;
+  color: #6e7f92;
+  font-size: 13px;
   font-weight: 800;
   line-height: 1.4;
 }
@@ -2241,6 +2269,69 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: 12px;
+}
+
+.personalize-actions .card-back-btn {
+  min-height: 46px;
+  border: 1px solid #cfe6f7;
+  background: #f4fbff;
+  color: #466a86;
+  font-size: 15px;
+  font-weight: 900;
+  box-shadow: none;
+}
+
+.personalize-actions .card-back-btn span {
+  margin-right: 6px;
+}
+
+.personalize-actions .card-back-btn:hover {
+  border-color: #a9d7f3;
+  background: #eaf7ff;
+  color: #0f76a8;
+  transform: translateY(-1px);
+}
+
+.continue-cv-btn {
+  min-height: 48px;
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.continue-cv-btn.active {
+  background: linear-gradient(120deg, #139ff2 0%, #0f76bb 100%);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.continue-cv-btn.active:hover {
+  background: linear-gradient(120deg, #2bb0fb 0%, #0f6ea9 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.2);
+}
+
+.continue-cv-btn.disabled,
+.continue-cv-btn:disabled {
+  background: #e5f0f8;
+  color: #7d91a5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.continue-cv-btn.disabled:hover,
+.continue-cv-btn:disabled:hover {
+  background: #e5f0f8;
+  transform: none;
+  box-shadow: none;
+}
+
+.continue-helper-text {
+  margin: 12px 0 0;
+  color: #6e7f92;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+  text-align: center;
 }
 
 .card {
