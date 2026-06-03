@@ -302,6 +302,7 @@ class DigitalPresenceUpdate(BaseModel):
     linkedin_url: Optional[str] = None
     portfolio_url: Optional[str] = None
     instagram_handle: Optional[str] = None
+    linkedin_connected: bool = False
 
 
 class RegisterRequest(BaseModel):
@@ -535,6 +536,7 @@ def user_to_response(row):
         "linkedin_profile_filename": row[20],
         "linkedin_profile_uploaded": bool(row[20]),
         "linkedin_oauth_profile": json.loads(row[22]) if row[22] else None,
+        "auth_provider": row[23] if len(row) > 23 else None,
     }
 
 
@@ -574,7 +576,8 @@ def fetch_user_by_id(cursor, user_id: int):
         digital_analysis_json,
         linkedin_profile_filename,
         linkedin_profile_text,
-        linkedin_oauth_profile_json
+        linkedin_oauth_profile_json,
+        auth_provider
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -3581,7 +3584,8 @@ def get_user(user_id: int):
         cv_uploaded_at,
         linkedin_url,
         portfolio_url,
-        instagram_handle
+        instagram_handle,
+        auth_provider
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -3609,6 +3613,7 @@ def get_user(user_id: int):
         "linkedin_url": row[15],
         "portfolio_url": row[16],
         "instagram_handle": row[17],
+        "auth_provider": row[18],
     }
 
 
