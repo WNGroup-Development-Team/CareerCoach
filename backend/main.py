@@ -305,6 +305,13 @@ class DigitalPresenceUpdate(BaseModel):
     linkedin_connected: bool = False
 
 
+class CvOptimizationAnalysisRequest(BaseModel):
+    company: Optional[str] = None
+    role: Optional[str] = None
+    goal: Optional[str] = None
+    job_link: Optional[str] = None
+
+
 class RegisterRequest(BaseModel):
     name: str
     email: str
@@ -335,6 +342,9 @@ class GenerateQuestionRequest(BaseModel):
     interview_type: str
     difficulty: str = "intermedio"
     company: Optional[str] = "Generica"
+    goal: Optional[str] = ""
+    role: Optional[str] = ""
+    job_link: Optional[str] = ""
     question_mode: Optional[str] = "web"
 
 
@@ -1726,6 +1736,42 @@ def search_web_interview_questions(
         return []
 
 
+def search_job_context(company: str, role: str, job_link: str) -> List[Dict[str, str]]:
+    parts = [value.strip() for value in [job_link, company, role, "requisiti competenze job description"] if value and value.strip()]
+    query = " ".join(parts)
+
+    if not query:
+        return []
+
+    try:
+        print(f"Ricerca contesto candidatura avviata: {query}")
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 4,
+                "include_answer": False,
+                "include_raw_content": False
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        return [
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "content": item.get("content", "")
+            }
+            for item in results
+        ]
+    except Exception as e:
+        print(f"Errore ricerca contesto candidatura, continuo senza fonti web: {e}")
+        return []
+
+
 def sources_to_prompt(sources: List[Dict[str, str]]) -> str:
     if not sources:
         return "Nessuna fonte web trovata."
@@ -2897,6 +2943,156 @@ Regole:
         return fallback
 
 
+def build_fallback_cv_strategy(
+    user: Dict,
+    company: str,
+    role: str,
+    goal: str,
+    job_link: str,
+    sources: List[Dict[str, str]]
+) -> Dict:
+    has_cv_text = bool((user.get("cv_text") or "").strip())
+    has_role = bool(role and role != "Ruolo da definire")
+    has_company = bool(company and company != "Generica")
+    score = 52 + (18 if has_cv_text else 0) + (10 if has_role else 0) + (8 if has_company else 0) + (6 if sources else 0)
+    score = min(score, 84)
+
+    return {
+        "score": score,
+        "headline": "Analisi strategica pronta",
+        "summary": (
+            "Ho confrontato il CV disponibile con i dati della candidatura. "
+            "Per rendere il report piu preciso, assicurati che il CV caricato contenga testo estraibile."
+        ),
+        "strengths": [
+            {
+                "title": "Contesto candidatura definito",
+                "description": f"La candidatura e impostata su {role or 'un ruolo da definire'} presso {company or 'azienda generica'}.",
+                "coach_tip": "Mantieni nel CV le parole chiave piu vicine al ruolo scelto."
+            },
+            {
+                "title": "Base CV disponibile" if has_cv_text else "CV caricato ma testo limitato",
+                "description": (
+                    "Il testo del CV e disponibile per confrontare competenze, formazione ed esperienze."
+                    if has_cv_text
+                    else "Il file risulta caricato, ma il testo estraibile e scarso o assente. L'analisi resta preliminare."
+                ),
+                "coach_tip": "Se hai caricato PDF o DOCX, verifica che il testo sia selezionabile o carica una versione TXT per un'analisi piu accurata."
+            }
+        ],
+        "improvements": [
+            {
+                "title": "Quantifica i risultati",
+                "description": "Inserisci metriche concrete nelle esperienze: percentuali, volumi, tempi, impatto o miglioramenti ottenuti.",
+                "coach_tip": "Trasforma responsabilita generiche in risultati misurabili."
+            },
+            {
+                "title": "Allinea le competenze",
+                "description": "Evidenzia nel riepilogo e nelle esperienze le competenze richieste dal ruolo e dall'annuncio.",
+                "coach_tip": "Usa le stesse parole chiave dell'annuncio quando sono vere per il tuo profilo."
+            }
+        ],
+        "sources": sources,
+        "target": {
+            "company": company,
+            "role": role,
+            "goal": goal,
+            "job_link": job_link
+        }
+    }
+
+
+def normalize_cv_strategy_result(result: Dict, fallback: Dict, sources: List[Dict[str, str]], target: Dict) -> Dict:
+    score = clamp_score(result.get("score", fallback["score"]))
+    strengths = result.get("strengths") or fallback["strengths"]
+    improvements = result.get("improvements") or fallback["improvements"]
+
+    return {
+        "score": score,
+        "headline": result.get("headline") or fallback["headline"],
+        "summary": result.get("summary") or fallback["summary"],
+        "strengths": strengths[:6],
+        "improvements": improvements[:6],
+        "sources": sources,
+        "target": target,
+    }
+
+
+def analyze_cv_strategy(user: Dict, company: str, role: str, goal: str, job_link: str, sources: List[Dict[str, str]]) -> Dict:
+    target = {
+        "company": company,
+        "role": role,
+        "goal": goal,
+        "job_link": job_link,
+    }
+    fallback = build_fallback_cv_strategy(user, company, role, goal, job_link, sources)
+    prompt = f"""
+Sei un career coach e recruiter esperto di ottimizzazione CV.
+
+Analizza il CV del candidato rispetto a una candidatura specifica. Usa solo:
+- dati del profilo;
+- testo CV disponibile;
+- azienda, ruolo, obiettivo e link annuncio forniti dall'utente;
+- fonti web pubbliche fornite.
+
+Profilo candidato:
+- Nome: {user.get("name", "")}
+- Percorso di studi: {user.get("education", "")}
+- Settore: {user.get("sector", "")}
+- Livello esperienza: {user.get("experience_level", "")}
+
+Candidatura:
+- Azienda: {company}
+- Ruolo: {role}
+- Obiettivo dichiarato: {goal or "Non specificato"}
+- Link annuncio o azienda: {job_link or "Non specificato"}
+
+Estratto CV:
+{(user.get("cv_text") or "")[:8000]}
+
+Contesto web/annuncio:
+{sources_to_prompt(sources)}
+
+Restituisci SOLO JSON valido con questa struttura:
+{{
+  "score": 0,
+  "headline": "titolo breve",
+  "summary": "sintesi concreta",
+  "strengths": [
+    {{
+      "title": "punto di forza",
+      "description": "perche e rilevante rispetto al ruolo",
+      "coach_tip": "come valorizzarlo nel CV"
+    }}
+  ],
+  "improvements": [
+    {{
+      "title": "area da migliorare",
+      "description": "cosa manca o cosa non e abbastanza forte",
+      "coach_tip": "azione pratica per sistemarla"
+    }}
+  ]
+}}
+
+Regole:
+- score intero 0-100.
+- strengths deve contenere 2-5 elementi.
+- improvements deve contenere 2-5 elementi.
+- Sii specifico su competenze, formazione, esperienze, parole chiave e risultati quantificabili.
+- Distingui cio che e presente nel CV da cio che manca o va reso piu evidente.
+- Non inventare esperienze, aziende, titoli o competenze non presenti.
+- Se il testo CV e scarso o assente, dichiaralo e dai consigli su come rendere il CV analizzabile.
+- Scrivi in italiano, tono professionale e diretto.
+"""
+
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1800))
+        return normalize_cv_strategy_result(result, fallback, sources, target)
+    except Exception as exc:
+        print(f"Analisi strategica CV AI non riuscita, uso fallback: {exc}")
+        return fallback
+
+
 def get_question_type_instructions(interview_type: str, role: str, company: str) -> str:
     """
     Restituisce istruzioni specifiche per generare domande diverse
@@ -3966,7 +4162,6 @@ def get_user_cv_file(user_id: int):
         "uploaded_at": user[15],
     }
 
-
 @app.post("/users/{user_id}/linkedin-profile")
 async def upload_linkedin_profile(user_id: int, file: UploadFile = File(...)):
     filename = (file.filename or "").strip()
@@ -4038,6 +4233,35 @@ def delete_linkedin_profile(user_id: int):
     return {
         "user": user_to_response(user),
         "message": "Esportazione LinkedIn rimossa.",
+    }
+
+
+@app.post("/users/{user_id}/cv-optimization-analysis")
+def analyze_user_cv_for_optimization(user_id: int, data: CvOptimizationAnalysisRequest):
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    if not existing_user[10]:
+        raise HTTPException(status_code=400, detail="Carica un CV prima di avviare l'ottimizzazione.")
+
+    public_user = user_to_response(existing_user)
+    public_user["cv_text"] = existing_user[13] or ""
+
+    company = (data.company or "Generica").strip() or "Generica"
+    role = (data.role or public_user.get("target_role") or "Ruolo da definire").strip() or "Ruolo da definire"
+    goal = (data.goal or "").strip()
+    job_link = normalize_public_profile_url(data.job_link)
+    sources = search_job_context(company, role, job_link)
+    analysis = analyze_cv_strategy(public_user, company, role, goal, job_link, sources)
+
+    return {
+        "analysis": analysis,
+        "message": "Analisi strategica CV completata.",
     }
 
 
@@ -4254,7 +4478,10 @@ def generate_question(data: GenerateQuestionRequest):
 
     user_id, name, education, target_role, sector, experience_level, interview_language = user
 
-    company = data.company or "Generica"
+    company = (data.company or "Generica").strip() or "Generica"
+    personalized_goal = (data.goal or "").strip()
+    job_link = (data.job_link or "").strip()
+    role_for_questions = (data.role or target_role or "Ruolo da definire").strip()
     question_mode = data.question_mode or "web"
 
     sources = []
@@ -4262,7 +4489,7 @@ def generate_question(data: GenerateQuestionRequest):
     if question_mode in ["web", "mixed"]:
         sources = search_web_interview_questions(
             company=company,
-            role=target_role,
+            role=role_for_questions,
             interview_type=data.interview_type,
             language=interview_language
         )
@@ -4274,7 +4501,7 @@ def generate_question(data: GenerateQuestionRequest):
 
     question_type_instructions = get_question_type_instructions(
         interview_type=data.interview_type,
-        role=target_role,
+        role=role_for_questions,
         company=company
     )
 
@@ -4289,11 +4516,13 @@ Devi generare 10 domande di colloquio per questo candidato.
 Profilo candidato:
 - Nome: {name}
 - Percorso di studi: {education}
-- Ruolo target: {target_role}
+- Ruolo target: {role_for_questions}
 - Settore: {sector}
 - Livello esperienza: {experience_level}
 - Lingua colloquio: {interview_language}
 - Azienda target: {company}
+- Obiettivo dichiarato dal candidato: {personalized_goal or "Non specificato"}
+- Link annuncio o azienda: {job_link or "Non specificato"}
 - Tipo colloquio: {data.interview_type}
 - Difficoltà: {data.difficulty}
 
@@ -4312,7 +4541,7 @@ Regole:
 - Non scrivere frasi introduttive come "Ecco le 10 domande".
 - Scrivi esattamente 10 domande.
 - Ogni elemento della lista deve essere una domanda vera e deve finire con il punto interrogativo.
-- Le domande devono essere coerenti con ruolo, azienda, livello e difficoltà.
+- Le domande devono essere coerenti con obiettivo, ruolo, azienda, eventuale link, livello e difficoltà.
 - Non numerare le domande dentro il testo.
 
 Restituisci SOLO un JSON valido.
@@ -4342,11 +4571,13 @@ Devi generare 10 domande di colloquio realistiche per un candidato, ispirandoti 
 Profilo candidato:
 - Nome: {name}
 - Percorso di studi: {education}
-- Ruolo target: {target_role}
+- Ruolo target: {role_for_questions}
 - Settore: {sector}
 - Livello esperienza: {experience_level}
 - Lingua colloquio: {interview_language}
 - Azienda target: {company}
+- Obiettivo dichiarato dal candidato: {personalized_goal or "Non specificato"}
+- Link annuncio o azienda: {job_link or "Non specificato"}
 - Tipo colloquio: {data.interview_type}
 - Difficoltà: {data.difficulty}
 
@@ -4372,7 +4603,7 @@ Regole:
 - Non scrivere frasi introduttive come "Ecco le 10 domande".
 - Scrivi esattamente 10 domande.
 - Ogni elemento della lista deve essere una domanda vera e deve finire con il punto interrogativo.
-- Le domande devono essere coerenti con ruolo, azienda, livello e difficoltà.
+- Le domande devono essere coerenti con obiettivo, ruolo, azienda, eventuale link, livello e difficoltà.
 - Non numerare le domande dentro il testo.
 
 Restituisci SOLO un JSON valido.
@@ -4425,7 +4656,7 @@ La struttura deve essere ESATTAMENTE questa:
 
     elif data.interview_type == "tecniche":
         fallback_questions = [
-            f"Quali competenze tecniche ritieni fondamentali per il ruolo di {target_role}?",
+            f"Quali competenze tecniche ritieni fondamentali per il ruolo di {role_for_questions}?",
             "Raccontami un progetto tecnico che hai svolto e quali problemi hai incontrato.",
             "Come affronteresti un problema tecnico che non sai risolvere subito?",
             "Quali strumenti o tecnologie conosci che potrebbero essere utili per questo ruolo?",
@@ -4439,7 +4670,7 @@ La struttura deve essere ESATTAMENTE questa:
 
     elif data.interview_type == "logica":
         fallback_questions = [
-            f"Immagina di lavorare come {target_role}: hai tre attività urgenti, risorse limitate e informazioni incomplete. Come decideresti da cosa partire e perché?",
+            f"Immagina di lavorare come {role_for_questions}: hai tre attività urgenti, risorse limitate e informazioni incomplete. Come decideresti da cosa partire e perché?",
             "Quante palline da ping pong servirebbero, secondo te, per riempire la stanza in cui ti trovi? Spiega il ragionamento.",
             "Completa la serie numerica e spiega la regola: 2, 6, 12, 20, 30, ?",
             "Qual è l’angolo tra la lancetta dell’ora e quella dei minuti alle tre e quindici? Spiega il procedimento.",

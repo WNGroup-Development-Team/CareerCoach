@@ -1300,6 +1300,157 @@ textarea {
   box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
 }
 
+.cv-strategy-page {
+  width: min(100%, 430px);
+  min-height: calc(100vh - 64px);
+  margin: 0 auto;
+  padding: 34px 0 28px;
+  display: grid;
+  gap: 18px;
+}
+
+.cv-strategy-heading {
+  text-align: center;
+}
+
+.cv-strategy-heading h2 {
+  margin: 0;
+  color: #0f76a8;
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1.08;
+}
+
+.cv-strategy-heading p {
+  max-width: 300px;
+  margin: 8px auto 0;
+  color: #5f6f80;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.cv-strategy-score-card,
+.cv-strategy-section {
+  padding: 24px 22px;
+  border: 1px solid #dceffa;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+}
+
+.cv-strategy-score-card {
+  text-align: center;
+}
+
+.cv-strategy-score-card h3 {
+  margin: 8px 0 8px;
+  color: #263548;
+  font-size: 23px;
+}
+
+.cv-strategy-score-card p {
+  margin: 0 auto;
+  color: #526173;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.cv-strategy-section-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.cv-strategy-section-title span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #eaf4ff;
+  color: #0f76a8;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.cv-strategy-section-title span.success {
+  background: #bff4de;
+  color: #248269;
+}
+
+.cv-strategy-section-title span.warning {
+  background: #ffd5db;
+  color: #c62b45;
+}
+
+.cv-strategy-section-title h3 {
+  margin: 0;
+  color: #263548;
+  font-size: 22px;
+}
+
+.cv-strategy-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.cv-strategy-item + .cv-strategy-item {
+  margin-top: 18px;
+}
+
+.cv-strategy-item > span {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  margin-top: 2px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.cv-strategy-item.success > span {
+  color: #248269;
+}
+
+.cv-strategy-item.warning > span {
+  color: #f06a3a;
+}
+
+.cv-strategy-item strong {
+  display: block;
+  color: #263548;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.cv-strategy-item p {
+  margin: 4px 0 0;
+  color: #4e5f72;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.cv-strategy-item small {
+  display: block;
+  margin-top: 7px;
+  color: #7b8794;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
 .cv-view-header {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1962,6 +2113,136 @@ textarea {
   text-align: center;
 }
 
+.personalize-page {
+  width: min(100%, 430px);
+  margin: 0 auto;
+  display: grid;
+  gap: 34px;
+}
+
+.personalize-heading {
+  text-align: center;
+}
+
+.personalize-heading h2 {
+  max-width: 390px;
+  margin: 0 auto;
+  color: #0f76a8;
+  font-size: 42px;
+  font-weight: 900;
+  line-height: 1.05;
+}
+
+.personalize-heading p {
+  max-width: 390px;
+  margin: 18px auto 0;
+  color: #5f6f80;
+  font-size: 21px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.personalize-card {
+  padding: 38px 28px 30px;
+  border: 1px solid #dceffa;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 24px 55px rgba(15, 76, 129, 0.1);
+  text-align: left;
+}
+
+.personalize-card label {
+  margin: 0 0 8px;
+  color: #5b6470;
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 0.01em;
+}
+
+.personalize-card textarea {
+  min-height: 136px;
+  margin-bottom: 28px;
+  padding: 18px;
+  border-color: #cfd9e4;
+  border-radius: 8px;
+  color: #263548;
+  font-size: 18px;
+  font-weight: 700;
+  resize: vertical;
+}
+
+.personalize-card textarea::placeholder,
+.personalize-field input::placeholder {
+  color: #b8c1cd;
+  opacity: 1;
+}
+
+.personalize-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  color: #8a94a1;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.personalize-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: #e3eaf2;
+}
+
+.personalize-field {
+  position: relative;
+  margin-bottom: 24px;
+}
+
+.personalize-field svg {
+  position: absolute;
+  top: 50%;
+  left: 16px;
+  width: 24px;
+  height: 24px;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: #aeb8c4;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.personalize-field input {
+  min-height: 56px;
+  padding-left: 48px;
+  border-color: #cfd9e4;
+  border-radius: 8px;
+  color: #263548;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.personalize-field:focus-within svg {
+  stroke: #0f76a8;
+}
+
+.personalize-hint {
+  margin: -10px 0 22px;
+  color: #7b8794;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.personalize-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+}
+
 .card {
   background: var(--card);
   padding: 30px;
@@ -2179,6 +2460,40 @@ textarea {
 
 .choice-grid.three-columns {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.interview-context {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 20px 0 26px;
+}
+
+.interview-context div {
+  padding: 14px 16px;
+  border: 1px solid #dceffa;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.interview-context .full {
+  grid-column: 1 / -1;
+}
+
+.interview-context span {
+  display: block;
+  margin-bottom: 5px;
+  color: #7b8794;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.interview-context strong {
+  display: block;
+  color: #263548;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .choice {
@@ -2945,6 +3260,7 @@ textarea {
   }
 
   .form-grid,
+  .interview-context,
   .choice-grid,
   .progress-summary {
     grid-template-columns: 1fr;
@@ -3085,6 +3401,32 @@ textarea {
     width: 100%;
     align-items: flex-start;
     font-size: 12px;
+  }
+
+  .personalize-page {
+    width: 100%;
+    gap: 24px;
+  }
+
+  .personalize-heading h2 {
+    font-size: 34px;
+  }
+
+  .personalize-heading p {
+    font-size: 18px;
+  }
+
+  .personalize-card {
+    padding: 30px 22px 24px;
+  }
+
+  .personalize-card textarea,
+  .personalize-field input {
+    font-size: 16px;
+  }
+
+  .personalize-actions {
+    grid-template-columns: 1fr;
   }
 
   .profile-dashboard {
