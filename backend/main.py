@@ -1894,6 +1894,118 @@ def build_linkedin_basic_info(linkedin_url: str) -> Optional[Dict[str, str]]:
     }
 
 
+OFFICIAL_PROFILE_CAPABILITIES = {
+    "linkedin": {
+        "api": "LinkedIn OpenID Connect",
+        "source_quality": "official_oauth",
+        "can_verify_identity": True,
+        "can_read_basic_profile": True,
+        "can_read_professional_sections": False,
+        "can_read_posts": False,
+        "can_read_media": False,
+        "limitations": (
+            "Con OpenID Connect sono disponibili dati base di identita. "
+            "Esperienze, formazione, competenze, post e media richiedono permessi/prodotti LinkedIn non inclusi nel login base."
+        ),
+    },
+    "instagram": {
+        "api": "Instagram Graph API / Instagram API with Login",
+        "source_quality": "official_oauth_available",
+        "can_verify_identity": "limited",
+        "can_read_basic_profile": "with_permissions",
+        "can_read_professional_sections": False,
+        "can_read_posts": "business_or_creator_with_permissions",
+        "can_read_media": "business_or_creator_with_permissions",
+        "limitations": (
+            "Per account personali l'accesso ufficiale e limitato. Media e insight sono affidabili solo con account professionali "
+            "e permessi approvati da Meta."
+        ),
+    },
+    "facebook": {
+        "api": "Facebook Graph API",
+        "source_quality": "official_oauth_available",
+        "can_verify_identity": True,
+        "can_read_basic_profile": True,
+        "can_read_professional_sections": False,
+        "can_read_posts": "requires_permissions_and_app_review",
+        "can_read_media": "requires_permissions_and_app_review",
+        "limitations": (
+            "I contenuti personali sono fortemente limitati. Pagine e asset gestiti sono piu adatti a un controllo ufficiale."
+        ),
+    },
+}
+
+
+def build_standardized_official_profile_source(platform: str, oauth_profile: Dict, profile_url: str = "") -> Dict:
+    capabilities = OFFICIAL_PROFILE_CAPABILITIES.get(platform, {})
+    display_name = str(oauth_profile.get("name") or "").strip()
+    profile_image_available = bool(oauth_profile.get("picture"))
+    normalized_source = {
+        "platform": platform,
+        "source_quality": capabilities.get("source_quality", "official_oauth"),
+        "api": capabilities.get("api", "OAuth API"),
+        "profile_url": profile_url,
+        "identity": {
+            "display_name": display_name,
+            "email_verified": bool(oauth_profile.get("email_verified")),
+            "profile_image_available": profile_image_available,
+            "locale": oauth_profile.get("locale") or "",
+        },
+        "professional_profile": {
+            "headline": "",
+            "bio": "",
+            "work_experience": [],
+            "education": [],
+            "skills": [],
+        },
+        "content": {
+            "posts_summary": [],
+            "media_summary": [],
+            "media_risk": {
+                "analyzed": False,
+                "sensitive_count": 0,
+                "reason": "I media non sono disponibili tramite il profilo OAuth base.",
+            },
+        },
+        "capabilities": capabilities,
+        "limitations": capabilities.get("limitations", ""),
+    }
+    return normalized_source
+
+
+def build_official_profile_sources(user: Dict) -> List[Dict]:
+    sources = []
+    linkedin_oauth_profile = user.get("linkedin_oauth_profile") or {}
+    if linkedin_oauth_profile:
+        sources.append(
+            build_standardized_official_profile_source(
+                "linkedin",
+                linkedin_oauth_profile,
+                user.get("linkedin_url", ""),
+            )
+        )
+    return sources
+
+
+def official_profile_source_to_text(source: Dict) -> str:
+    identity = source.get("identity", {})
+    professional_profile = source.get("professional_profile", {})
+    capabilities = source.get("capabilities", {})
+    return (
+        f"Piattaforma: {source.get('platform', '')}. "
+        f"Qualita fonte: {source.get('source_quality', '')}. "
+        f"API: {source.get('api', '')}. "
+        f"Nome verificato via OAuth: {identity.get('display_name', '')}. "
+        f"Email verificata dal provider: {bool(identity.get('email_verified'))}. "
+        f"Foto profilo disponibile: {bool(identity.get('profile_image_available'))}. "
+        f"Headline disponibile: {bool(professional_profile.get('headline'))}. "
+        f"Esperienze disponibili: {len(professional_profile.get('work_experience') or [])}. "
+        f"Competenze disponibili: {len(professional_profile.get('skills') or [])}. "
+        f"Media disponibili: {capabilities.get('can_read_media')}. "
+        f"Limiti: {source.get('limitations', '')}"
+    )
+
+
 def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceUpdate) -> List[Dict[str, str]]:
     search_targets = []
     linkedin_url = normalize_linkedin_profile_url(digital_presence.linkedin_url)
@@ -1919,17 +2031,12 @@ def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceU
             "kind": "linkedin_export",
         })
 
-    linkedin_oauth_profile = user.get("linkedin_oauth_profile") or {}
-    if linkedin_oauth_profile:
+    for official_source in build_official_profile_sources(user):
         sources.append({
-            "title": "Dati base LinkedIn autorizzati tramite login",
+            "title": f"Dati ufficiali standardizzati: {official_source['platform']}",
             "url": linkedin_url,
-            "content": (
-                f"Nome: {linkedin_oauth_profile.get('name', '')}. "
-                f"Locale: {linkedin_oauth_profile.get('locale', '')}. "
-                f"Foto profilo disponibile: {bool(linkedin_oauth_profile.get('picture'))}."
-            ),
-            "kind": "linkedin_oauth_profile",
+            "content": official_profile_source_to_text(official_source),
+            "kind": f"official_oauth_{official_source['platform']}",
         })
 
     if linkedin_url:
@@ -2133,6 +2240,27 @@ def extract_image_base64(image_input: Dict) -> str:
     return data_url.split(",", 1)[1]
 
 
+VISUAL_SENSITIVE_CATEGORIES = {
+    "nudita",
+    "contenuto sessuale esplicito",
+    "contenuto intimo o non professionale",
+    "sexual",
+    "sexual/minors",
+}
+
+
+def is_sensitive_visual_category(category: str) -> bool:
+    normalized = str(category or "").strip().lower()
+    return (
+        normalized in VISUAL_SENSITIVE_CATEGORIES
+        or "sexual" in normalized
+        or "nudit" in normalized
+        or "nudita" in normalized
+        or "nude" in normalized
+        or "intim" in normalized
+    )
+
+
 def build_visual_analysis_result(
     source: str,
     discovered_count: int,
@@ -2141,6 +2269,11 @@ def build_visual_analysis_result(
     content_count: Optional[int] = None,
 ) -> Dict:
     flagged_results = [result for result in analyzed if result.get("flagged")]
+    sensitive_results = [
+        result
+        for result in flagged_results
+        if any(is_sensitive_visual_category(category) for category in result.get("categories", []))
+    ]
     categories = sorted({
         category
         for result in flagged_results
@@ -2165,6 +2298,7 @@ def build_visual_analysis_result(
         "analyzed_content_count": analyzed_content_count,
         "analyzed_preview_count": preview_count,
         "flagged_count": len(flagged_results),
+        "sensitive_flagged_count": len(sensitive_results),
         "failed_count": failed_count,
         "flagged_categories": categories,
         "message": (
@@ -2190,8 +2324,12 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
         prompt = (
             "Review the image. Return JSON only: "
             '{"flagged": boolean, "categories": string[], "summary": string}. '
-            "Use categories only from: nudita, contenuto sessuale esplicito, violenza, "
-            "armi, droghe, linguaggio offensivo visibile. Keep summary brief and factual."
+            "Use categories only from: nudita, contenuto sessuale esplicito, "
+            "contenuto intimo o non professionale, violenza, armi, droghe, "
+            "linguaggio offensivo visibile. Flag intimate, revealing, underwear, "
+            "topless, nude, or sexually suggestive images even when they are not explicit. "
+            "Do not flag pets, landscapes, food, hobbies, or neutral casual photos unless "
+            "another listed risk is visible. Keep summary brief and factual."
         )
     payload = {
         "model": OLLAMA_VISION_MODEL,
@@ -2220,8 +2358,17 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
     if uses_lightweight_description:
         description = content.lower()
         category_keywords = {
-            "nudita": ("nude", "nudity", "naked", "topless"),
+            "nudita": ("nude", "nudity", "naked", "topless", "bare chest"),
             "contenuto sessuale esplicito": ("explicit sexual", "sexual act", "sexually explicit"),
+            "contenuto intimo o non professionale": (
+                "underwear",
+                "lingerie",
+                "revealing",
+                "suggestive",
+                "intimate",
+                "shirtless",
+                "topless",
+            ),
             "violenza": ("violence", "violent", "blood", "injury", "wound"),
             "armi": ("weapon", "gun", "rifle", "knife", "firearm"),
             "droghe": ("drug", "cocaine", "heroin", "marijuana", "syringe"),
@@ -2242,6 +2389,7 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
     allowed_categories = {
         "nudita",
         "contenuto sessuale esplicito",
+        "contenuto intimo o non professionale",
         "violenza",
         "armi",
         "droghe",
@@ -2270,6 +2418,7 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
             "discovered_count": discovered_count,
             "analyzed_count": 0,
             "flagged_count": 0,
+            "sensitive_flagged_count": 0,
             "message": "Non sono stati recuperati media analizzabili automaticamente.",
         }
 
@@ -2299,6 +2448,7 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
             "discovered_count": discovered_count,
             "analyzed_count": 0,
             "flagged_count": 0,
+            "sensitive_flagged_count": 0,
             "failed_count": failed_count,
             "message": (
                 "Ollama non risponde oppure il modello visuale non e disponibile. "
@@ -2315,6 +2465,7 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
             "discovered_count": discovered_count,
             "analyzed_count": 0,
             "flagged_count": 0,
+            "sensitive_flagged_count": 0,
             "message": "Provider visuale non configurato. Usa VISION_PROVIDER=ollama oppure configura OpenAI.",
         }
     if openai_visual_rate_limited_until and datetime.utcnow() < openai_visual_rate_limited_until:
@@ -2325,6 +2476,7 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
             "discovered_count": discovered_count,
             "analyzed_count": 0,
             "flagged_count": 0,
+            "sensitive_flagged_count": 0,
             "message": "Il servizio OpenAI ha raggiunto il limite temporaneo. Attendi qualche minuto.",
         }
 
@@ -2361,6 +2513,7 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
         "discovered_count": discovered_count,
         "analyzed_count": 0,
         "flagged_count": 0,
+        "sensitive_flagged_count": 0,
         "failed_count": failed_count,
         "message": "I media sono stati trovati, ma l'analisi visuale OpenAI non e riuscita.",
     }
@@ -2457,8 +2610,13 @@ def calculate_visual_score_adjustment(profile_analyses: Dict[str, Dict]) -> int:
     for analysis in profile_analyses.values():
         if analysis.get("status") != "completed" or analysis.get("analyzed_content_count", 0) <= 0:
             continue
-        adjustment += -6 if analysis.get("flagged_count", 0) else 3
-    return max(-18, min(9, adjustment))
+        flagged_count = int(analysis.get("flagged_count", 0) or 0)
+        if flagged_count <= 0:
+            continue
+        sensitive_count = int(analysis.get("sensitive_flagged_count", 0) or 0)
+        generic_count = max(0, flagged_count - sensitive_count)
+        adjustment -= min(24, (sensitive_count * 12) + (generic_count * 5))
+    return max(-35, min(0, adjustment))
 
 
 def describe_profile_screenshot_analyses(profile_analyses: Dict[str, Dict]) -> str:
@@ -2565,16 +2723,58 @@ def evaluate_profile_identity(user: Dict, sources: List[Dict[str, str]], kinds: 
     }
 
 
+def evaluate_official_profile_identity(user: Dict, official_sources: List[Dict], platform: str) -> Dict:
+    matching_sources = [source for source in official_sources if source.get("platform") == platform]
+    if not matching_sources:
+        return {
+            "status": "not_connected",
+            "message": f"Nessun collegamento OAuth ufficiale disponibile per {platform}.",
+        }
+
+    candidate_tokens = normalize_identity_tokens(user.get("name"))
+    provider_name = matching_sources[0].get("identity", {}).get("display_name", "")
+    provider_tokens = normalize_identity_tokens(provider_name)
+
+    if not candidate_tokens or not provider_tokens:
+        return {
+            "status": "unverified",
+            "message": f"{platform} e collegato tramite OAuth, ma non ci sono abbastanza dati per confrontare il nome.",
+        }
+
+    common_tokens = candidate_tokens.intersection(provider_tokens)
+    if len(common_tokens) >= min(2, len(candidate_tokens)):
+        return {
+            "status": "matched",
+            "message": f"Identita {platform} verificata tramite OAuth ufficiale: il nome e compatibile con il candidato.",
+        }
+
+    return {
+        "status": "mismatch",
+        "message": f"Il profilo {platform} collegato via OAuth non sembra compatibile con il nome del candidato.",
+    }
+
+
 def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
+    official_profile_sources = build_official_profile_sources(user)
     linkedin_export_identity = evaluate_profile_identity(user, sources, {"linkedin_export"}, "PDF LinkedIn")
     linkedin_public_identity = evaluate_profile_identity(user, sources, {"linkedin_public_snippet"}, "profilo LinkedIn pubblico")
+    linkedin_official_identity = evaluate_official_profile_identity(user, official_profile_sources, "linkedin")
     instagram_identity = evaluate_profile_identity(user, sources, {"instagram_public_metadata"}, "profilo Instagram")
     other_profile_identity = evaluate_profile_identity(user, sources, {"other_profile_public_snippet"}, "profilo aggiuntivo")
     additional_link = classify_additional_link(user.get("portfolio_url", ""), sources, other_profile_identity)
     linkedin_export_verified = linkedin_export_identity["status"] == "matched"
     linkedin_public_verified = linkedin_public_identity["status"] == "matched"
+    linkedin_official_verified = linkedin_official_identity["status"] == "matched"
     linkedin_public_link_present = bool(user.get("linkedin_url"))
-    linkedin_verified = linkedin_public_verified if linkedin_public_link_present else linkedin_export_verified
+    if linkedin_public_link_present:
+        linkedin_identity = linkedin_public_identity
+        linkedin_verified = linkedin_public_verified
+    elif linkedin_export_verified or user.get("linkedin_profile_text"):
+        linkedin_identity = linkedin_export_identity
+        linkedin_verified = linkedin_export_verified
+    else:
+        linkedin_identity = linkedin_official_identity
+        linkedin_verified = False
     instagram_verified = False
     other_profile_verified = other_profile_identity["status"] == "matched"
     visual_media_analysis = user.get("visual_media_analysis") or {
@@ -2582,6 +2782,7 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "discovered_count": 0,
         "analyzed_count": 0,
         "flagged_count": 0,
+        "sensitive_flagged_count": 0,
     }
     verified_profiles = [
         profile
@@ -2595,19 +2796,24 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     return {
         "cv_profile_loaded": bool(user.get("cv_text")),
         "cv_filename": user.get("cv_filename") or "",
-        "linkedin_identity": linkedin_public_identity if linkedin_public_link_present else linkedin_export_identity,
+        "linkedin_identity": linkedin_identity,
         "linkedin_export_identity": linkedin_export_identity,
         "linkedin_public_identity": linkedin_public_identity,
+        "linkedin_official_identity": linkedin_official_identity,
         "instagram_identity": instagram_identity,
         "instagram_metadata_found": has_public_instagram_metadata(sources),
         "instagram_media_analyzed": visual_media_analysis.get("analyzed_content_count", 0) > 0,
         "public_preview_analyzed": visual_media_analysis.get("analyzed_preview_count", 0) > 0,
         "visual_media_analysis": visual_media_analysis,
+        "official_profile_sources": official_profile_sources,
+        "official_profile_source_count": len(official_profile_sources),
+        "official_profile_capabilities": OFFICIAL_PROFILE_CAPABILITIES,
         "other_profile_identity": other_profile_identity,
         "additional_link": additional_link,
         "linkedin_export_compared": bool(user.get("linkedin_profile_text")),
         "linkedin_export_filename": user.get("linkedin_profile_filename") or "",
         "linkedin_export_verified": linkedin_export_verified,
+        "linkedin_official_verified": linkedin_official_verified,
         "linkedin_public_link_present": linkedin_public_link_present,
         "linkedin_public_verified": linkedin_public_verified,
         "linkedin_public_snippet_found": any(source.get("kind") == "linkedin_public_snippet" for source in sources),
@@ -2626,25 +2832,29 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
 def describe_linkedin_evidence(evidence: Dict) -> str:
     messages = []
 
+    if evidence["linkedin_official_identity"]["status"] != "not_connected":
+        messages.append(f"OAuth LinkedIn ufficiale: {evidence['linkedin_official_identity']['message']}")
+
     if evidence["linkedin_export_compared"]:
         messages.append(f"PDF LinkedIn: {evidence['linkedin_export_identity']['message']}")
 
     if evidence["linkedin_public_link_present"]:
         messages.append(f"Link pubblico LinkedIn: {evidence['linkedin_public_identity']['message']}")
 
-    return " ".join(messages)
+    return " ".join(messages) or "LinkedIn non e stato collegato tramite link pubblico, PDF o OAuth."
 
 
 def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     has_linkedin = bool(user.get("linkedin_url"))
     has_linkedin_export = bool(user.get("linkedin_profile_text"))
-    has_linkedin_input = has_linkedin or has_linkedin_export
+    evidence = build_analysis_evidence(user, sources)
+    has_linkedin_official = evidence["linkedin_official_identity"]["status"] != "not_connected"
+    has_linkedin_input = has_linkedin or has_linkedin_export or has_linkedin_official
     has_instagram = bool(user.get("instagram_handle"))
     has_public_instagram = has_public_instagram_metadata(sources)
     has_other_profile = bool(user.get("portfolio_url"))
     has_public_other_profile = has_public_other_profile_signals(sources)
     has_cv_text = bool(user.get("cv_text"))
-    evidence = build_analysis_evidence(user, sources)
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
@@ -2657,6 +2867,7 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
         score = 24 + (12 if has_cv_text else 0)
         score += 18 if has_linkedin_export and evidence["linkedin_export_verified"] else 0
         score += 18 if evidence["linkedin_public_verified"] else 0
+        score += 6 if evidence["linkedin_official_verified"] else 0
         score += 10 if instagram_verified else 0
         score += 8 if other_profile_verified else 0
         score = clamp_score(score)
@@ -2712,12 +2923,13 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
 def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], score: int) -> Dict:
     has_linkedin = bool(user.get("linkedin_url"))
     has_linkedin_export = bool(user.get("linkedin_profile_text"))
-    has_linkedin_input = has_linkedin or has_linkedin_export
+    evidence = build_analysis_evidence(user, sources)
+    has_linkedin_official = evidence["linkedin_official_identity"]["status"] != "not_connected"
+    has_linkedin_input = has_linkedin or has_linkedin_export or has_linkedin_official
     has_instagram = bool(user.get("instagram_handle"))
     has_public_instagram = has_public_instagram_metadata(sources)
     has_other_profile = bool(user.get("portfolio_url"))
     has_public_other_profile = has_public_other_profile_signals(sources)
-    evidence = build_analysis_evidence(user, sources)
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
@@ -2802,8 +3014,12 @@ Valuta la coerenza professionale della presenza digitale del candidato usando so
 - dati del profilo candidato;
 - testo CV disponibile;
 - link inseriti;
+- dati API ufficiali gia standardizzati dal backend;
 - estratti web pubblici forniti.
 
+I dati in official_profile_sources arrivano da API/OAuth ufficiali e sono gia normalizzati dal backend.
+Usali per verificare identita, provenienza e qualita della fonte. Non usarli per dedurre esperienze, competenze,
+formazione, post o media se i relativi campi standardizzati sono vuoti o se la capability matrix indica che non sono leggibili.
 Non affermare di aver analizzato foto o post Instagram se visual_media_analysis.analyzed_content_count e 0. Le immagini recuperate automaticamente sono soltanto anteprime pubbliche della pagina: non provano che i post siano stati analizzati. Riporta soltanto l'esito verificato dal backend senza inventare dettagli sulle immagini.
 LinkedIn protegge molte sezioni del profilo. Non affermare di aver letto headline, esperienze, date, competenze o formazione da LinkedIn se queste informazioni non compaiono esplicitamente negli estratti pubblici forniti.
 Se Instagram e indicato ma non sono presenti metadati pubblici, segnala che il profilo potrebbe essere privato o non accessibile. La presenza di metadati o anteprime non prova che foto o post siano stati analizzati: usa sempre visual_media_analysis.analyzed_content_count.
@@ -2825,6 +3041,9 @@ Estratto CV:
 
 Esportazione LinkedIn caricata dal candidato:
 {(user.get("linkedin_profile_text") or "Non disponibile")[:6000]}
+
+Dati API/OAuth ufficiali standardizzati:
+{json.dumps(evidence.get("official_profile_sources", []), ensure_ascii=False)}
 
 Fonti pubbliche trovate:
 {sources_to_prompt(sources)}
@@ -2855,6 +3074,8 @@ Regole:
 - Se linkedin_identity.status e mismatch, segnala chiaramente che il link LinkedIn potrebbe appartenere a un'altra persona. Se non restano altri profili verificati, score deve essere 0.
 - findings deve includere almeno LinkedIn, coerenza CV/profili, foto o contenuti pubblici, link aggiuntivo, impatto recruiter.
 - Per LinkedIn considera sempre il link pubblico e l'identificativo del profilo. Considera headline, esperienze/date, competenze e formazione solo se compaiono esplicitamente negli estratti pubblici.
+- Se linkedin_export_compared e true, il PDF LinkedIn caricato e una fonte dettagliata: non dire che mancano informazioni dettagliate su LinkedIn. Puoi invece segnalare che il link pubblico LinkedIn espone solo informazioni limitate.
+- Se LinkedIn OAuth ufficiale e collegato, usalo come verifica identita di base, ma non come prova di coerenza professionale se non contiene sezioni professionali.
 - Analizza solo i profili social inseriti dal candidato e gli snippet che corrispondono esattamente a quei link.
 - L'handle Instagram inserito dal candidato e autoritativo: non segnalare profili Instagram multipli o omonimi se non compaiono tra le fonti esatte.
 - Se le fonti non contengono altri profili, non parlare di "diverse fonti", "profili multipli", omonimi o incongruenze con persone diverse.
@@ -2896,14 +3117,16 @@ Regole:
         if not evidence["can_compare_with_cv"]:
             result["headline"] = "Analisi non disponibile"
             result["summary"] = evidence["zero_score_reason"]
-        if has_linkedin or evidence["linkedin_export_compared"]:
+        if has_linkedin or evidence["linkedin_export_compared"] or evidence["linkedin_official_verified"]:
             for finding in result["findings"]:
                 title = str(finding.get("title", "")).lower()
                 if "linkedin" in title:
                     finding["status"] = "success" if linkedin_identity["status"] == "matched" else "warning"
                     finding["description"] = describe_linkedin_evidence(evidence)
                     finding["coach_tip"] = (
-                        "Controlla separatamente che il PDF LinkedIn caricato e il link pubblico appartengano al candidato."
+                        "Mantieni allineati date, titoli e descrizioni tra CV, PDF LinkedIn e profilo pubblico."
+                        if linkedin_identity["status"] == "matched"
+                        else "Controlla separatamente che il PDF LinkedIn caricato e il link pubblico appartengano al candidato."
                     )
         if has_instagram:
             for finding in result["findings"]:
@@ -4236,6 +4459,32 @@ def delete_linkedin_profile(user_id: int):
     }
 
 
+@app.get("/users/{user_id}/official-profiles")
+def get_user_official_profiles(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    public_user = user_to_response(existing_user)
+    public_user["linkedin_profile_text"] = existing_user[21] or ""
+    official_sources = build_official_profile_sources(public_user)
+
+    return {
+        "sources": official_sources,
+        "source_count": len(official_sources),
+        "capabilities": OFFICIAL_PROFILE_CAPABILITIES,
+        "message": (
+            "Fonti OAuth/API ufficiali standardizzate recuperate."
+            if official_sources
+            else "Nessun profilo ufficiale collegato via OAuth/API."
+        ),
+    }
+
+
 @app.post("/users/{user_id}/cv-optimization-analysis")
 def analyze_user_cv_for_optimization(user_id: int, data: CvOptimizationAnalysisRequest):
     conn = get_connection()
@@ -4400,7 +4649,11 @@ async def analyze_social_screenshots(
         else "success"
     )
     media_finding["description"] = describe_profile_screenshot_analyses(profile_analyses)
-    media_finding["coach_tip"] = "Rivedi manualmente i contenuti segnalati prima di candidarti."
+    media_finding["coach_tip"] = (
+        "Rivedi manualmente i contenuti intimi o sensibili segnalati prima di candidarti."
+        if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
+        else "Gli screenshot senza contenuti sensibili non aumentano il punteggio: la coerenza professionale resta basata su CV, profili verificabili e contenuti rilevanti."
+    )
 
     cursor.execute(
         "UPDATE users SET digital_analysis_json = ? WHERE id = ?",
@@ -4414,7 +4667,7 @@ async def analyze_social_screenshots(
         "analysis": digital_analysis,
         "message": (
             f"{VISUAL_PROFILE_LABELS[profile_type]}: {screenshot_analysis['message']} "
-            f"Contributo visuale al punteggio: {visual_score_adjustment:+d}."
+            f"Impatto visuale sul punteggio: {visual_score_adjustment:+d}."
         ),
     }
 

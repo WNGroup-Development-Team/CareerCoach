@@ -2525,6 +2525,19 @@ function App() {
                 Link LinkedIn pubblico: {digitalAnalysis.analysis_evidence.linkedin_public_identity?.message}
               </p>
               <p>
+                Fonti API/OAuth ufficiali:{" "}
+                {(digitalAnalysis.analysis_evidence.official_profile_source_count || 0) > 0 ? (
+                  <>
+                    <strong>{digitalAnalysis.analysis_evidence.official_profile_source_count}</strong>
+                    {digitalAnalysis.analysis_evidence.linkedin_official_identity?.message
+                      ? ` - ${digitalAnalysis.analysis_evidence.linkedin_official_identity.message}`
+                      : ""}
+                  </>
+                ) : (
+                  "non collegate"
+                )}
+              </p>
+              <p>
                 Profili pubblici verificati:{" "}
                 <strong>{digitalAnalysis.analysis_evidence.verified_profile_count || 0}</strong>
               </p>
@@ -2544,15 +2557,19 @@ function App() {
                     : "profilo non accessibile: foto e post non sono stati analizzati"}
               </p>
               <p>
-                Anteprime o screenshot analizzati:{" "}
+                Anteprime pubbliche analizzate:{" "}
                 <strong>
-                  {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_count || 0}
+                  {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_preview_count || 0}
+                </strong>
+                {" "}· Screenshot/contenuti caricati:{" "}
+                <strong>
+                  {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_content_count || 0}
                 </strong>
               </p>
               <p>
-                Contributo delle analisi visuali al punteggio:{" "}
+                Impatto delle analisi visuali sul punteggio:{" "}
                 <strong>
-                  {(digitalAnalysis.analysis_evidence.visual_score_adjustment || 0) >= 0 ? "+" : ""}
+                  {(digitalAnalysis.analysis_evidence.visual_score_adjustment || 0) > 0 ? "+" : ""}
                   {digitalAnalysis.analysis_evidence.visual_score_adjustment || 0}
                 </strong>
               </p>
@@ -2602,8 +2619,8 @@ function App() {
               <h3>Completa il controllo delle immagini</h3>
               <p>
                 Puoi caricare fino a 8 screenshot per ciascun profilo. Le immagini vengono
-                analizzate senza essere salvate come file e il risultato contribuisce al
-                punteggio complessivo.
+                analizzate senza essere salvate come file: eventuali contenuti sensibili
+                possono ridurre il punteggio complessivo.
               </p>
               <div className="screenshot-upload-grid">
                 {screenshotUploadBoxes.map((box) => {
