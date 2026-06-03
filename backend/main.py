@@ -13,6 +13,7 @@ import urllib.parse
 import io
 import ipaddress
 import socket
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from html.parser import HTMLParser
@@ -310,6 +311,13 @@ class CvOptimizationAnalysisRequest(BaseModel):
     role: Optional[str] = None
     goal: Optional[str] = None
     job_link: Optional[str] = None
+
+
+class JobValidationRequest(BaseModel):
+    description: Optional[str] = None
+    company: Optional[str] = None
+    role: Optional[str] = None
+    link: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):
@@ -4205,6 +4213,651 @@ def delete_user_cv(user_id: int):
     }
 
 
+GENERIC_BAD_INPUTS = {
+    "aaaaaa", "aaa", "asdf", "asdfgh", "asdfghjkl", "qwerty", "boh",
+    "non lo so", "non saprei", "chi lo sa", "azienda a caso",
+    "lavoro qualunque", "qualunque", "a caso", "test", "prova",
+    "nessuna idea", "non ho idea", "n/a", "na"
+}
+
+ROLE_KEYWORDS = {
+    "analyst", "analista", "engineer", "developer", "sviluppatore",
+    "designer", "manager", "specialist", "consultant", "consulente",
+    "marketing", "sales", "account", "hr", "human resources",
+    "recruiter", "project", "product", "data", "software", "frontend",
+    "backend", "full stack", "cybersecurity", "security", "ux", "ui",
+    "finance", "controller", "assistant", "coordinator", "operations",
+    "researcher", "scientist", "copywriter", "content", "seo", "devops",
+    "cloud", "qa", "tester", "business", "amministrativo", "contabile"
+}
+
+KNOWN_COMPANIES = {
+    "google", "amazon", "microsoft", "apple", "meta", "facebook",
+    "netflix", "tesla", "ibm", "oracle", "accenture", "deloitte",
+    "pwc", "kpmg", "ey", "linkedin", "spotify", "salesforce",
+    "adobe", "sap", "siemens", "enel", "eni", "intesa sanpaolo",
+    "unicredit", "poste italiane", "telecom", "tim", "ferrari",
+    "lamborghini", "barilla", "luxottica", "gucci", "prada"
+}
+
+
+def strip_accents(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def normalize_plain_text(value: Optional[str]) -> str:
+    value = strip_accents(value or "").lower()
+    value = re.sub(r"https?://\S+", " ", value)
+    value = re.sub(r"[^a-z0-9\s&.+#/-]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_low_quality_text(value: Optional[str], min_chars: int = 3, min_words: int = 1) -> bool:
+    cleaned = normalize_plain_text(value)
+    compact = re.sub(r"[^a-z0-9]", "", cleaned)
+
+    if len(compact) < min_chars:
+        return True
+
+    if cleaned in GENERIC_BAD_INPUTS or compact in GENERIC_BAD_INPUTS:
+        return True
+
+    if len(re.findall(r"[a-z0-9]+", cleaned)) < min_words:
+        return True
+
+    if re.fullmatch(r"(.)\1{3,}", compact or ""):
+        return True
+
+    if re.search(r"([a-z0-9]{1,3})\1{3,}", compact):
+        return True
+
+    vowels = len(re.findall(r"[aeiou]", compact))
+    letters = len(re.findall(r"[a-z]", compact))
+    if letters >= 8 and vowels == 0:
+        return True
+
+    unique_ratio = len(set(compact)) / max(len(compact), 1)
+    if len(compact) >= 8 and unique_ratio < 0.28:
+        return True
+
+    return False
+
+
+def validate_role_plausibility(role: Optional[str]) -> Dict:
+    cleaned = normalize_plain_text(role)
+
+    if is_low_quality_text(cleaned, min_chars=4, min_words=1):
+        return {
+            "is_valid": False,
+            "message": "Il ruolo inserito non sembra coerente. Inserisci un ruolo reale, ad esempio Data Analyst, Software Engineer o Marketing Specialist.",
+        }
+
+    if cleaned in {"lavoro", "ruolo", "impiego", "posto", "qualsiasi lavoro", "lavoro qualunque"}:
+        return {
+            "is_valid": False,
+            "message": "Il ruolo inserito e troppo generico. Inserisci un ruolo lavorativo specifico.",
+        }
+
+    words = cleaned.split()
+    has_role_keyword = any(keyword in cleaned for keyword in ROLE_KEYWORDS)
+    looks_like_title = 1 <= len(words) <= 6 and any(len(word) >= 3 for word in words)
+
+    if has_role_keyword or (looks_like_title and len(cleaned) >= 6):
+        return {"is_valid": True, "message": "Ruolo plausibile."}
+
+    return {
+        "is_valid": False,
+        "message": "Il ruolo inserito non sembra coerente. Inserisci un ruolo reale, ad esempio Data Analyst, Software Engineer o Marketing Specialist.",
+    }
+
+
+def tokenize_meaningful(value: Optional[str]) -> set:
+    stopwords = {
+        "per", "un", "una", "uno", "il", "lo", "la", "i", "gli", "le",
+        "di", "da", "in", "a", "con", "su", "del", "della", "dello",
+        "voglio", "prepararmi", "colloquio", "lavoro", "annuncio",
+        "azienda", "ruolo", "presso", "come", "for", "the", "and"
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9+#.-]*", normalize_plain_text(value))
+        if len(token) > 2 and token not in stopwords
+    }
+
+
+def fields_are_coherent(description: str, company: str, role: str) -> tuple[bool, List[str]]:
+    warnings = []
+    desc_tokens = tokenize_meaningful(description)
+    company_tokens = tokenize_meaningful(company)
+    role_tokens = tokenize_meaningful(role)
+
+    if description and len(normalize_plain_text(description)) >= 20:
+        if company_tokens and not company_tokens.intersection(desc_tokens):
+            warnings.append("La descrizione non cita l'azienda indicata.")
+
+        if role_tokens and not role_tokens.intersection(desc_tokens):
+            warnings.append("La descrizione non cita il ruolo indicato.")
+
+    coherent = len(warnings) == 0
+    if len(warnings) == 1 and len(desc_tokens) >= 10:
+        coherent = True
+
+    return coherent, warnings
+
+
+def validate_job_link(link: Optional[str], company: str, role: str) -> Dict:
+    link = (link or "").strip()
+    if not link:
+        return {"is_valid": True, "message": "Link non inserito.", "normalized_link": ""}
+
+    if " " in link or is_low_quality_text(link, min_chars=8, min_words=1):
+        return {
+            "is_valid": False,
+            "message": "Il link inserito non sembra valido. Inserisci un URL completo, ad esempio https://careers.google.com.",
+            "normalized_link": "",
+        }
+
+    normalized_link = link if re.match(r"^https?://", link, re.I) else f"https://{link}"
+
+    try:
+        parsed = urllib.parse.urlparse(normalized_link)
+    except Exception:
+        parsed = None
+
+    if not parsed or parsed.scheme not in {"http", "https"} or "." not in parsed.netloc:
+        return {
+            "is_valid": False,
+            "message": "Il link inserito non e un URL valido.",
+            "normalized_link": "",
+        }
+
+    host_and_path = normalize_plain_text(f"{parsed.netloc} {parsed.path}")
+    company_tokens = tokenize_meaningful(company)
+    role_tokens = tokenize_meaningful(role)
+    trusted_job_hosts = ["linkedin", "indeed", "glassdoor", "greenhouse", "lever", "workday", "successfactors", "careers", "jobs"]
+    linked_to_company = bool(company_tokens and any(token in host_and_path for token in company_tokens))
+    linked_to_role = bool(role_tokens and any(token in host_and_path for token in role_tokens))
+    is_job_platform = any(host in host_and_path for host in trusted_job_hosts)
+
+    if company_tokens and not (linked_to_company or linked_to_role or is_job_platform):
+        return {
+            "is_valid": False,
+            "message": "Il link non sembra collegato all'azienda o alla posizione indicata.",
+            "normalized_link": normalized_link,
+        }
+
+    return {
+        "is_valid": True,
+        "message": "Link valido.",
+        "normalized_link": normalized_link,
+    }
+
+
+def verify_company_exists(company: str) -> Dict:
+    cleaned = normalize_plain_text(company)
+    if is_low_quality_text(cleaned, min_chars=3, min_words=1):
+        return {
+            "exists": False,
+            "confidence": 0,
+            "sources": [],
+            "message": "Non sono riuscito a verificare l'esistenza dell'azienda inserita. Controlla che il nome sia corretto.",
+        }
+
+    if not TAVILY_API_KEY:
+        plausible = cleaned in KNOWN_COMPANIES or bool(re.search(r"[a-z]{3,}", cleaned))
+        return {
+            "exists": plausible,
+            "confidence": 55 if plausible else 20,
+            "sources": [],
+            "message": (
+                "Azienda plausibile in base ai controlli locali. Configura TAVILY_API_KEY per la verifica web."
+                if plausible
+                else "Non sono riuscito a verificare l'esistenza dell'azienda inserita. Controlla che il nome sia corretto."
+            ),
+        }
+
+    query = f'{company} official website LinkedIn careers company'
+    try:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 5,
+                "include_answer": False,
+                "include_raw_content": False,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+    except Exception as exc:
+        print(f"Verifica azienda Tavily non riuscita, uso fallback locale: {exc}")
+        return {
+            "exists": cleaned in KNOWN_COMPANIES or len(cleaned) >= 3,
+            "confidence": 45,
+            "sources": [],
+            "message": "Verifica web non disponibile al momento; ho applicato un controllo locale di plausibilita.",
+        }
+
+    company_tokens = tokenize_meaningful(company)
+    sources = []
+    score = 0
+
+    for item in results:
+        title = item.get("title", "")
+        url = item.get("url", "")
+        content = item.get("content", "")
+        haystack = normalize_plain_text(f"{title} {url} {content}")
+        token_hits = sum(1 for token in company_tokens if token in haystack)
+        trusted_hit = any(marker in haystack for marker in ["official", "linkedin", "careers", "azienda", "company"])
+
+        if token_hits:
+            score += 25 + (10 if trusted_hit else 0)
+            sources.append({"title": title, "url": url, "content": content})
+
+    exists = score >= 25
+    return {
+        "exists": exists,
+        "confidence": clamp_score(score),
+        "sources": sources[:4],
+        "message": (
+            "Azienda verificata con fonti web coerenti."
+            if exists
+            else "Non sono riuscito a verificare l'esistenza dell'azienda inserita. Controlla che il nome sia corretto."
+        ),
+    }
+
+
+def validate_job_input(description: str, company: str, role: str, link: str) -> Dict:
+    errors = {}
+    warnings = []
+
+    if is_low_quality_text(description, min_chars=20, min_words=4):
+        errors["description"] = "La descrizione e troppo breve o non sembra descrivere una candidatura reale."
+
+    if is_low_quality_text(company, min_chars=3, min_words=1):
+        errors["company"] = "Il nome azienda non sembra valido."
+
+    role_validation = validate_role_plausibility(role)
+    if not role_validation["is_valid"]:
+        errors["role"] = role_validation["message"]
+
+    link_validation = validate_job_link(link, company, role)
+    if not link_validation["is_valid"]:
+        errors["link"] = link_validation["message"]
+
+    coherent, coherence_warnings = fields_are_coherent(description, company, role)
+    if not coherent:
+        errors["coherence"] = "La descrizione non sembra coerente con azienda e ruolo indicati."
+    else:
+        warnings.extend(coherence_warnings)
+
+    company_check = verify_company_exists(company) if "company" not in errors else {
+        "exists": False,
+        "confidence": 0,
+        "sources": [],
+        "message": "Azienda non verificata perche il nome inserito non e valido.",
+    }
+    if not company_check["exists"]:
+        errors["company"] = company_check["message"]
+
+    is_valid = not errors
+    return {
+        "is_valid": is_valid,
+        "company_exists": bool(company_check["exists"]),
+        "role_is_plausible": role_validation["is_valid"],
+        "fields_are_coherent": coherent,
+        "link_is_valid": link_validation["is_valid"],
+        "errors": errors,
+        "warnings": warnings,
+        "sources": company_check.get("sources", []),
+        "normalized_link": link_validation.get("normalized_link", ""),
+        "message": "I dati inseriti sono validi." if is_valid else "Correggi i campi evidenziati prima di continuare.",
+    }
+
+
+def extract_text_from_file(file: UploadFile, file_bytes: bytes) -> str:
+    text, _method = extract_text_from_file_bytes(file_bytes, file.filename or "")
+    return clean_extracted_text(text)
+
+
+def is_probably_cv(text: str) -> Dict:
+    if not clean_extracted_text(text):
+        return {"is_cv": False, "confidence": 0, "reason": "Il file e vuoto.", "detected_sections": []}
+
+    heuristic = analyze_cv_heuristics(text)
+    strong_sections = {"contatti", "formazione", "esperienze professionali", "competenze"}
+    strong_count = len(strong_sections.intersection(set(heuristic["detected_sections"])))
+    is_cv = heuristic["score"] >= 45 or (heuristic["score"] >= 35 and strong_count >= 2)
+    return {
+        "is_cv": is_cv,
+        "confidence": clamp_score(heuristic["score"]),
+        "reason": heuristic["reason"] if is_cv else "Il documento non contiene abbastanza elementi tipici di un CV.",
+        "detected_sections": heuristic["detected_sections"],
+    }
+
+
+def extract_candidate_name_from_cv(text: str) -> Dict:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    for line in lines[:12]:
+        if "@" in line or re.search(r"\d", line):
+            continue
+        candidates = re.findall(r"\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'`-]{1,}\b", line)
+        if 2 <= len(candidates) <= 4:
+            return {"name": " ".join(candidates[:3]), "confidence": 0.78}
+
+    normalized = re.sub(r"\s+", " ", text or "")
+    match = re.search(r"(?:nome|name)\s*[:\-]\s*([A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ'`-]+(?:\s+[A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ'`-]+){1,3})", normalized)
+    if match:
+        return {"name": match.group(1).strip(), "confidence": 0.7}
+
+    return {"name": "", "confidence": 0}
+
+
+def normalize_name(name: str) -> str:
+    return re.sub(r"[^a-z\s]", " ", strip_accents(name or "").lower()).strip()
+
+
+def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -> Dict:
+    expected = normalize_name(f"{user_first_name} {user_last_name}")
+    expected_tokens = [token for token in expected.split() if token]
+
+    detected = extract_candidate_name_from_cv(cv_text)
+    detected_name = normalize_name(detected.get("name", ""))
+    detected_tokens = [token for token in detected_name.split() if token]
+
+    if len(expected_tokens) < 2:
+        return {
+            "matches_user": None,
+            "confidence": 0,
+            "detected_name": detected.get("name", ""),
+            "message": "Non è stato possibile verificare la coerenza tra il nome indicato e il CV caricato, perché nome e cognome utente non sono disponibili.",
+        }
+
+    if not detected_tokens:
+        return {
+            "matches_user": None,
+            "confidence": 0,
+            "detected_name": "",
+            "message": "Non sono riuscito a verificare con certezza il nome nel CV. Controlla che il documento sia corretto.",
+        }
+
+    token_matches = sum(
+        1
+        for expected_token in expected_tokens
+        if any(
+            expected_token == detected_token
+            or SequenceMatcher(None, expected_token, detected_token).ratio() >= 0.86
+            for detected_token in detected_tokens
+        )
+    )
+    ordered_ratio = SequenceMatcher(None, expected, detected_name).ratio()
+    reversed_ratio = SequenceMatcher(None, " ".join(reversed(expected_tokens)), detected_name).ratio()
+    confidence = max(token_matches / max(len(expected_tokens), 1), ordered_ratio, reversed_ratio)
+
+    if token_matches >= len(expected_tokens) or confidence >= 0.82:
+        return {
+            "matches_user": True,
+            "confidence": round(confidence, 2),
+            "detected_name": detected.get("name", ""),
+            "message": "Identità coerente: il nome presente nel CV corrisponde a quello dell'utente.",
+        }
+
+    if detected.get("confidence", 0) >= 0.65 and confidence < 0.45:
+        return {
+            "matches_user": False,
+            "confidence": round(1 - confidence, 2),
+            "detected_name": detected.get("name", ""),
+            "message": "Possibile incoerenza: il nome presente nel CV non sembra corrispondere a quello dell'utente.",
+        }
+
+    return {
+        "matches_user": None,
+        "confidence": round(confidence, 2),
+        "detected_name": detected.get("name", ""),
+        "message": "Non sono riuscito a verificare con certezza il nome nel CV. Controlla che il documento sia corretto.",
+    }
+
+
+def build_fallback_cv_job_evaluation(cv_text: str, company: str, role: str, description: str, sources: List[Dict[str, str]]) -> Dict:
+    cv_tokens = tokenize_meaningful(cv_text)
+    role_tokens = tokenize_meaningful(role)
+    description_tokens = tokenize_meaningful(description)
+    company_tokens = tokenize_meaningful(company)
+
+    role_hits = len(cv_tokens.intersection(role_tokens.union(description_tokens)))
+    company_hits = len(cv_tokens.intersection(company_tokens))
+    heuristic = analyze_cv_heuristics(cv_text)
+
+    completeness = clamp_score(35 + heuristic["score"])
+    role_match = clamp_score(42 + role_hits * 8)
+    company_fit = clamp_score(45 + company_hits * 10 + (8 if sources else 0))
+    clarity = clamp_score(55 + min(len(cv_text) // 600, 18))
+    professionalism = clamp_score(58 + (10 if "contatti" in heuristic["detected_sections"] else 0))
+    overall = clamp_score(round((role_match * 0.32) + (company_fit * 0.18) + (completeness * 0.22) + (clarity * 0.14) + (professionalism * 0.14)))
+
+    relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens))))[:8]
+    missing = sorted(list((role_tokens.union(description_tokens)) - cv_tokens))[:8]
+
+    return {
+        "overall_score": overall,
+        "role_match_score": role_match,
+        "company_fit_score": company_fit,
+        "clarity_score": clarity,
+        "completeness_score": completeness,
+        "professionalism_score": professionalism,
+        "strengths": [
+            "Il CV contiene elementi utili per una prima valutazione della candidatura.",
+            "La struttura include sezioni riconoscibili di un curriculum.",
+            "Sono presenti alcune informazioni confrontabili con ruolo e descrizione inseriti.",
+        ],
+        "weaknesses": [
+            "La valutazione automatica locale non puo verificare nel dettaglio tutte le competenze richieste.",
+            "Alcune parole chiave della posizione non risultano abbastanza evidenti nel CV.",
+            "I risultati misurabili e l'allineamento con l'azienda possono essere resi piu espliciti.",
+        ],
+        "relevant_skills_found": relevant_found,
+        "missing_skills_for_role": missing,
+        "relevant_experiences": [
+            "Evidenzia le esperienze piu vicine al ruolo indicato e collega ogni attivita a risultati concreti."
+        ],
+        "suggestions": [
+            f"Personalizza il profilo iniziale citando il ruolo {role}.",
+            "Aggiungi risultati numerici alle esperienze, ad esempio metriche, obiettivi raggiunti o impatto.",
+            "Rendi piu visibili le competenze richieste dall'annuncio nella sezione competenze.",
+            f"Inserisci un riferimento chiaro al tipo di contesto aziendale di {company}.",
+        ],
+        "summary": "Il CV e valido e analizzabile. Per renderlo piu competitivo, va personalizzato meglio rispetto a ruolo, azienda e descrizione inseriti.",
+    }
+
+
+def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
+    normalized = {}
+    for key in [
+        "overall_score", "role_match_score", "company_fit_score",
+        "clarity_score", "completeness_score", "professionalism_score"
+    ]:
+        normalized[key] = clamp_score(result.get(key, fallback[key]))
+
+    list_fields = [
+        "strengths", "weaknesses", "relevant_skills_found",
+        "missing_skills_for_role", "relevant_experiences", "suggestions"
+    ]
+    for field in list_fields:
+        value = result.get(field)
+        normalized[field] = value if isinstance(value, list) and value else fallback[field]
+
+    normalized["summary"] = result.get("summary") or fallback["summary"]
+    return normalized
+
+
+def evaluate_cv_for_job(cv_text: str, company: str, role: str, description: str, link: str, sources: Optional[List[Dict[str, str]]] = None) -> Dict:
+    sources = sources or []
+    fallback = build_fallback_cv_job_evaluation(cv_text, company, role, description, sources)
+    sources_prompt = sources_to_prompt(sources)
+
+    prompt = f"""
+Sei un recruiter senior e career coach.
+
+Valuta questo CV rispetto a una candidatura specifica.
+
+Azienda: {company}
+Ruolo desiderato: {role}
+Descrizione/annuncio inserito dall'utente:
+{description}
+Link annuncio/azienda: {link or "Non inserito"}
+
+Fonti web disponibili:
+{sources_prompt}
+
+Testo CV:
+{cv_text[:9000]}
+
+Restituisci SOLO JSON valido con questa struttura:
+{{
+  "overall_score": 0,
+  "role_match_score": 0,
+  "company_fit_score": 0,
+  "clarity_score": 0,
+  "completeness_score": 0,
+  "professionalism_score": 0,
+  "strengths": ["..."],
+  "weaknesses": ["..."],
+  "relevant_skills_found": ["..."],
+  "missing_skills_for_role": ["..."],
+  "relevant_experiences": ["..."],
+  "suggestions": ["..."],
+  "summary": "..."
+}}
+
+Regole:
+- Rispondi sempre e solo in italiano. Tutti i campi mostrati all'utente devono essere scritti in italiano.
+- Tutti i punteggi devono essere interi da 0 a 100.
+- Non essere generico: collega ogni giudizio a ruolo, azienda, descrizione e fonti.
+- Distingui competenze presenti da competenze mancanti.
+- Non inventare esperienze non presenti nel CV.
+"""
+
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1800))
+        return normalize_cv_job_evaluation(result, fallback)
+    except Exception as exc:
+        print(f"Valutazione CV per candidatura non riuscita, uso fallback: {exc}")
+        return fallback
+
+
+@app.post("/job/validate")
+def validate_job_endpoint(data: JobValidationRequest):
+    return validate_job_input(
+        description=(data.description or "").strip(),
+        company=(data.company or "").strip(),
+        role=(data.role or "").strip(),
+        link=(data.link or "").strip(),
+    )
+
+
+@app.post("/cv/analyze-for-job")
+async def analyze_cv_for_job_endpoint(
+    file: UploadFile = File(...),
+    user_first_name: str = Form(""),
+    user_last_name: str = Form(""),
+    description: str = Form(""),
+    company: str = Form(""),
+    role: str = Form(""),
+    link: str = Form(""),
+):
+    file_bytes = await file.read()
+    validation = validate_cv_content(file.filename or "", file_bytes, file.content_type)
+    if not validation["is_cv"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Il file caricato non sembra essere un CV valido. Carica un curriculum contenente esperienze, formazione e competenze.",
+        )
+
+    cv_text = extract_text_from_file(file, file_bytes)
+    cv_check = is_probably_cv(cv_text)
+    if not cv_check["is_cv"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Il file caricato non sembra essere un CV valido. Carica un curriculum contenente esperienze, formazione e competenze.",
+        )
+
+    identity_check = check_cv_identity(cv_text, user_first_name, user_last_name)
+    if identity_check["matches_user"] is False:
+        raise HTTPException(status_code=400, detail=identity_check["message"])
+
+    job_validation = validate_job_input(description, company, role, link)
+    if not job_validation["is_valid"]:
+        raise HTTPException(status_code=400, detail=job_validation)
+
+    sources = search_job_context(company, role, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
+    cv_evaluation = evaluate_cv_for_job(cv_text, company, role, description, link, sources)
+
+    return {
+        "is_valid_cv": True,
+        "identity_check": identity_check,
+        "job_validation": job_validation,
+        "cv_evaluation": cv_evaluation,
+        "warnings": ([identity_check["message"]] if identity_check["matches_user"] is None else []) + job_validation.get("warnings", []),
+    }
+
+
+@app.post("/users/{user_id}/cv/analyze-for-job")
+def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+    if not existing_user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cv_text = recover_saved_cv_text(cursor, existing_user)
+    conn.commit()
+    conn.close()
+
+    if not existing_user[10] or not cv_text:
+        raise HTTPException(status_code=400, detail="Carica un CV valido prima di avviare la valutazione.")
+
+    cv_check = is_probably_cv(cv_text)
+    if not cv_check["is_cv"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Il file caricato non sembra essere un CV valido. Carica un curriculum contenente esperienze, formazione e competenze.",
+        )
+
+    public_user = user_to_response(existing_user)
+    name_parts = (public_user.get("name") or "").split()
+    identity_check = check_cv_identity(
+        cv_text,
+        name_parts[0] if name_parts else "",
+        " ".join(name_parts[1:]) if len(name_parts) > 1 else "",
+    )
+    if identity_check["matches_user"] is False:
+        raise HTTPException(status_code=400, detail=identity_check["message"])
+
+    description = (data.description or "").strip()
+    company = (data.company or "").strip()
+    role = (data.role or "").strip()
+    link = (data.link or "").strip()
+    job_validation = validate_job_input(description, company, role, link)
+    if not job_validation["is_valid"]:
+        raise HTTPException(status_code=400, detail=job_validation)
+
+    sources = search_job_context(company, role, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
+    cv_evaluation = evaluate_cv_for_job(cv_text, company, role, description, link, sources)
+
+    return {
+        "is_valid_cv": True,
+        "identity_check": identity_check,
+        "job_validation": job_validation,
+        "cv_evaluation": cv_evaluation,
+        "warnings": ([identity_check["message"]] if identity_check["matches_user"] is None else []) + job_validation.get("warnings", []),
+    }
+
+
 def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:
     filename = filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -4325,10 +4978,18 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
-    if not cursor.fetchone():
+    existing_user = fetch_user_by_id(cursor, user_id)
+    if not existing_user:
         conn.close()
         raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    profile_name_parts = (existing_user[1] or "").split()
+    first_name = profile_name_parts[0] if profile_name_parts else ""
+    last_name = " ".join(profile_name_parts[1:]) if len(profile_name_parts) > 1 else ""
+    identity_check = check_cv_identity(extracted_text, first_name, last_name)
+    if identity_check["matches_user"] is False:
+        conn.close()
+        raise HTTPException(status_code=400, detail=identity_check["message"])
 
     cursor.execute("""
     UPDATE users
@@ -4360,6 +5021,7 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
     return {
         "user": user_to_response(user),
         "message": "CV salvato nel profilo.",
+        "identity_check": identity_check,
     }
 
 

@@ -1332,11 +1332,14 @@ textarea {
 
 .cv-strategy-score-card,
 .cv-strategy-section {
+  width: 100%;
+  box-sizing: border-box;
   padding: 24px 22px;
   border: 1px solid #dceffa;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
+  background: #ffffff;
   box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+  overflow: visible;
 }
 
 .cv-strategy-score-card {
@@ -1351,10 +1354,11 @@ textarea {
 
 .cv-strategy-score-card p {
   margin: 0 auto;
+  max-width: 620px;
   color: #526173;
   font-size: 15px;
   font-weight: 700;
-  line-height: 1.45;
+  line-height: 1.55;
 }
 
 .cv-strategy-section-title {
@@ -1390,6 +1394,7 @@ textarea {
   margin: 0;
   color: #263548;
   font-size: 22px;
+  line-height: 1.2;
 }
 
 .cv-strategy-item {
@@ -1449,6 +1454,90 @@ textarea {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.4;
+}
+
+.cv-job-scores {
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 16px;
+  margin: 0;
+  overflow: visible;
+}
+
+.cv-job-scores .cv-score-tile {
+  min-width: 0;
+  min-height: 96px;
+  padding: 18px 14px;
+  border: 1px solid #cfe2f2;
+  border-radius: 16px;
+  background: #f8fbff;
+  box-shadow: 0 10px 24px rgba(15, 76, 129, 0.08);
+  text-align: center;
+  overflow: visible;
+}
+
+.cv-job-scores .cv-score-tile strong {
+  display: block;
+  margin: 0 0 8px;
+  color: #0f6fa8;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.cv-job-scores .cv-score-tile p {
+  margin: 0;
+  color: #526173;
+  font-size: 13.5px;
+  font-weight: 900;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+}
+
+.cv-strategy-note {
+  margin: 0;
+  color: #506579;
+  line-height: 1.6;
+}
+
+.cv-skill-tags {
+  justify-content: flex-start;
+}
+
+.cv-skill-tags span {
+  background: #e7f5f2;
+  color: #176d57;
+  border: 1px solid #b8ded6;
+}
+
+.cv-skill-tags.warning span {
+  background: #fff5e7;
+  color: #9a5f00;
+  border-color: #f0d3a4;
+}
+
+.scores-grid.cv-job-scores {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 14px;
+  width: 100%;
+  margin: 0;
+}
+
+.scores-grid.cv-job-scores .cv-score-tile {
+  width: auto;
+  min-width: 0;
+  min-height: 86px;
+  padding: 16px 12px;
+}
+
+.scores-grid.cv-job-scores .cv-score-tile p {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 
 .cv-view-header {
@@ -2323,6 +2412,28 @@ textarea {
   background: #e5f0f8;
   transform: none;
   box-shadow: none;
+}
+
+.field-error,
+.field-warning,
+.job-validation-message {
+  margin: -4px 0 10px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.field-error,
+.job-validation-message.invalid {
+  color: #b42318;
+}
+
+.field-warning,
+.job-validation-message.validating {
+  color: #9a6b00;
+}
+
+.job-validation-message.valid {
+  color: #176d57;
 }
 
 .continue-helper-text {
@@ -3582,6 +3693,21 @@ textarea {
   .danger-button,
   .mode {
     width: 100%;
+  }
+
+  .scores-grid.cv-job-scores {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scores-grid.cv-job-scores .cv-score-tile {
+    min-height: 82px;
+    padding: 14px 10px;
+  }
+}
+
+@media (max-width: 360px) {
+  .scores-grid.cv-job-scores {
+    grid-template-columns: 1fr;
   }
 }
 

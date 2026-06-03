@@ -37,19 +37,31 @@ export default function PersonalizeExperience({
   onChange,
   onSubmit,
   role,
+  validation = { status: "idle", errors: {}, warnings: [], message: "" },
+  isValidating = false,
   submitLabel = "Continua",
 }) {
+  const normalizedGoal = goal.trim();
+  const normalizedCompany = company.trim();
   const normalizedRole = role.trim();
+  const normalizedLink = link.trim();
   const hasRole = normalizedRole && normalizedRole.toLowerCase() !== "da definire";
-  const hasInterviewContext = Boolean(
-    goal.trim() ||
-    company.trim() ||
-    hasRole ||
-    link.trim()
-  );
+  const linkLooksValid = !normalizedLink || /^https?:\/\/\S+\.\S+$/i.test(normalizedLink) || /^[\w.-]+\.[a-z]{2,}/i.test(normalizedLink);
+  const localErrors = {
+    description: normalizedGoal.length > 19 ? "" : "Descrivi il colloquio o l'annuncio con almeno qualche dettaglio concreto.",
+    company: normalizedCompany.length > 2 ? "" : "Inserisci il nome dell'azienda.",
+    role: hasRole && normalizedRole.length > 3 ? "" : "Inserisci un ruolo lavorativo reale.",
+    link: linkLooksValid ? "" : "Inserisci un URL valido oppure lascia il campo vuoto.",
+  };
+  const fieldErrors = {
+    ...Object.fromEntries(Object.entries(localErrors).filter(([, value]) => value)),
+    ...(validation.errors || {}),
+  };
+  const hasLocalValidFields = !localErrors.description && !localErrors.company && !localErrors.role && !localErrors.link;
+  const canSubmit = hasLocalValidFields && !isValidating;
 
   const handleSubmit = (event) => {
-    if (!hasInterviewContext) {
+    if (!canSubmit) {
       event.preventDefault();
       return;
     }
@@ -74,6 +86,7 @@ export default function PersonalizeExperience({
           onChange={(event) => onChange("goal", event.target.value)}
           placeholder="Es. Voglio prepararmi per un colloquio da Data Analyst in Google."
         />
+        {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
 
         <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
@@ -87,6 +100,7 @@ export default function PersonalizeExperience({
             placeholder="es. Google, TechFlow"
           />
         </div>
+        {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
 
         <label htmlFor="personalize-role">Ruolo desiderato</label>
         <div className="personalize-field">
@@ -98,6 +112,8 @@ export default function PersonalizeExperience({
             placeholder="Es. UX Designer, Data Analyst, Software Engineer"
           />
         </div>
+        {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
+        {fieldErrors.coherence && <p className="field-error">{fieldErrors.coherence}</p>}
 
         <label htmlFor="personalize-link">Link all'annuncio o all'azienda</label>
         <div className="personalize-field">
@@ -109,9 +125,18 @@ export default function PersonalizeExperience({
             placeholder="https://..."
           />
         </div>
+        {fieldErrors.link && <p className="field-error">{fieldErrors.link}</p>}
         <p className="personalize-hint form-helper-text">
           Facoltativo: se inserisci l'annuncio, le domande saranno piu aderenti alla posizione.
         </p>
+        {validation.message && (
+          <p className={`job-validation-message ${validation.status}`}>
+            {validation.message}
+          </p>
+        )}
+        {(validation.warnings || []).map((warning, index) => (
+          <p className="field-warning" key={`${warning}-${index}`}>{warning}</p>
+        ))}
 
         <div className="personalize-actions">
           <button type="button" className="secondary-button card-back-btn" onClick={onBack}>
@@ -120,15 +145,15 @@ export default function PersonalizeExperience({
           </button>
           <button
             type="submit"
-            className={`primary-button continue-cv-btn ${hasInterviewContext ? "active" : "disabled"}`}
-            disabled={!hasInterviewContext}
+            className={`primary-button continue-cv-btn ${canSubmit ? "active" : "disabled"}`}
+            disabled={!canSubmit}
           >
-            {submitLabel}
+            {isValidating ? "Validazione..." : submitLabel}
           </button>
         </div>
-        {!hasInterviewContext && (
+        {!hasLocalValidFields && (
           <p className="continue-helper-text">
-            Inserisci almeno una descrizione o un ruolo per continuare.
+            Completa descrizione, azienda e ruolo con dati coerenti per continuare.
           </p>
         )}
       </form>
