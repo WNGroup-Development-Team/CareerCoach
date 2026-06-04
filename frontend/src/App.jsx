@@ -149,6 +149,60 @@ function getCanonicalProfileKey(value = "") {
   }
 }
 
+function normalizeStrategyItem(item, fallbackTitle = "Elemento rilevante") {
+  if (typeof item === "string") {
+    return {
+      title: fallbackTitle,
+      description: item,
+      coach_tip: "",
+    };
+  }
+
+  return {
+    title: item?.title || fallbackTitle,
+    description: item?.description || String(item || ""),
+    coach_tip: item?.coach_tip || "",
+  };
+}
+
+function looksMostlyEnglish(text = "") {
+  const normalized = text.toLowerCase();
+  const englishHits = [
+    " is ", " are ", " should ", " improve ", " skills ", " experience ",
+    " portfolio ", " role ", " candidate ", " company ", " coursework ",
+    " highly ", " strong ", " seeks "
+  ].filter((word) => normalized.includes(word)).length;
+  return englishHits >= 2;
+}
+
+function getItalianCvIntroSummary(analysis, role, company) {
+  const summary = analysis?.summary || "";
+  if (summary && !looksMostlyEnglish(summary)) {
+    return summary;
+  }
+
+  const score = analysis?.overall_score || analysis?.score || 0;
+  const targetRole = role || "ruolo indicato";
+  const targetCompany = company || "azienda indicata";
+  return `Il CV è stato valutato rispetto al ruolo ${targetRole} presso ${targetCompany}. Il punteggio complessivo è ${score}/100: consulta punteggi, punti di forza, aree da migliorare e suggerimenti per adattarlo meglio alla candidatura.`;
+}
+
+function getIdentityCheckMessage(identityCheck) {
+  if (!identityCheck) {
+    return "";
+  }
+
+  if (identityCheck.matches_user === true) {
+    return "Identità coerente: il nome presente nel CV corrisponde a quello dell'utente.";
+  }
+
+  if (identityCheck.matches_user === false) {
+    return "Possibile incoerenza: il nome presente nel CV non sembra corrispondere a quello dell'utente.";
+  }
+
+  return "Non è stato possibile verificare la coerenza tra il nome indicato e il CV caricato, perché nome e cognome utente non sono disponibili.";
+}
+
 function SplashScreen({
   slogan = "Allenati oggi, conquista il colloquio di domani",
   mode = "intro",
@@ -349,6 +403,12 @@ function App() {
   const [digitalAnalysis, setDigitalAnalysis] = useState(null);
   const [cvOptimizationAnalysis, setCvOptimizationAnalysis] = useState(null);
   const [optimizedCv, setOptimizedCv] = useState(null);
+  const [jobValidation, setJobValidation] = useState({
+    status: "idle",
+    errors: {},
+    warnings: [],
+    message: "",
+  });
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [stepHistory, setStepHistory] = useState([]);
 
@@ -1156,6 +1216,7 @@ function App() {
     setLoading(true);
 
     try {
+      const selectedCvFile = cvFile;
       const text = await readCvText(cvFile);
       const fileBase64 = await readFileBase64(cvFile);
       const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv`, {
@@ -1192,8 +1253,14 @@ function App() {
       });
       setCvFile(null);
       setCvPreview(null);
+      if (data.identity_check?.message && data.identity_check?.matches_user === null) {
+        setCvValidation((current) => ({
+          ...current,
+          message: data.identity_check.message,
+        }));
+      }
       if (personalizeIntent === "cv") {
-        await analyzeCvOptimization(updatedUser);
+        await analyzeCvOptimization(updatedUser, selectedCvFile);
         return;
       }
       transitionToStep("cv-digital");
@@ -1380,8 +1447,9 @@ function App() {
     }
   };
 
-  const analyzeCvOptimization = async (profileOverride = profile) => {
+  const analyzeCvOptimization = async (profileOverride = profile, fileOverride = null) => {
     resetError();
+    setOptimizedCv(null);
 
     if (!profileOverride.cv_uploaded && !profileOverride.cv_filename) {
       setError("Carica un CV prima di avviare l'analisi strategica.");
@@ -1392,27 +1460,59 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv-optimization-analysis`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          company: personalizeForm.company.trim() || company,
-          role: personalizeForm.role.trim() || profileOverride.target_role || "",
-          goal: personalizeForm.goal.trim(),
-          job_link: personalizeForm.link.trim(),
-        })
-      }, 60000);
+      const requestPayload = {
+        description: personalizeForm.goal.trim(),
+        company: personalizeForm.company.trim() || company,
+        role: personalizeForm.role.trim() || profileOverride.target_role || "",
+        link: personalizeForm.link.trim(),
+      };
+
+      let response;
+      if (fileOverride) {
+        const nameParts = getProfileNameParts();
+        const formData = new FormData();
+        formData.append("file", fileOverride);
+        formData.append("user_first_name", nameParts.firstName);
+        formData.append("user_last_name", nameParts.lastName);
+        formData.append("description", requestPayload.description);
+        formData.append("company", requestPayload.company);
+        formData.append("role", requestPayload.role);
+        formData.append("link", requestPayload.link);
+
+        response = await fetchWithTimeout(`${API_URL}/cv/analyze-for-job`, {
+          method: "POST",
+          body: formData,
+        }, 70000);
+      } else {
+        response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv/analyze-for-job`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(requestPayload)
+        }, 70000);
+      }
 
       const data = await response.json();
 
       if (!response.ok) {
-        setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi del CV.");
+        const detail = typeof data.detail === "string"
+          ? data.detail
+          : data.detail?.message || "Errore nell'analisi del CV.";
+        setError(detail);
         return;
       }
 
-      setCvOptimizationAnalysis(data.analysis);
+      setCvOptimizationAnalysis({
+        ...(data.cv_evaluation || {}),
+        target: {
+          company: requestPayload.company,
+          role: requestPayload.role,
+        },
+        identity_check: data.identity_check,
+        job_validation: data.job_validation,
+        warnings: data.warnings || [],
+      });
       transitionToStep("cv-strategy");
     } catch (err) {
       console.error(err);
@@ -1436,6 +1536,12 @@ function App() {
       return;
     }
 
+    const selectedRole = personalizeForm.role.trim() || profile.target_role || "";
+    if (!selectedRole || selectedRole.toLowerCase() === "da definire") {
+      setError("Inserisci un ruolo target prima di ottimizzare il CV.");
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -1446,7 +1552,7 @@ function App() {
         },
         body: JSON.stringify({
           company: personalizeForm.company.trim() || company,
-          role: personalizeForm.role.trim() || profile.target_role || "",
+          role: selectedRole,
           goal: personalizeForm.goal.trim(),
           job_link: personalizeForm.link.trim(),
         })
@@ -1459,15 +1565,16 @@ function App() {
         return;
       }
 
-      setOptimizedCv(data.optimized_cv);
-      setProfile((current) => ({
-        ...current,
-        ...data.user,
-      }));
-      transitionToStep("cv-optimized");
+      setOptimizedCv(data.optimized_cv || null);
+      if (data.candidate_sources?.length && !cvOptimizationAnalysis?.sources?.length) {
+        setCvOptimizationAnalysis((current) => ({
+          ...(current || {}),
+          sources: data.candidate_sources,
+        }));
+      }
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      setError("Errore di connessione durante l'ottimizzazione del CV. Controlla che FastAPI sia avviato.");
     } finally {
       setLoading(false);
     }
@@ -1873,7 +1980,7 @@ function App() {
     setPersonalizeForm((current) => ({
       goal: current.goal,
       company: current.company || (company === "Generica" ? "" : company),
-      role: current.role || profile.target_role || "",
+      role: current.role.toLowerCase() === "da definire" ? "" : current.role,
       link: current.link,
     }));
   };
@@ -1891,15 +1998,97 @@ function App() {
   };
 
   const updatePersonalizeForm = (field, value) => {
+    setJobValidation({
+      status: "idle",
+      errors: {},
+      warnings: [],
+      message: "",
+    });
     setPersonalizeForm((current) => ({
       ...current,
       [field]: value,
     }));
   };
 
+  const validatePersonalizeForm = async () => {
+    setJobValidation((current) => ({
+      ...current,
+      status: "validating",
+      message: "Validazione dei dati in corso...",
+    }));
+
+    const response = await fetchWithTimeout(`${API_URL}/job/validate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        description: personalizeForm.goal.trim(),
+        company: personalizeForm.company.trim(),
+        role: personalizeForm.role.trim(),
+        link: personalizeForm.link.trim(),
+      })
+    }, 30000);
+    const data = await response.json();
+
+    if (!response.ok || !data.is_valid) {
+      const detail = data.detail && typeof data.detail === "object" ? data.detail : data;
+      setJobValidation({
+        status: "invalid",
+        errors: detail.errors || {},
+        warnings: detail.warnings || [],
+        message: detail.message || "Correggi i campi evidenziati prima di continuare.",
+      });
+      return null;
+    }
+
+    setJobValidation({
+      status: "valid",
+      errors: {},
+      warnings: data.warnings || [],
+      message: data.message || "I dati inseriti sono validi.",
+    });
+    return data;
+  };
+
+  const getProfileNameParts = () => {
+    const parts = (profile.name || "").trim().split(/\s+/).filter(Boolean);
+    return {
+      firstName: parts[0] || "",
+      lastName: parts.slice(1).join(" "),
+    };
+  };
+
   const continuePersonalizedPath = async (event) => {
     event.preventDefault();
     resetError();
+
+    const hasInterviewContext = Boolean(
+      personalizeForm.goal.trim() ||
+      personalizeForm.company.trim() ||
+      (personalizeForm.role.trim() && personalizeForm.role.trim().toLowerCase() !== "da definire") ||
+      personalizeForm.link.trim()
+    );
+
+    if (!hasInterviewContext) {
+      return;
+    }
+
+    try {
+      const validationResult = await validatePersonalizeForm();
+      if (!validationResult) {
+        return;
+      }
+    } catch (err) {
+      console.error(err);
+      setJobValidation({
+        status: "invalid",
+        errors: {},
+        warnings: [],
+        message: "Errore durante la validazione dei dati. Controlla che FastAPI sia avviato.",
+      });
+      return;
+    }
 
     const nextCompany = personalizeForm.company.trim() || "Generica";
     const nextRole = personalizeForm.role.trim();
@@ -1924,6 +2113,16 @@ function App() {
     }
 
     transitionToStep("gym");
+  };
+
+  const goToMainDashboard = () => {
+    if (step === "home") {
+      resetError();
+      setIsProfileMenuOpen(false);
+      return;
+    }
+
+    transitionToStep("home");
   };
 
   if (showSplash) {
@@ -1951,6 +2150,17 @@ function App() {
     exactInstagramHandle ? { title: `Instagram @${exactInstagramHandle}`, url: `https://www.instagram.com/${exactInstagramHandle}/` } : null,
     otherProfileUrl ? { title: "Link aggiuntivo", url: normalizeProfileUrl(otherProfileUrl) } : null,
   ].filter(Boolean);
+  const cvStrategyTargetRole = cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "ruolo target";
+  const cvStrategyTargetCompany = cvOptimizationAnalysis?.target?.company || company || "azienda target";
+  const cvStrategyOverallScore = cvOptimizationAnalysis?.overall_score || cvOptimizationAnalysis?.score || 0;
+  const cvStrategyScoreItems = [
+    { label: "Generale", value: cvStrategyOverallScore },
+    { label: "Ruolo", value: cvOptimizationAnalysis?.role_match_score || cvOptimizationAnalysis?.role_score || 0 },
+    { label: "Azienda", value: cvOptimizationAnalysis?.company_fit_score || cvOptimizationAnalysis?.company_score || 0 },
+    { label: "Completezza", value: cvOptimizationAnalysis?.completeness_score || 0 },
+    { label: "Chiarezza", value: cvOptimizationAnalysis?.clarity_score || 0 },
+    { label: "Professionalità", value: cvOptimizationAnalysis?.professionalism_score || 0 },
+  ];
   const screenshotUploadBoxes = [
     {
       type: "instagram",
@@ -1985,14 +2195,20 @@ function App() {
               <strong>Indietro</strong>
             </button>
 
-            <div className="navbar-brand">
+            <button
+              type="button"
+              className="navbar-brand"
+              onClick={goToMainDashboard}
+              aria-label="Torna alla dashboard principale"
+              title="Torna alla dashboard principale"
+            >
               <img
                 className="navbar-logo"
                 src={logoCareerCoach}
                 alt="Logo CareerCoach"
               />
               <span className="navbar-title">CareerCoach</span>
-            </div>
+            </button>
           </div>
 
           {userId && (
@@ -2025,7 +2241,7 @@ function App() {
         </header>
       )}
 
-      {userId && !["home", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
+      {userId && !["home", "personalize", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
         <nav className="navbar">
           <button onClick={() => transitionToStep("home")}>Home</button>
           <button onClick={() => transitionToStep("gym")}>Palestra colloqui</button>
@@ -2132,6 +2348,8 @@ function App() {
           onBack={() => transitionToStep("home")}
           onChange={updatePersonalizeForm}
           onSubmit={continuePersonalizedPath}
+          validation={jobValidation}
+          isValidating={jobValidation.status === "validating"}
           submitLabel={personalizeIntent === "cv" ? "Continua al CV" : "Continua alla simulazione"}
         />
       )}
@@ -2751,12 +2969,218 @@ function App() {
           <div className="cv-strategy-heading">
             <h2>Analisi Strategica CV</h2>
             <p>
-              {(cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "Ruolo target")} presso{" "}
-              {cvOptimizationAnalysis?.target?.company || company || "azienda target"}
+              {cvStrategyTargetRole} presso {cvStrategyTargetCompany}
             </p>
           </div>
 
           <div className="cv-strategy-score-card">
+            <div
+              className="cv-score-ring"
+              style={{
+                background: `radial-gradient(circle at center, #ffffff 58%, transparent 60%), conic-gradient(#248269 0 ${cvStrategyOverallScore}%, #dfe8ef ${cvStrategyOverallScore}% 100%)`,
+              }}
+            >
+              <span>{cvStrategyOverallScore}%</span>
+            </div>
+            <h3>Valutazione CV completata</h3>
+            <p>
+              {getItalianCvIntroSummary(cvOptimizationAnalysis, cvStrategyTargetRole, cvStrategyTargetCompany)}
+            </p>
+          </div>
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span>i</span>
+              <h3>Punteggi</h3>
+            </div>
+            <div className="scores-grid cv-job-scores">
+              {cvStrategyScoreItems.map((item) => (
+                <div className="cv-score-tile" key={item.label}>
+                  <strong>{item.value}</strong>
+                  <p>{item.label}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {cvOptimizationAnalysis?.identity_check?.message && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span className={cvOptimizationAnalysis.identity_check.matches_user === null ? "warning" : "success"}>
+                  {cvOptimizationAnalysis.identity_check.matches_user === null ? "!" : "+"}
+                </span>
+                <h3>Verifica identità</h3>
+              </div>
+              <p className="cv-strategy-note">{getIdentityCheckMessage(cvOptimizationAnalysis.identity_check)}</p>
+            </div>
+          )}
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span className="success">+</span>
+              <h3>Punti di Forza</h3>
+            </div>
+
+            {(cvOptimizationAnalysis?.strengths || []).map((item, index) => {
+              const normalizedItem = normalizeStrategyItem(item, "Punto di forza");
+              return (
+                <div className="cv-strategy-item success" key={`${normalizedItem.description}-${index}`}>
+                  <span>✓</span>
+                  <div>
+                    <strong>{normalizedItem.title}</strong>
+                    <p>{normalizedItem.description}</p>
+                    {normalizedItem.coach_tip && <small>{normalizedItem.coach_tip}</small>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span className="warning">~</span>
+              <h3>Aree di Sviluppo</h3>
+            </div>
+
+            {(cvOptimizationAnalysis?.weaknesses || cvOptimizationAnalysis?.improvements || []).map((item, index) => {
+              const normalizedItem = normalizeStrategyItem(item, "Punto debole");
+              return (
+                <div className="cv-strategy-item warning" key={`${normalizedItem.description}-${index}`}>
+                  <span>!</span>
+                  <div>
+                    <strong>{normalizedItem.title}</strong>
+                    <p>{normalizedItem.description}</p>
+                    {normalizedItem.coach_tip && <small>{normalizedItem.coach_tip}</small>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {(cvOptimizationAnalysis?.relevant_skills_found || []).length > 0 && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span className="success">+</span>
+                <h3>Competenze Rilevanti</h3>
+              </div>
+              <div className="tag-row cv-skill-tags">
+                {cvOptimizationAnalysis.relevant_skills_found.map((skill) => (
+                  <span key={skill}>{skill}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(cvOptimizationAnalysis?.missing_skills_for_role || []).length > 0 && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span className="warning">~</span>
+                <h3>Competenze Mancanti</h3>
+              </div>
+              <div className="tag-row cv-skill-tags warning">
+                {cvOptimizationAnalysis.missing_skills_for_role.map((skill) => (
+                  <span key={skill}>{skill}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(cvOptimizationAnalysis?.relevant_experiences || []).length > 0 && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span>i</span>
+                <h3>Esperienze Coerenti</h3>
+              </div>
+              {cvOptimizationAnalysis.relevant_experiences.map((item, index) => (
+                <div className="cv-strategy-item" key={`${item}-${index}`}>
+                  <span>i</span>
+                  <div>
+                    <strong>Esperienza rilevante</strong>
+                    <p>{item}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(cvOptimizationAnalysis?.suggestions || []).length > 0 && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span>i</span>
+                <h3>Suggerimenti</h3>
+              </div>
+              {cvOptimizationAnalysis.suggestions.map((item, index) => (
+                <div className="cv-strategy-item" key={`${item}-${index}`}>
+                  <span>{index + 1}</span>
+                  <div>
+                    <strong>Adattamento consigliato</strong>
+                    <p>{item}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(cvOptimizationAnalysis?.sources || []).length > 0 && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span>i</span>
+                <h3>Fonti candidatura</h3>
+              </div>
+              <div className="source-list">
+                {cvOptimizationAnalysis.sources.slice(0, 4).map((source, index) => (
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    key={`${source.url}-${index}`}
+                  >
+                    {source.title || source.url}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="cv-strategy-section optimized-cv-section">
+            <div className="cv-strategy-section-title">
+              <span>i</span>
+              <h3>CV ottimizzato</h3>
+            </div>
+            <p className="cv-strategy-note">
+              Genera una versione adattata alla candidatura, mantenendo solo le informazioni reali del CV caricato.
+            </p>
+            <div className="optimized-cv-actions">
+              <button
+                className={optimizedCv ? "secondary-button" : "cv-next-button"}
+                type="button"
+                onClick={optimizeCv}
+                disabled={loading}
+              >
+                {optimizedCv ? "Rigenera CV ottimizzato" : "Genera CV ottimizzato"}
+              </button>
+              {optimizedCv?.file_base64 && (
+                <a
+                  className="cv-next-button optimized-cv-download"
+                  href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
+                  download={optimizedCv.filename || "cv-ottimizzato.pdf"}
+                >
+                  Scarica CV ottimizzato
+                  <span aria-hidden="true">-&gt;</span>
+                </a>
+              )}
+            </div>
+          </div>
+
+          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
+            Torna alla home
+            <span>-&gt;</span>
+          </button>
+        </section>
+      )}
+
+      {/* Old CV strategy markup removed
+        <section>
             <div
               className="cv-score-ring"
               style={{
@@ -2829,55 +3253,34 @@ function App() {
             </div>
           )}
 
-          <button className="cv-next-button" onClick={optimizeCv}>
-            Ottimizza CV
+          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
+            Torna alla home
             <span>-&gt;</span>
           </button>
         </section>
-      )}
-
-      {step === "cv-optimized" && (
-        <section className="cv-strategy-page">
-          <div className="cv-strategy-heading">
-            <h2>CV Ottimizzato</h2>
-            <p>Il tuo CV è stato aggiornato con le aree di sviluppo individuate nell'analisi strategica.</p>
-          </div>
-
-          <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span>✓</span>
-              <h3>Scarica il CV ottimizzato</h3>
-            </div>
-
-            {optimizedCv ? (
-              <a
-                className="cv-next-button"
-                href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
-                download={optimizedCv.filename}
-              >
-                Scarica CV ottimizzato
-                <span>-&gt;</span>
-              </a>
-            ) : (
-              <button className="cv-next-button" onClick={optimizeCv}>
-                Genera CV ottimizzato
-                <span>-&gt;</span>
-              </button>
-            )}
-
-            <button className="secondary-button" onClick={() => transitionToStep("home")}>Torna alla home</button>
-          </div>
-        </section>
-      )}
+      */}
 
       {step === "cv-view" && (
-        <section className="cv-view-page">
-          <div className="cv-view-content">
-            {cvPreview?.filename ? (
-              <div className="cv-preview-file">
+        <section className="cv-flow-page">
+          <div className="cv-analysis-heading">
+            <h2>CV Master</h2>
+            <p>{profile.cv_filename || "Nessun CV caricato"}</p>
+          </div>
+
+          <div className="cv-view-card">
+            <div className="cv-view-header">
+              <span>CV</span>
+              <div>
+                <strong>{cvPreview?.filename || profile.cv_filename || "CV non caricato"}</strong>
+                <p>{cvPreview?.uploaded_at || profile.cv_uploaded_at ? `Caricato il ${cvPreview?.uploaded_at || profile.cv_uploaded_at}` : "Carica il tuo CV master."}</p>
+              </div>
+            </div>
+
+            {cvPreview?.file_base64 && /\.(pdf|docx)$/i.test(cvPreview?.filename || "") ? (
+              <div className="cv-word-preview">
                 <strong>Documento {cvPreview.filename.toLowerCase().endsWith(".pdf") ? "PDF" : "Word"} caricato</strong>
                 <p>
-                  Il CV è salvato come file master. Aprilo per visualizzarlo nel programma associato.
+                  Il CV e salvato come file master. Aprilo per visualizzarlo nel programma associato.
                 </p>
                 <a
                   href={`data:${cvPreview.content_type};base64,${cvPreview.file_base64}`}

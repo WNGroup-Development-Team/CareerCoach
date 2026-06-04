@@ -1332,11 +1332,14 @@ textarea {
 
 .cv-strategy-score-card,
 .cv-strategy-section {
+  width: 100%;
+  box-sizing: border-box;
   padding: 24px 22px;
   border: 1px solid #dceffa;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.94);
+  background: #ffffff;
   box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+  overflow: visible;
 }
 
 .cv-strategy-score-card {
@@ -1351,10 +1354,11 @@ textarea {
 
 .cv-strategy-score-card p {
   margin: 0 auto;
+  max-width: 620px;
   color: #526173;
   font-size: 15px;
   font-weight: 700;
-  line-height: 1.45;
+  line-height: 1.55;
 }
 
 .cv-strategy-section-title {
@@ -1390,6 +1394,7 @@ textarea {
   margin: 0;
   color: #263548;
   font-size: 22px;
+  line-height: 1.2;
 }
 
 .cv-strategy-item {
@@ -1449,6 +1454,106 @@ textarea {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.4;
+}
+
+.cv-job-scores {
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 16px;
+  margin: 0;
+  overflow: visible;
+}
+
+.cv-job-scores .cv-score-tile {
+  min-width: 0;
+  min-height: 96px;
+  padding: 18px 14px;
+  border: 1px solid #cfe2f2;
+  border-radius: 16px;
+  background: #f8fbff;
+  box-shadow: 0 10px 24px rgba(15, 76, 129, 0.08);
+  text-align: center;
+  overflow: visible;
+}
+
+.cv-job-scores .cv-score-tile strong {
+  display: block;
+  margin: 0 0 8px;
+  color: #0f6fa8;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.cv-job-scores .cv-score-tile p {
+  margin: 0;
+  color: #526173;
+  font-size: 13.5px;
+  font-weight: 900;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+}
+
+.cv-strategy-note {
+  margin: 0;
+  color: #506579;
+  line-height: 1.6;
+}
+
+.optimized-cv-section {
+  display: grid;
+  gap: 16px;
+}
+
+.optimized-cv-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.optimized-cv-actions .secondary-button,
+.optimized-cv-download {
+  width: 100%;
+  text-decoration: none;
+}
+
+.cv-skill-tags {
+  justify-content: flex-start;
+}
+
+.cv-skill-tags span {
+  background: #e7f5f2;
+  color: #176d57;
+  border: 1px solid #b8ded6;
+}
+
+.cv-skill-tags.warning span {
+  background: #fff5e7;
+  color: #9a5f00;
+  border-color: #f0d3a4;
+}
+
+.scores-grid.cv-job-scores {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 14px;
+  width: 100%;
+  margin: 0;
+}
+
+.scores-grid.cv-job-scores .cv-score-tile {
+  width: auto;
+  min-width: 0;
+  min-height: 86px;
+  padding: 16px 12px;
+}
+
+.scores-grid.cv-job-scores .cv-score-tile p {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 
 .cv-view-header {
@@ -1654,6 +1759,23 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  border: 0;
+  border-radius: 12px;
+  padding: 2px 4px;
+  background: transparent;
+  cursor: pointer;
+  transition: opacity 180ms ease, transform 180ms ease, background-color 180ms ease;
+}
+
+.navbar-brand:hover {
+  background: rgba(19, 159, 242, 0.08);
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.navbar-brand:focus-visible {
+  outline: 3px solid rgba(19, 159, 242, 0.24);
+  outline-offset: 3px;
 }
 
 .navbar-logo {
@@ -2114,10 +2236,10 @@ textarea {
 }
 
 .personalize-page {
-  width: min(100%, 430px);
+  width: min(100%, 580px);
   margin: 0 auto;
   display: grid;
-  gap: 34px;
+  gap: 26px;
 }
 
 .personalize-heading {
@@ -2125,7 +2247,7 @@ textarea {
 }
 
 .personalize-heading h2 {
-  max-width: 390px;
+  max-width: 560px;
   margin: 0 auto;
   color: #0f76a8;
   font-size: 42px;
@@ -2134,16 +2256,16 @@ textarea {
 }
 
 .personalize-heading p {
-  max-width: 390px;
-  margin: 18px auto 0;
+  max-width: 520px;
+  margin: 14px auto 0;
   color: #5f6f80;
-  font-size: 21px;
+  font-size: 19px;
   font-weight: 800;
   line-height: 1.45;
 }
 
 .personalize-card {
-  padding: 38px 28px 30px;
+  padding: 36px 32px 30px;
   border: 1px solid #dceffa;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.94);
@@ -2159,15 +2281,30 @@ textarea {
   letter-spacing: 0.01em;
 }
 
+.quick-method-label,
+.details-section-label {
+  color: #61758a;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.quick-method-label {
+  margin-bottom: 10px;
+}
+
 .personalize-card textarea {
-  min-height: 136px;
+  min-height: 150px;
   margin-bottom: 28px;
-  padding: 18px;
+  padding: 18px 20px;
   border-color: #cfd9e4;
   border-radius: 8px;
   color: #263548;
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 700;
+  line-height: 1.45;
+  overflow-y: auto;
   resize: vertical;
 }
 
@@ -2181,11 +2318,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0 0 14px;
-  color: #8a94a1;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.04em;
+  margin: 2px 0 18px;
 }
 
 .personalize-divider::after {
@@ -2230,9 +2363,9 @@ textarea {
 }
 
 .personalize-hint {
-  margin: -10px 0 22px;
-  color: #7b8794;
-  font-size: 15px;
+  margin: -12px 0 22px;
+  color: #6e7f92;
+  font-size: 13px;
   font-weight: 800;
   line-height: 1.4;
 }
@@ -2241,6 +2374,91 @@ textarea {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: 12px;
+}
+
+.personalize-actions .card-back-btn {
+  min-height: 46px;
+  border: 1px solid #cfe6f7;
+  background: #f4fbff;
+  color: #466a86;
+  font-size: 15px;
+  font-weight: 900;
+  box-shadow: none;
+}
+
+.personalize-actions .card-back-btn span {
+  margin-right: 6px;
+}
+
+.personalize-actions .card-back-btn:hover {
+  border-color: #a9d7f3;
+  background: #eaf7ff;
+  color: #0f76a8;
+  transform: translateY(-1px);
+}
+
+.continue-cv-btn {
+  min-height: 48px;
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.continue-cv-btn.active {
+  background: linear-gradient(120deg, #139ff2 0%, #0f76bb 100%);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.continue-cv-btn.active:hover {
+  background: linear-gradient(120deg, #2bb0fb 0%, #0f6ea9 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.2);
+}
+
+.continue-cv-btn.disabled,
+.continue-cv-btn:disabled {
+  background: #e5f0f8;
+  color: #7d91a5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.continue-cv-btn.disabled:hover,
+.continue-cv-btn:disabled:hover {
+  background: #e5f0f8;
+  transform: none;
+  box-shadow: none;
+}
+
+.field-error,
+.field-warning,
+.job-validation-message {
+  margin: -4px 0 10px;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.field-error,
+.job-validation-message.invalid {
+  color: #b42318;
+}
+
+.field-warning,
+.job-validation-message.validating {
+  color: #9a6b00;
+}
+
+.job-validation-message.valid {
+  color: #176d57;
+}
+
+.continue-helper-text {
+  margin: 12px 0 0;
+  color: #6e7f92;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+  text-align: center;
 }
 
 .card {
@@ -3491,6 +3709,21 @@ textarea {
   .danger-button,
   .mode {
     width: 100%;
+  }
+
+  .scores-grid.cv-job-scores {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scores-grid.cv-job-scores .cv-score-tile {
+    min-height: 82px;
+    padding: 14px 10px;
+  }
+}
+
+@media (max-width: 360px) {
+  .scores-grid.cv-job-scores {
+    grid-template-columns: 1fr;
   }
 }
 
