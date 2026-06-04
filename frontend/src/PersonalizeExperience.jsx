@@ -37,6 +37,7 @@ export default function PersonalizeExperience({
   onChange,
   onSubmit,
   role,
+  sector = "",
   validation = { status: "idle", errors: {}, warnings: [], message: "" },
   isValidating = false,
   submitLabel = "Continua",
@@ -46,18 +47,20 @@ export default function PersonalizeExperience({
   const normalizedRole = role.trim();
   const normalizedLink = link.trim();
   const hasRole = normalizedRole && normalizedRole.toLowerCase() !== "da definire";
+  const hasQuickMethod = normalizedGoal.length > 19;
+  const hasSpecificDetails = normalizedCompany.length > 2 && hasRole && normalizedRole.length > 3;
   const linkLooksValid = !normalizedLink || /^https?:\/\/\S+\.\S+$/i.test(normalizedLink) || /^[\w.-]+\.[a-z]{2,}/i.test(normalizedLink);
   const localErrors = {
-    description: normalizedGoal.length > 19 ? "" : "Descrivi il colloquio o l'annuncio con almeno qualche dettaglio concreto.",
-    company: normalizedCompany.length > 2 ? "" : "Inserisci il nome dell'azienda.",
-    role: hasRole && normalizedRole.length > 3 ? "" : "Inserisci un ruolo lavorativo reale.",
+    description: hasQuickMethod || hasSpecificDetails ? "" : "Compila il metodo rapido oppure inserisci almeno azienda e ruolo nei dettagli specifici.",
+    company: hasQuickMethod || !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
+    role: hasQuickMethod || !normalizedRole || (hasRole && normalizedRole.length > 3) ? "" : "Inserisci un ruolo lavorativo reale.",
     link: linkLooksValid ? "" : "Inserisci un URL valido oppure lascia il campo vuoto.",
   };
   const fieldErrors = {
     ...Object.fromEntries(Object.entries(localErrors).filter(([, value]) => value)),
     ...(validation.errors || {}),
   };
-  const hasLocalValidFields = !localErrors.description && !localErrors.company && !localErrors.role && !localErrors.link;
+  const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails) && !localErrors.company && !localErrors.role && !localErrors.link;
   const canSubmit = hasLocalValidFields && !isValidating;
 
   const handleSubmit = (event) => {
@@ -115,6 +118,18 @@ export default function PersonalizeExperience({
         {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
         {fieldErrors.coherence && <p className="field-error">{fieldErrors.coherence}</p>}
 
+        <label htmlFor="personalize-sector">Settore</label>
+        <div className="personalize-field">
+          <BriefcaseIcon />
+          <input
+            id="personalize-sector"
+            value={sector}
+            onChange={(event) => onChange("sector", event.target.value)}
+            placeholder="Es. Tecnologia, Finanza, Marketing"
+          />
+        </div>
+        {fieldErrors.sector && <p className="field-error">{fieldErrors.sector}</p>}
+
         <label htmlFor="personalize-link">Link all'annuncio o all'azienda</label>
         <div className="personalize-field">
           <LinkIcon />
@@ -153,7 +168,7 @@ export default function PersonalizeExperience({
         </div>
         {!hasLocalValidFields && (
           <p className="continue-helper-text">
-            Completa descrizione, azienda e ruolo con dati coerenti per continuare.
+            Usa il metodo rapido oppure compila azienda e ruolo nei dettagli specifici.
           </p>
         )}
       </form>
