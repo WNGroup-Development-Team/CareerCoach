@@ -1502,6 +1502,22 @@ textarea {
   line-height: 1.6;
 }
 
+.optimized-cv-section {
+  display: grid;
+  gap: 16px;
+}
+
+.optimized-cv-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.optimized-cv-actions .secondary-button,
+.optimized-cv-download {
+  width: 100%;
+  text-decoration: none;
+}
+
 .cv-skill-tags {
   justify-content: flex-start;
 }

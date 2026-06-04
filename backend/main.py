@@ -13,6 +13,7 @@ import urllib.parse
 import io
 import ipaddress
 import socket
+import textwrap
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from email.message import EmailMessage
@@ -22,7 +23,7 @@ from typing import Optional, List, Dict
 from dotenv import dotenv_values, load_dotenv
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from openai import OpenAI
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -238,6 +239,11 @@ def init_db():
     add_column_if_not_exists(cursor, "users", "cv_text", "TEXT")
     add_column_if_not_exists(cursor, "users", "cv_file_base64", "TEXT")
     add_column_if_not_exists(cursor, "users", "cv_uploaded_at", "TIMESTAMP")
+    add_column_if_not_exists(cursor, "users", "optimized_cv_filename", "TEXT")
+    add_column_if_not_exists(cursor, "users", "optimized_cv_content_type", "TEXT")
+    add_column_if_not_exists(cursor, "users", "optimized_cv_text", "TEXT")
+    add_column_if_not_exists(cursor, "users", "optimized_cv_file_base64", "TEXT")
+    add_column_if_not_exists(cursor, "users", "optimized_cv_generated_at", "TIMESTAMP")
     add_column_if_not_exists(cursor, "users", "linkedin_url", "TEXT")
     add_column_if_not_exists(cursor, "users", "portfolio_url", "TEXT")
     add_column_if_not_exists(cursor, "users", "instagram_handle", "TEXT")
@@ -3324,6 +3330,169 @@ Regole:
         return fallback
 
 
+def strategy_item_to_text(item, fallback_title: str) -> str:
+    if isinstance(item, str):
+        return item
+
+    if not isinstance(item, dict):
+        return str(item or "")
+
+    title = item.get("title") or fallback_title
+    description = item.get("description") or ""
+    coach_tip = item.get("coach_tip") or ""
+    parts = [part for part in [title, description, coach_tip] if part]
+    return " - ".join(parts)
+
+
+def build_fallback_optimized_cv_text(
+    cv_text: str,
+    analysis: Dict,
+    company: str,
+    role: str,
+    goal: str,
+    job_link: str,
+) -> str:
+    strengths = analysis.get("strengths") or []
+    improvements = analysis.get("improvements") or analysis.get("weaknesses") or []
+    lines = [
+        "CV ottimizzato - bozza guidata",
+        "================================",
+        f"Ruolo target: {role or 'Non specificato'}",
+        f"Azienda target: {company or 'Non specificata'}",
+    ]
+
+    if goal:
+        lines.append(f"Descrizione/obiettivo candidatura: {goal}")
+    if job_link:
+        lines.append(f"Link candidatura: {job_link}")
+
+    lines.extend([
+        "",
+        "Nota:",
+        "Questa bozza mantiene il contenuto reale del CV originale e aggiunge indicazioni di adattamento. "
+        "Rivedi il testo prima dell'invio per confermare che ogni informazione sia corretta.",
+        "",
+        "Punti da valorizzare:",
+    ])
+
+    for item in strengths[:5]:
+        text = strategy_item_to_text(item, "Punto di forza")
+        if text:
+            lines.append(f"- {text}")
+
+    lines.append("")
+    lines.append("Ottimizzazioni consigliate:")
+    for item in improvements[:5]:
+        text = strategy_item_to_text(item, "Area di sviluppo")
+        if text:
+            lines.append(f"- {text}")
+
+    lines.extend([
+        "",
+        "CV originale da rifinire",
+        "------------------------",
+        cv_text.strip(),
+    ])
+
+    return "\n".join(lines).strip()
+
+
+def optimize_cv_text_for_job(
+    cv_text: str,
+    analysis: Dict,
+    company: str,
+    role: str,
+    goal: str,
+    job_link: str,
+    sources: List[Dict[str, str]],
+) -> str:
+    fallback = build_fallback_optimized_cv_text(cv_text, analysis, company, role, goal, job_link)
+    prompt = f"""
+Sei un career coach specializzato in CV.
+
+Riscrivi e ottimizza il CV seguente per una candidatura specifica.
+
+Candidatura:
+- Azienda: {company or "Non specificata"}
+- Ruolo: {role or "Non specificato"}
+- Descrizione/obiettivo: {goal or "Non specificato"}
+- Link: {job_link or "Non inserito"}
+
+Indicazioni emerse dall'analisi:
+{json.dumps({
+    "strengths": analysis.get("strengths", []),
+    "improvements": analysis.get("improvements", analysis.get("weaknesses", [])),
+}, ensure_ascii=False)}
+
+Fonti candidatura:
+{sources_to_prompt(sources)}
+
+CV originale:
+{cv_text[:12000]}
+
+Restituisci SOLO JSON valido:
+{{
+  "optimized_cv_text": "testo completo del CV ottimizzato"
+}}
+
+Regole obbligatorie:
+- Scrivi in italiano.
+- Mantieni solo informazioni reali presenti nel CV originale.
+- Non inventare esperienze, aziende, titoli di studio, certificazioni, date, competenze o risultati.
+- Puoi migliorare ordine, chiarezza, tono professionale, parole chiave, sintesi e aderenza alla candidatura.
+- Se una competenza richiesta non e presente, non aggiungerla come posseduta: puoi inserirla solo come area di interesse o sviluppo se coerente.
+- Conserva i dati identificativi e di contatto presenti, senza crearne di nuovi.
+- Produci un CV utilizzabile, non un elenco di consigli.
+"""
+
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=3500))
+        optimized_text = clean_extracted_text(result.get("optimized_cv_text", ""))
+        if len(optimized_text) < 200:
+            return fallback
+        return result.get("optimized_cv_text", "").strip()
+    except Exception as exc:
+        print(f"Ottimizzazione CV AI non riuscita, uso fallback: {exc}")
+        return fallback
+
+
+def get_optimized_cv_filename(filename: Optional[str] = None, extension: str = "pdf") -> str:
+    base = "cv-ottimizzato"
+    if filename:
+        sanitized = re.sub(r"[^0-9A-Za-z_.-]", "-", os.path.splitext(filename)[0]).strip("-_")
+        if sanitized:
+            base = f"{sanitized}-ottimizzato"
+    return f"{base}.{extension}"
+
+
+def create_optimized_cv_file(optimized_text: str) -> tuple[bytes, str, str]:
+    try:
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        y = 42
+        line_height = 14
+        page_bottom = 800
+
+        for paragraph in optimized_text.splitlines():
+            wrapped_lines = textwrap.wrap(paragraph, width=92) if paragraph.strip() else [""]
+            for line in wrapped_lines:
+                if y > page_bottom:
+                    page = doc.new_page()
+                    y = 42
+                page.insert_text((42, y), line, fontsize=10.5, fontname="helv")
+                y += line_height
+            y += 4
+
+        pdf_bytes = doc.write()
+        doc.close()
+        return pdf_bytes, "application/pdf", "pdf"
+    except Exception as exc:
+        print(f"Errore generazione PDF ottimizzato: {exc}")
+        return optimized_text.encode("utf-8"), "text/plain; charset=utf-8", "txt"
+
+
 def get_question_type_instructions(interview_type: str, role: str, company: str) -> str:
     """
     Restituisce istruzioni specifiche per generare domande diverse
@@ -4795,6 +4964,7 @@ async def analyze_cv_for_job_endpoint(
 
     sources = search_job_context(company, role, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
     cv_evaluation = evaluate_cv_for_job(cv_text, company, role, description, link, sources)
+    cv_evaluation["sources"] = sources
 
     return {
         "is_valid_cv": True,
@@ -4848,6 +5018,7 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
 
     sources = search_job_context(company, role, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
     cv_evaluation = evaluate_cv_for_job(cv_text, company, role, description, link, sources)
+    cv_evaluation["sources"] = sources
 
     return {
         "is_valid_cv": True,
@@ -4856,6 +5027,105 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
         "cv_evaluation": cv_evaluation,
         "warnings": ([identity_check["message"]] if identity_check["matches_user"] is None else []) + job_validation.get("warnings", []),
     }
+
+
+@app.post("/users/{user_id}/cv-optimize")
+def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+
+    if not existing_user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    cv_text = recover_saved_cv_text(cursor, existing_user)
+    conn.commit()
+
+    if not existing_user[10] or not cv_text:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Carica un CV valido prima di ottimizzarlo.")
+
+    public_user = user_to_response(existing_user)
+    public_user["cv_text"] = cv_text
+
+    company = (data.company or "Generica").strip() or "Generica"
+    role = (data.role or public_user.get("target_role") or "").strip()
+    goal = (data.goal or "").strip()
+    job_link = normalize_public_profile_url(data.job_link)
+
+    if not role or role.lower() == "da definire":
+        conn.close()
+        raise HTTPException(status_code=400, detail="Inserisci un ruolo target prima di ottimizzare il CV.")
+
+    sources = search_job_context(company, role, job_link) if TAVILY_API_KEY else []
+    analysis = analyze_cv_strategy(public_user, company, role, goal, job_link, sources)
+    optimized_text = optimize_cv_text_for_job(cv_text, analysis, company, role, goal, job_link, sources)
+    file_bytes, content_type, extension = create_optimized_cv_file(optimized_text)
+    filename = get_optimized_cv_filename(existing_user[10], extension)
+    file_base64 = base64.b64encode(file_bytes).decode("utf-8")
+    generated_at = datetime.utcnow().isoformat()
+
+    cursor.execute("""
+    UPDATE users
+    SET optimized_cv_filename = ?,
+        optimized_cv_content_type = ?,
+        optimized_cv_text = ?,
+        optimized_cv_file_base64 = ?,
+        optimized_cv_generated_at = ?
+    WHERE id = ?
+    """, (filename, content_type, optimized_text, file_base64, generated_at, user_id))
+    conn.commit()
+    conn.close()
+
+    return {
+        "optimized_cv": {
+            "filename": filename,
+            "content_type": content_type,
+            "file_base64": file_base64,
+            "text": optimized_text,
+            "download_url": f"/users/{user_id}/cv-optimized-file",
+            "generated_at": generated_at,
+        },
+        "candidate_sources": sources,
+        "analysis": analysis,
+        "message": "CV ottimizzato generato correttamente.",
+    }
+
+
+@app.get("/users/{user_id}/cv-optimized-file")
+def download_optimized_cv(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT optimized_cv_filename,
+           optimized_cv_content_type,
+           optimized_cv_file_base64
+    FROM users
+    WHERE id = ?
+    """, (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    filename, content_type, file_base64 = row
+    if not filename or not file_base64:
+        raise HTTPException(status_code=404, detail="Genera prima il CV ottimizzato.")
+
+    try:
+        file_bytes = base64.b64decode(file_base64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=500, detail="File CV ottimizzato non leggibile.")
+
+    return Response(
+        content=file_bytes,
+        media_type=content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
 
 
 def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:

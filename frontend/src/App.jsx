@@ -402,6 +402,7 @@ function App() {
   });
   const [digitalAnalysis, setDigitalAnalysis] = useState(null);
   const [cvOptimizationAnalysis, setCvOptimizationAnalysis] = useState(null);
+  const [optimizedCv, setOptimizedCv] = useState(null);
   const [jobValidation, setJobValidation] = useState({
     status: "idle",
     errors: {},
@@ -1448,6 +1449,7 @@ function App() {
 
   const analyzeCvOptimization = async (profileOverride = profile, fileOverride = null) => {
     resetError();
+    setOptimizedCv(null);
 
     if (!profileOverride.cv_uploaded && !profileOverride.cv_filename) {
       setError("Carica un CV prima di avviare l'analisi strategica.");
@@ -1515,6 +1517,64 @@ function App() {
     } catch (err) {
       console.error(err);
       setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const optimizeCv = async () => {
+    resetError();
+
+    if (!userId) {
+      setError("Utente non autenticato. Riprova.");
+      return;
+    }
+
+    if (!profile.cv_uploaded && !profile.cv_filename) {
+      setError("Carica un CV prima di ottimizzarlo.");
+      transitionToStep("cv-upload");
+      return;
+    }
+
+    const selectedRole = personalizeForm.role.trim() || profile.target_role || "";
+    if (!selectedRole || selectedRole.toLowerCase() === "da definire") {
+      setError("Inserisci un ruolo target prima di ottimizzare il CV.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv-optimize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          company: personalizeForm.company.trim() || company,
+          role: selectedRole,
+          goal: personalizeForm.goal.trim(),
+          job_link: personalizeForm.link.trim(),
+        })
+      }, 90000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nella generazione del CV ottimizzato.");
+        return;
+      }
+
+      setOptimizedCv(data.optimized_cv || null);
+      if (data.candidate_sources?.length && !cvOptimizationAnalysis?.sources?.length) {
+        setCvOptimizationAnalysis((current) => ({
+          ...(current || {}),
+          sources: data.candidate_sources,
+        }));
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione durante l'ottimizzazione del CV. Controlla che FastAPI sia avviato.");
     } finally {
       setLoading(false);
     }
@@ -3081,6 +3141,36 @@ function App() {
               </div>
             </div>
           )}
+
+          <div className="cv-strategy-section optimized-cv-section">
+            <div className="cv-strategy-section-title">
+              <span>i</span>
+              <h3>CV ottimizzato</h3>
+            </div>
+            <p className="cv-strategy-note">
+              Genera una versione adattata alla candidatura, mantenendo solo le informazioni reali del CV caricato.
+            </p>
+            <div className="optimized-cv-actions">
+              <button
+                className={optimizedCv ? "secondary-button" : "cv-next-button"}
+                type="button"
+                onClick={optimizeCv}
+                disabled={loading}
+              >
+                {optimizedCv ? "Rigenera CV ottimizzato" : "Genera CV ottimizzato"}
+              </button>
+              {optimizedCv?.file_base64 && (
+                <a
+                  className="cv-next-button optimized-cv-download"
+                  href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
+                  download={optimizedCv.filename || "cv-ottimizzato.pdf"}
+                >
+                  Scarica CV ottimizzato
+                  <span aria-hidden="true">-&gt;</span>
+                </a>
+              )}
+            </div>
+          </div>
 
           <button className="cv-next-button" onClick={() => transitionToStep("home")}>
             Torna alla home
