@@ -348,6 +348,7 @@ function App() {
   });
   const [digitalAnalysis, setDigitalAnalysis] = useState(null);
   const [cvOptimizationAnalysis, setCvOptimizationAnalysis] = useState(null);
+  const [optimizedCv, setOptimizedCv] = useState(null);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [stepHistory, setStepHistory] = useState([]);
 
@@ -1413,6 +1414,57 @@ function App() {
 
       setCvOptimizationAnalysis(data.analysis);
       transitionToStep("cv-strategy");
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const optimizeCv = async () => {
+    resetError();
+
+    if (!userId) {
+      setError("Utente non autenticato. Riprova.");
+      return;
+    }
+
+    if (!profile.cv_uploaded && !profile.cv_filename) {
+      setError("Carica un CV prima di ottimizzarlo.");
+      transitionToStep("cv-upload");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv-optimize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          company: personalizeForm.company.trim() || company,
+          role: personalizeForm.role.trim() || profile.target_role || "",
+          goal: personalizeForm.goal.trim(),
+          job_link: personalizeForm.link.trim(),
+        })
+      }, 90000);
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(typeof data.detail === "string" ? data.detail : "Errore nella generazione del CV ottimizzato.");
+        return;
+      }
+
+      setOptimizedCv(data.optimized_cv);
+      setProfile((current) => ({
+        ...current,
+        ...data.user,
+      }));
+      transitionToStep("cv-optimized");
     } catch (err) {
       console.error(err);
       setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
@@ -2777,34 +2829,55 @@ function App() {
             </div>
           )}
 
-          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
-            Torna alla home
+          <button className="cv-next-button" onClick={optimizeCv}>
+            Ottimizza CV
             <span>-&gt;</span>
           </button>
         </section>
       )}
 
-      {step === "cv-view" && (
-        <section className="cv-flow-page">
-          <div className="cv-analysis-heading">
-            <h2>CV Master</h2>
-            <p>{profile.cv_filename || "Nessun CV caricato"}</p>
+      {step === "cv-optimized" && (
+        <section className="cv-strategy-page">
+          <div className="cv-strategy-heading">
+            <h2>CV Ottimizzato</h2>
+            <p>Il tuo CV è stato aggiornato con le aree di sviluppo individuate nell'analisi strategica.</p>
           </div>
 
-          <div className="cv-view-card">
-            <div className="cv-view-header">
-              <span>CV</span>
-              <div>
-                <strong>{cvPreview?.filename || profile.cv_filename || "CV non caricato"}</strong>
-                <p>{cvPreview?.uploaded_at || profile.cv_uploaded_at ? `Caricato il ${cvPreview?.uploaded_at || profile.cv_uploaded_at}` : "Carica il tuo CV master."}</p>
-              </div>
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span>✓</span>
+              <h3>Scarica il CV ottimizzato</h3>
             </div>
 
-            {cvPreview?.file_base64 && /\.(pdf|docx)$/i.test(cvPreview?.filename || "") ? (
-              <div className="cv-word-preview">
+            {optimizedCv ? (
+              <a
+                className="cv-next-button"
+                href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
+                download={optimizedCv.filename}
+              >
+                Scarica CV ottimizzato
+                <span>-&gt;</span>
+              </a>
+            ) : (
+              <button className="cv-next-button" onClick={optimizeCv}>
+                Genera CV ottimizzato
+                <span>-&gt;</span>
+              </button>
+            )}
+
+            <button className="secondary-button" onClick={() => transitionToStep("home")}>Torna alla home</button>
+          </div>
+        </section>
+      )}
+
+      {step === "cv-view" && (
+        <section className="cv-view-page">
+          <div className="cv-view-content">
+            {cvPreview?.filename ? (
+              <div className="cv-preview-file">
                 <strong>Documento {cvPreview.filename.toLowerCase().endsWith(".pdf") ? "PDF" : "Word"} caricato</strong>
                 <p>
-                  Il CV e salvato come file master. Aprilo per visualizzarlo nel programma associato.
+                  Il CV è salvato come file master. Aprilo per visualizzarlo nel programma associato.
                 </p>
                 <a
                   href={`data:${cvPreview.content_type};base64,${cvPreview.file_base64}`}

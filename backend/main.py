@@ -3316,6 +3316,60 @@ Regole:
         return fallback
 
 
+def build_optimized_cv_text(user: Dict, analysis: Dict) -> str:
+    """Crea un testo CV ottimizzato includendo aree di sviluppo e punti di forza rilevanti."""
+    lines = [
+        "CV Ottimizzato",
+        "================",
+        f"Azienda target: {analysis['target'].get('company', 'Non specificata')}",
+        f"Ruolo target: {analysis['target'].get('role', 'Non specificato')}",
+    ]
+
+    if analysis.get("goal"):
+        lines.append(f"Obiettivo candidatura: {analysis['target'].get('goal', '')}")
+    if analysis.get("job_link"):
+        lines.append(f"Link annuncio: {analysis['target'].get('job_link', '')}")
+
+    if analysis.get("strengths"):
+        lines.append("\nPunti di forza:")
+        for item in analysis["strengths"]:
+            lines.append(f"- {item.get('title', '')}: {item.get('description', '')}")
+
+    if analysis.get("improvements"):
+        lines.append("\nAree di sviluppo suggerite:")
+        for item in analysis["improvements"]:
+            coach_tip = item.get("coach_tip")
+            lines.append(f"- {item.get('title', '')}: {item.get('description', '')}" + (f" (Consiglio: {coach_tip})" if coach_tip else ""))
+
+    lines.append("\n---\nTesto CV originale:\n")
+    original_cv_text = user.get("cv_text") or ""
+    lines.append(original_cv_text)
+    return "\n".join(lines).strip()
+
+
+def create_pdf_bytes_from_text(text: str) -> bytes:
+    """Genera un semplice PDF dal testo usando PyMuPDF, con fallback al testo semplice."""
+    try:
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        rect = fitz.Rect(40, 40, 555, 780)
+        page.insert_textbox(rect, text, fontsize=11, fontname="helv")
+        return doc.write()
+    except Exception as exc:
+        print(f"Errore generazione PDF ottimizzato: {exc}")
+        return text.encode("utf-8")
+
+
+def get_optimized_cv_filename(filename: Optional[str] = None) -> str:
+    base = "cv-ottimizzato"
+    if filename:
+        sanitized = re.sub(r"[^0-9A-Za-z_.-]", "-", os.path.splitext(filename)[0]).strip("-_")
+        base = f"{sanitized}-ottimizzato" if sanitized else base
+    return f"{base}.pdf"
+
+
 def get_question_type_instructions(interview_type: str, role: str, company: str) -> str:
     """
     Restituisce istruzioni specifiche per generare domande diverse
@@ -4511,6 +4565,55 @@ def analyze_user_cv_for_optimization(user_id: int, data: CvOptimizationAnalysisR
     return {
         "analysis": analysis,
         "message": "Analisi strategica CV completata.",
+    }
+
+
+@app.post("/users/{user_id}/cv-optimize")
+def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+
+    if not existing_user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    if not existing_user[10] or not existing_user[14]:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Carica un CV prima di ottimizzarlo.")
+
+    public_user = user_to_response(existing_user)
+    public_user["cv_text"] = recover_saved_cv_text(cursor, existing_user)
+
+    company = (data.company or "Generica").strip() or "Generica"
+    role = (data.role or public_user.get("target_role") or "Ruolo da definire").strip() or "Ruolo da definire"
+    goal = (data.goal or "").strip()
+    job_link = normalize_public_profile_url(data.job_link)
+    sources = search_job_context(company, role, job_link)
+
+    analysis = analyze_cv_strategy(public_user, company, role, goal, job_link, sources)
+    optimized_text = build_optimized_cv_text(public_user, analysis)
+    pdf_bytes = create_pdf_bytes_from_text(optimized_text)
+    optimized_filename = get_optimized_cv_filename(existing_user[10])
+    optimized_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+    cursor.execute(
+        "UPDATE users SET cv_filename = ?, cv_text = ?, cv_file_base64 = ? WHERE id = ?",
+        (optimized_filename, optimized_text, optimized_base64, user_id),
+    )
+    conn.commit()
+
+    updated_user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+
+    return {
+        "user": user_to_response(updated_user),
+        "optimized_cv": {
+            "filename": optimized_filename,
+            "content_type": "application/pdf",
+            "file_base64": optimized_base64,
+        },
+        "message": "CV ottimizzato generato e salvato.",
     }
 
 
