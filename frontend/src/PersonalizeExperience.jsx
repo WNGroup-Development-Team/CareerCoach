@@ -37,6 +37,7 @@ export default function PersonalizeExperience({
   onChange,
   onSubmit,
   role,
+  roleLevel = "",
   sector = "",
   validation = { status: "idle", errors: {}, warnings: [], message: "" },
   isValidating = false,
@@ -45,6 +46,7 @@ export default function PersonalizeExperience({
   const normalizedGoal = goal.trim();
   const normalizedCompany = company.trim();
   const normalizedRole = role.trim();
+  const normalizedRoleLevel = roleLevel.trim();
   const normalizedLink = link.trim();
   const hasRole = normalizedRole && normalizedRole.toLowerCase() !== "da definire";
   const hasQuickMethod = normalizedGoal.length > 19;
@@ -54,13 +56,14 @@ export default function PersonalizeExperience({
     description: hasQuickMethod || hasSpecificDetails ? "" : "Compila il metodo rapido oppure inserisci almeno azienda e ruolo nei dettagli specifici.",
     company: hasQuickMethod || !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
     role: hasQuickMethod || !normalizedRole || (hasRole && normalizedRole.length > 3) ? "" : "Inserisci un ruolo lavorativo reale.",
+    role_level: !normalizedRoleLevel || normalizedRoleLevel.length >= 2 ? "" : "Inserisci un livello riconoscibile oppure lascia il campo vuoto.",
     link: linkLooksValid ? "" : "Inserisci un URL valido oppure lascia il campo vuoto.",
   };
   const fieldErrors = {
     ...Object.fromEntries(Object.entries(localErrors).filter(([, value]) => value)),
     ...(validation.errors || {}),
   };
-  const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails) && !localErrors.company && !localErrors.role && !localErrors.link;
+  const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails) && !localErrors.company && !localErrors.role && !localErrors.role_level && !localErrors.link;
   const canSubmit = hasLocalValidFields && !isValidating;
 
   const handleSubmit = (event) => {
@@ -117,6 +120,18 @@ export default function PersonalizeExperience({
         </div>
         {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
         {fieldErrors.coherence && <p className="field-error">{fieldErrors.coherence}</p>}
+
+        <label htmlFor="personalize-role-level">Livello ruolo</label>
+        <div className="personalize-field">
+          <BriefcaseIcon />
+          <input
+            id="personalize-role-level"
+            value={roleLevel}
+            onChange={(event) => onChange("role_level", event.target.value)}
+            placeholder="Es. Stage, Junior, Senior"
+          />
+        </div>
+        {fieldErrors.role_level && <p className="field-error">{fieldErrors.role_level}</p>}
 
         <label htmlFor="personalize-sector">Settore</label>
         <div className="personalize-field">

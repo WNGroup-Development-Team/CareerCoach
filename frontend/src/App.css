@@ -1575,6 +1575,23 @@ textarea {
   background: #ffffff;
 }
 
+.cv-additional-field.has-error textarea {
+  border-color: #e55266;
+  background: #fff7f8;
+  box-shadow: 0 0 0 3px rgba(229, 82, 102, 0.12);
+}
+
+.cv-additional-field.has-error span {
+  color: #a4162a;
+}
+
+.cv-field-error {
+  color: #a4162a;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
 .cv-additional-error {
   margin: 0;
   padding: 12px 14px;

@@ -32,6 +32,34 @@ const getEmptyCvAdditionalData = () =>
     [item.key]: "",
   }), {});
 
+const normalizeCvErrorReference = (value = "") =>
+  String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ");
+
+const getCvRejectedFieldReference = (value = "") => {
+  const normalized = normalizeCvErrorReference(value);
+  const adaptationMatch = normalized.match(/risposta domanda (\d+)/);
+
+  if (adaptationMatch) {
+    return {
+      type: "adaptation",
+      index: Number(adaptationMatch[1]) - 1,
+    };
+  }
+
+  const matchedField = CV_ADDITIONAL_DATA_FIELDS.find((field) =>
+    normalizeCvErrorReference(field.key) === normalized ||
+    normalizeCvErrorReference(field.label) === normalized
+  );
+
+  return matchedField
+    ? { type: "additional", key: matchedField.key }
+    : null;
+};
+
 const wait = (duration) =>
   new Promise((resolve) => {
     setTimeout(resolve, duration);
@@ -466,9 +494,14 @@ function App() {
   const [digitalAnalysis, setDigitalAnalysis] = useState(null);
   const [cvOptimizationAnalysis, setCvOptimizationAnalysis] = useState(null);
   const [optimizedCv, setOptimizedCv] = useState(null);
+  const [optimizedCvWarnings, setOptimizedCvWarnings] = useState([]);
   const [cvAdditionalData, setCvAdditionalData] = useState(getEmptyCvAdditionalData);
   const [cvAdaptationAnswers, setCvAdaptationAnswers] = useState({});
   const [cvAdditionalDataError, setCvAdditionalDataError] = useState("");
+  const [cvFieldErrors, setCvFieldErrors] = useState({
+    additional: {},
+    adaptation: {},
+  });
   const [loadingMessage, setLoadingMessage] = useState("");
   const [jobValidation, setJobValidation] = useState({
     status: "idle",
@@ -488,6 +521,7 @@ function App() {
     goal: "",
     company: "",
     role: "",
+    role_level: "",
     sector: "",
     link: "",
   });
@@ -1532,6 +1566,7 @@ function App() {
         description: personalizeForm.goal.trim(),
         company: personalizeForm.company.trim() || company,
         role: personalizeForm.role.trim() || profileOverride.target_role || "",
+        role_level: personalizeForm.role_level.trim(),
         sector: personalizeForm.sector.trim() || profile.sector || "",
         link: personalizeForm.link.trim(),
       };
@@ -1546,6 +1581,7 @@ function App() {
         formData.append("description", requestPayload.description);
         formData.append("company", requestPayload.company);
         formData.append("role", requestPayload.role);
+        formData.append("role_level", requestPayload.role_level);
         formData.append("sector", requestPayload.sector);
         formData.append("link", requestPayload.link);
 
@@ -1595,6 +1631,8 @@ function App() {
   const optimizeCv = async () => {
     resetError();
     setCvAdditionalDataError("");
+    setCvFieldErrors({ additional: {}, adaptation: {} });
+    setOptimizedCvWarnings([]);
 
     if (!userId) {
       setError("Utente non autenticato. Riprova.");
@@ -1642,11 +1680,13 @@ function App() {
           original_cv_text: profile.cv_text || cvPreview?.text || "",
           company: personalizeForm.company.trim() || company,
           role: selectedRole,
+          role_level: personalizeForm.role_level.trim(),
           goal: personalizeForm.goal.trim(),
           job_link: personalizeForm.link.trim(),
           job_data: {
             company: personalizeForm.company.trim() || company,
             role: selectedRole,
+            role_level: personalizeForm.role_level.trim(),
             description: personalizeForm.goal.trim(),
             sector: personalizeForm.sector.trim() || profile.sector || "",
             application_sources: candidateSources,
@@ -1667,11 +1707,31 @@ function App() {
         const detail = typeof data.detail === "string"
           ? data.detail
           : data.detail?.message || "Errore nella generazione del CV ottimizzato.";
-        setError(detail);
+        const rejectedFields = Array.isArray(data.detail?.rejected_fields)
+          ? data.detail.rejected_fields
+          : [];
+
+        if (rejectedFields.length) {
+          const nextFieldErrors = { additional: {}, adaptation: {} };
+          rejectedFields.forEach((fieldName) => {
+            const reference = getCvRejectedFieldReference(fieldName);
+            if (reference?.type === "additional") {
+              nextFieldErrors.additional[reference.key] = "Dettaglio troppo generico: aggiungi fatti concreti, contesto o un esempio reale.";
+            }
+            if (reference?.type === "adaptation") {
+              nextFieldErrors.adaptation[reference.index] = "Risposta troppo generica: specifica attività, strumenti, risultati o un esempio verificabile.";
+            }
+          });
+          setCvFieldErrors(nextFieldErrors);
+          setCvAdditionalDataError("Controlla i campi evidenziati: alcuni dettagli sono troppo brevi o generici per creare un CV affidabile.");
+        } else {
+          setError(detail);
+        }
         return;
       }
 
       setOptimizedCv(data.optimized_cv || null);
+      setOptimizedCvWarnings(data.hallucination_warnings || []);
       downloadOptimizedCvFile(data.optimized_cv);
       transitionToStep("cv-optimized");
       if (data.candidate_sources?.length && !cvOptimizationAnalysis?.sources?.length) {
@@ -1691,6 +1751,13 @@ function App() {
 
   const updateCvAdditionalData = (field, value) => {
     setCvAdditionalDataError("");
+    setCvFieldErrors((current) => ({
+      ...current,
+      additional: {
+        ...current.additional,
+        [field]: "",
+      },
+    }));
     setCvAdditionalData((current) => ({
       ...current,
       [field]: value,
@@ -1699,6 +1766,13 @@ function App() {
 
   const updateCvAdaptationAnswer = (index, value) => {
     setCvAdditionalDataError("");
+    setCvFieldErrors((current) => ({
+      ...current,
+      adaptation: {
+        ...current.adaptation,
+        [index]: "",
+      },
+    }));
     setCvAdaptationAnswers((current) => ({
       ...current,
       [index]: value,
@@ -2106,6 +2180,7 @@ function App() {
       goal: current.goal,
       company: current.company || (company === "Generica" ? "" : company),
       role: current.role.toLowerCase() === "da definire" ? "" : current.role,
+      role_level: current.role_level,
       sector: current.sector || profile.sector || "",
       link: current.link,
     }));
@@ -2152,6 +2227,7 @@ function App() {
         description: personalizeForm.goal.trim(),
         company: personalizeForm.company.trim(),
         role: personalizeForm.role.trim(),
+        role_level: personalizeForm.role_level.trim(),
         sector: personalizeForm.sector.trim(),
         link: personalizeForm.link.trim(),
       })
@@ -2283,13 +2359,18 @@ function App() {
   const cvStrategyOverallScore = cvOptimizationAnalysis?.overall_score || cvOptimizationAnalysis?.score || 0;
   const cvStrategyScoreItems = [
     { label: "Generale", value: cvStrategyOverallScore },
-    { label: "ATS", value: cvOptimizationAnalysis?.ats_score || cvOptimizationAnalysis?.ats_analysis?.ats_score || 0 },
-    { label: "Ruolo", value: cvOptimizationAnalysis?.role_match_score || cvOptimizationAnalysis?.role_score || 0 },
+    { label: "ATS simulato", value: cvOptimizationAnalysis?.ats_score || cvOptimizationAnalysis?.ats_analysis?.ats_score || 0 },
+    { label: "Keyword", value: cvOptimizationAnalysis?.keyword_score || cvOptimizationAnalysis?.ats_analysis?.keyword_score || 0 },
+    { label: "Formato", value: cvOptimizationAnalysis?.format_score || cvOptimizationAnalysis?.ats_analysis?.format_score || 0 },
+    { label: "Ruolo", value: cvOptimizationAnalysis?.job_match_score || cvOptimizationAnalysis?.role_match_score || cvOptimizationAnalysis?.role_score || 0 },
     { label: "Azienda", value: cvOptimizationAnalysis?.company_fit_score || cvOptimizationAnalysis?.company_score || 0 },
     { label: "Completezza", value: cvOptimizationAnalysis?.completeness_score || 0 },
-    { label: "Chiarezza", value: cvOptimizationAnalysis?.clarity_score || 0 },
-    { label: "Professionalità", value: cvOptimizationAnalysis?.professionalism_score || 0 },
   ];
+  const cvAtsAnalysis = cvOptimizationAnalysis?.ats_analysis || {};
+  const cvAtsPresentKeywords = cvAtsAnalysis.present_keywords || cvAtsAnalysis.keywords_present || cvOptimizationAnalysis?.present_keywords || [];
+  const cvAtsMissingKeywords = cvAtsAnalysis.missing_keywords || cvAtsAnalysis.keywords_missing || cvOptimizationAnalysis?.missing_keywords || [];
+  const cvAtsMissingHardSkills = cvAtsAnalysis.missing_hard_skills || cvOptimizationAnalysis?.missing_hard_skills || [];
+  const cvAtsMissingSoftSkills = cvAtsAnalysis.missing_soft_skills || cvOptimizationAnalysis?.missing_soft_skills || [];
   const recommendedAdaptations = [
     ...(cvOptimizationAnalysis?.suggestions || []),
     ...(cvOptimizationAnalysis?.improvements || []),
@@ -2383,15 +2464,6 @@ function App() {
             </div>
           )}
         </header>
-      )}
-
-      {userId && !["home", "personalize", "cv-upload", "cv-digital", "cv-analysis"].includes(step) && (
-        <nav className="navbar">
-          <button onClick={() => transitionToStep("home")}>Home</button>
-          <button onClick={() => transitionToStep("gym")}>Palestra colloqui</button>
-          <button onClick={loadHistory}>Storico</button>
-          <button onClick={loadProgress}>Progressi</button>
-        </nav>
       )}
 
       {showTransition && !showSplash && (
@@ -2490,6 +2562,7 @@ function App() {
           goal={personalizeForm.goal}
           link={personalizeForm.link}
           role={personalizeForm.role}
+          roleLevel={personalizeForm.role_level}
           sector={personalizeForm.sector}
           onBack={() => transitionToStep("home")}
           onChange={updatePersonalizeForm}
@@ -3153,34 +3226,54 @@ function App() {
             <div className="cv-strategy-section">
               <div className="cv-strategy-section-title">
                 <span>i</span>
-                <h3>Ottimizzazione ATS</h3>
+                <h3>ATS simulato</h3>
               </div>
               <div className="ats-summary-grid">
                 <div>
                   <strong>{cvOptimizationAnalysis.ats_analysis.ats_score || cvOptimizationAnalysis.ats_score || 0}</strong>
-                  <p>Punteggio ATS</p>
+                  <p>Compatibilità ATS stimata</p>
                 </div>
                 <div>
                   <strong>{Math.round((cvOptimizationAnalysis.ats_analysis.keyword_coverage || 0) * 100)}%</strong>
                   <p>Copertura keyword</p>
                 </div>
               </div>
-              {(cvOptimizationAnalysis.ats_analysis.keywords_present || []).length > 0 && (
+              {cvAtsPresentKeywords.length > 0 && (
                 <>
                   <p className="cv-strategy-note">Parole chiave già presenti</p>
                   <div className="tag-row cv-skill-tags">
-                    {cvOptimizationAnalysis.ats_analysis.keywords_present.map((keyword) => (
+                    {cvAtsPresentKeywords.map((keyword) => (
                       <span key={keyword}>{keyword}</span>
                     ))}
                   </div>
                 </>
               )}
-              {(cvOptimizationAnalysis.ats_analysis.keywords_missing || []).length > 0 && (
+              {cvAtsMissingKeywords.length > 0 && (
                 <>
                   <p className="cv-strategy-note">Keyword da verificare prima dell'inserimento</p>
                   <div className="tag-row cv-skill-tags warning">
-                    {cvOptimizationAnalysis.ats_analysis.keywords_missing.map((keyword) => (
+                    {cvAtsMissingKeywords.map((keyword) => (
                       <span key={keyword}>{keyword}</span>
+                    ))}
+                  </div>
+                </>
+              )}
+              {cvAtsMissingHardSkills.length > 0 && (
+                <>
+                  <p className="cv-strategy-note">Hard skill mancanti o poco evidenti</p>
+                  <div className="tag-row cv-skill-tags warning">
+                    {cvAtsMissingHardSkills.map((skill) => (
+                      <span key={skill}>{skill}</span>
+                    ))}
+                  </div>
+                </>
+              )}
+              {cvAtsMissingSoftSkills.length > 0 && (
+                <>
+                  <p className="cv-strategy-note">Soft skill mancanti o poco evidenti</p>
+                  <div className="tag-row cv-skill-tags warning">
+                    {cvAtsMissingSoftSkills.map((skill) => (
+                      <span key={skill}>{skill}</span>
                     ))}
                   </div>
                 </>
@@ -3380,7 +3473,14 @@ function App() {
             </div>
             {cvOptimizationQuestions.length > 0 ? (
               cvOptimizationQuestions.map((item, index) => (
-                <label className="cv-additional-field cv-adaptation-question" key={`${item.id || item.question}-${index}`}>
+                <label
+                  className={[
+                    "cv-additional-field",
+                    "cv-adaptation-question",
+                    cvFieldErrors.adaptation[index] ? "has-error" : "",
+                  ].filter(Boolean).join(" ")}
+                  key={`${item.id || item.question}-${index}`}
+                >
                   <span>{item.question || getAdaptationQuestion(item, index)}</span>
                   {item.reason && <small>{item.reason}</small>}
                   <textarea
@@ -3388,6 +3488,9 @@ function App() {
                     onChange={(event) => updateCvAdaptationAnswer(index, event.target.value)}
                     rows={4}
                   />
+                  {cvFieldErrors.adaptation[index] && (
+                    <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
+                  )}
                 </label>
               ))
             ) : (
@@ -3425,13 +3528,22 @@ function App() {
             </div>
 
             {CV_ADDITIONAL_DATA_FIELDS.map((field) => (
-              <label className="cv-additional-field" key={field.key}>
+              <label
+                className={[
+                  "cv-additional-field",
+                  cvFieldErrors.additional[field.key] ? "has-error" : "",
+                ].filter(Boolean).join(" ")}
+                key={field.key}
+              >
                 <span>{field.label}</span>
                 <textarea
                   value={cvAdditionalData[field.key]}
                   onChange={(event) => updateCvAdditionalData(field.key, event.target.value)}
                   rows={4}
                 />
+                {cvFieldErrors.additional[field.key] && (
+                  <small className="cv-field-error">{cvFieldErrors.additional[field.key]}</small>
+                )}
               </label>
             ))}
 
@@ -3487,6 +3599,23 @@ function App() {
               <button className="cv-next-button" type="button" onClick={() => transitionToStep("cv-optimize-details")}>
                 Torna alla generazione
               </button>
+            )}
+            {optimizedCvWarnings.length > 0 && (
+              <div className="cv-analysis-card linkedin-basic-card">
+                <h3>Avvisi di verifica</h3>
+                <p>
+                  Alcune frasi potrebbero richiedere un controllo manuale prima dell'invio.
+                </p>
+                {optimizedCvWarnings.map((warning, index) => (
+                  <div className="cv-strategy-item warning" key={`${warning.claim}-${index}`}>
+                    <span>!</span>
+                    <div>
+                      <strong>{warning.reason || "Possibile informazione non verificata"}</strong>
+                      <p>{warning.claim}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
             <button className="secondary-button" type="button" onClick={() => transitionToStep("home")}>
               Torna alla home

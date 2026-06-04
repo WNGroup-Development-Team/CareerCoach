@@ -315,6 +315,7 @@ class DigitalPresenceUpdate(BaseModel):
 class CvOptimizationAnalysisRequest(BaseModel):
     company: Optional[str] = None
     role: Optional[str] = None
+    role_level: Optional[str] = None
     goal: Optional[str] = None
     job_link: Optional[str] = None
     original_cv_text: Optional[str] = None
@@ -329,6 +330,7 @@ class JobValidationRequest(BaseModel):
     description: Optional[str] = None
     company: Optional[str] = None
     role: Optional[str] = None
+    role_level: Optional[str] = None
     link: Optional[str] = None
     sector: Optional[str] = None
     required_skills: Optional[str] = None
@@ -3506,6 +3508,7 @@ Regole obbligatorie:
 - Non inventare certificazioni.
 - Non inventare risultati numerici se non sono stati forniti.
 - Non modificare il CV originale: crea una nuova versione ottimizzata.
+- Dopo la scrittura fai un controllo interno: ogni competenza, certificazione, numero, ruolo o tecnologia deve essere supportato dal CV originale o dai dati aggiunti dall'utente.
 - Mantieni il piu possibile struttura, ordine e sezioni del CV originale. Cambia l'organizzazione solo se serve a renderlo piu leggibile e compatibile con ATS.
 - Puoi migliorare ordine, chiarezza, tono professionale, parole chiave, sintesi e aderenza alla candidatura.
 - Migliora struttura, ordine delle sezioni, pertinenza rispetto al ruolo, coerenza con azienda, ruolo e fonti candidatura, e valorizzazione delle esperienze reali dell'utente.
@@ -3567,7 +3570,7 @@ def create_optimized_cv_file(optimized_text: str) -> tuple[bytes, str, str]:
 
 def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[str, Any], List[str]]:
     sanitized: Dict[str, Any] = {}
-    rejected = []
+    rejected_candidates = []
 
     for key, value in (data or {}).items():
         if key == "adaptation_answers":
@@ -3576,7 +3579,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
             continue
         cleaned = value.strip()
         if is_low_quality_text(cleaned, min_chars=8, min_words=2):
-            rejected.append(key.replace("_", " "))
+            rejected_candidates.append(key.replace("_", " "))
             continue
         sanitized[key] = cleaned
 
@@ -3588,7 +3591,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
         if not answer:
             continue
         if is_low_quality_text(answer, min_chars=8, min_words=2):
-            rejected.append(f"risposta domanda {index + 1}")
+            rejected_candidates.append(f"risposta domanda {index + 1}")
             continue
         answers.append({
             "question": str(item.get("question", "")).strip(),
@@ -3600,7 +3603,72 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     if answers:
         sanitized["adaptation_answers"] = answers
 
+    rejected = rejected_candidates if rejected_candidates and not sanitized else []
     return sanitized, rejected
+
+
+def flatten_cv_support_data(data: Optional[Dict[str, Any]]) -> str:
+    parts = []
+    for key, value in (data or {}).items():
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+        elif key == "adaptation_answers" and isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("answer", "")).strip())
+    return "\n".join(part for part in parts if part)
+
+
+def detect_unsupported_optimized_claims(
+    optimized_text: str,
+    cv_text: str,
+    user_additional_data: Optional[Dict[str, Any]],
+    company: str,
+    role: str,
+    goal: str,
+) -> List[Dict[str, str]]:
+    support_text = normalize_plain_text(
+        "\n".join([
+            cv_text or "",
+            flatten_cv_support_data(user_additional_data),
+            company or "",
+            role or "",
+            goal or "",
+        ])
+    )
+    if not support_text:
+        return []
+
+    risky_patterns = [
+        (r"\b(certificazione|certificazioni|certificato|corso|master|laurea|dottorato)\b", "titolo, corso o certificazione"),
+        (r"\b\d{1,3}%\b|\b\d+\s*(anni|mesi|utenti|clienti|progetti|record|righe)\b", "risultato numerico"),
+        (r"\b(manager|lead|responsabile|coordinatore|senior|director)\b", "ruolo o seniority"),
+        (r"\b(power bi|tableau|aws|azure|google cloud|docker|kubernetes|sap)\b", "strumento o tecnologia"),
+    ]
+    warnings = []
+    for raw_line in optimized_text.splitlines():
+        line = raw_line.strip()
+        if len(line) < 35:
+            continue
+        line_plain = normalize_plain_text(line)
+        matched_reason = next((reason for pattern, reason in risky_patterns if re.search(pattern, line_plain)), "")
+        if not matched_reason:
+            continue
+        meaningful_tokens = [
+            token for token in tokenize_meaningful(line_plain)
+            if len(token) >= 4 and token not in {"curriculum", "profilo", "esperienza", "competenze"}
+        ]
+        if not meaningful_tokens:
+            continue
+        supported_tokens = sum(1 for token in meaningful_tokens if token in support_text)
+        if supported_tokens / max(len(meaningful_tokens), 1) < 0.35:
+            warnings.append({
+                "claim": line[:220],
+                "reason": f"Possibile {matched_reason} non supportato dal CV originale o dai dati aggiunti.",
+            })
+        if len(warnings) >= 8:
+            break
+    return warnings
 
 
 def get_question_type_instructions(interview_type: str, role: str, company: str) -> str:
@@ -4862,10 +4930,31 @@ def extract_requested_keywords(role: str, description: str, required_skills: str
     return keywords[:20]
 
 
+ATS_HARD_SKILL_TERMS = [
+    "python", "sql", "postgresql", "mysql", "excel", "power bi", "tableau",
+    "database", "etl", "data cleaning", "data analysis", "analisi dati",
+    "machine learning", "pandas", "numpy", "cplex", "ottimizzazione",
+]
+
+ATS_SOFT_SKILL_TERMS = [
+    "comunicazione", "problem solving", "team", "collaborazione",
+    "pensiero analitico", "ragionamento analitico", "decisioni",
+    "organizzazione", "precisione", "autonomia",
+]
+
+
+def split_requested_skill_terms(role: str, description: str, required_skills: str = "") -> tuple[List[str], List[str]]:
+    requirement_text = normalize_plain_text(f"{role} {description} {required_skills}")
+    hard_skills = [term for term in ATS_HARD_SKILL_TERMS if normalize_plain_text(term) in requirement_text]
+    soft_skills = [term for term in ATS_SOFT_SKILL_TERMS if normalize_plain_text(term) in requirement_text]
+    return hard_skills[:12], soft_skills[:12]
+
+
 def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: str = "") -> Dict:
     heuristic = analyze_cv_heuristics(cv_text)
     cv_plain = normalize_plain_text(cv_text)
     requested_keywords = extract_requested_keywords(role, description, required_skills)
+    requested_hard_skills, requested_soft_skills = split_requested_skill_terms(role, description, required_skills)
     present_keywords = []
     missing_keywords = []
 
@@ -4892,7 +4981,17 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
     keyword_coverage = len(present_keywords) / max(len(requested_keywords), 1)
     section_score = (len(required_sections) - len(missing_sections)) / len(required_sections)
     text_length_score = min(len(cv_text) / 3500, 1)
+    keyword_score = clamp_score(round(keyword_coverage * 100))
+    format_score = clamp_score(round((section_score * 70) + (text_length_score * 30)))
     ats_score = clamp_score(round((keyword_coverage * 42) + (section_score * 32) + (text_length_score * 16) + 10))
+    missing_hard_skills = [
+        skill for skill in requested_hard_skills
+        if normalize_plain_text(skill) not in cv_plain
+    ]
+    missing_soft_skills = [
+        skill for skill in requested_soft_skills
+        if normalize_plain_text(skill) not in cv_plain
+    ]
 
     issues = []
     if missing_keywords:
@@ -4916,10 +5015,17 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
 
     return {
         "ats_score": ats_score,
+        "keyword_score": keyword_score,
+        "format_score": format_score,
         "keyword_coverage": round(keyword_coverage, 2),
         "keywords_present": present_keywords[:12],
         "keywords_missing": missing_keywords[:12],
+        "present_keywords": present_keywords[:12],
+        "missing_keywords": missing_keywords[:12],
+        "missing_hard_skills": missing_hard_skills[:10],
+        "missing_soft_skills": missing_soft_skills[:10],
         "missing_sections": missing_sections,
+        "sections_to_improve": missing_sections,
         "issues": issues,
         "suggestions": suggestions[:6],
     }
@@ -5115,37 +5221,54 @@ def build_fallback_cv_job_evaluation(
     relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens).union(required_skill_tokens))))[:8]
     missing = sorted(list((role_tokens.union(description_tokens).union(required_skill_tokens)) - cv_tokens))[:8]
     ats_analysis = analyze_cv_ats(cv_text, role, description, required_skills)
+    questions_for_user = generate_cv_optimization_questions(cv_text, {
+        "weaknesses": [],
+        "missing_skills_for_role": missing,
+    }, ats_analysis)
+    strengths = [
+        "Il CV contiene elementi utili per una prima valutazione della candidatura.",
+        "La struttura include sezioni riconoscibili di un curriculum.",
+        "Sono presenti alcune informazioni confrontabili con ruolo e descrizione inseriti.",
+    ]
+    weaknesses = [
+        "La valutazione automatica locale non puo verificare nel dettaglio tutte le competenze richieste.",
+        "Alcune parole chiave della posizione non risultano abbastanza evidenti nel CV.",
+        "I risultati misurabili e l'allineamento con l'azienda possono essere resi piu espliciti.",
+    ]
 
     return {
         "overall_score": overall,
         "ats_score": ats_analysis["ats_score"],
+        "job_match_score": role_match,
+        "keyword_score": ats_analysis.get("keyword_score", ats_analysis["ats_score"]),
+        "format_score": ats_analysis.get("format_score", completeness),
         "ats_analysis": ats_analysis,
         "role_match_score": role_match,
         "company_fit_score": company_fit,
         "clarity_score": clarity,
         "completeness_score": completeness,
         "professionalism_score": professionalism,
-        "strengths": [
-            "Il CV contiene elementi utili per una prima valutazione della candidatura.",
-            "La struttura include sezioni riconoscibili di un curriculum.",
-            "Sono presenti alcune informazioni confrontabili con ruolo e descrizione inseriti.",
-        ],
-        "weaknesses": [
-            "La valutazione automatica locale non puo verificare nel dettaglio tutte le competenze richieste.",
-            "Alcune parole chiave della posizione non risultano abbastanza evidenti nel CV.",
-            "I risultati misurabili e l'allineamento con l'azienda possono essere resi piu espliciti.",
-        ],
+        "strengths": strengths,
+        "weaknesses": weaknesses,
+        "strong_points": strengths,
+        "weak_points": weaknesses,
         "relevant_skills_found": relevant_found,
         "missing_skills_for_role": missing,
         "relevant_experiences": [
             "Evidenzia le esperienze piu vicine al ruolo indicato e collega ogni attivita a risultati concreti."
         ],
+        "present_keywords": ats_analysis.get("present_keywords", ats_analysis.get("keywords_present", [])),
+        "missing_keywords": ats_analysis.get("missing_keywords", ats_analysis.get("keywords_missing", [])),
+        "missing_hard_skills": ats_analysis.get("missing_hard_skills", []),
+        "missing_soft_skills": ats_analysis.get("missing_soft_skills", []),
+        "sections_to_improve": ats_analysis.get("sections_to_improve", ats_analysis.get("missing_sections", [])),
         "suggestions": [
             f"Personalizza il profilo iniziale citando il ruolo {role}.",
             "Aggiungi risultati numerici alle esperienze, ad esempio metriche, obiettivi raggiunti o impatto.",
             "Rendi piu visibili le competenze richieste dall'annuncio nella sezione competenze.",
             f"Inserisci un riferimento chiaro al tipo di contesto aziendale di {company}.",
         ],
+        "questions_for_user": questions_for_user,
         "summary": "Il CV e valido e analizzabile. Per renderlo piu competitivo, va personalizzato meglio rispetto a ruolo, azienda e descrizione inseriti.",
     }
 
@@ -5158,16 +5281,59 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
     ]:
         normalized[key] = clamp_score(result.get(key, fallback[key]))
 
+    normalized["job_match_score"] = clamp_score(
+        result.get("job_match_score", fallback.get("job_match_score", normalized["role_match_score"]))
+    )
+    normalized["keyword_score"] = clamp_score(
+        result.get("keyword_score", fallback.get("keyword_score", normalized["ats_score"]))
+    )
+    normalized["format_score"] = clamp_score(
+        result.get("format_score", fallback.get("format_score", normalized["completeness_score"]))
+    )
+
+    if "strengths" not in result and isinstance(result.get("strong_points"), list):
+        result["strengths"] = result["strong_points"]
+    if "weaknesses" not in result and isinstance(result.get("weak_points"), list):
+        result["weaknesses"] = result["weak_points"]
+
     list_fields = [
         "strengths", "weaknesses", "relevant_skills_found",
-        "missing_skills_for_role", "relevant_experiences", "suggestions"
+        "missing_skills_for_role", "relevant_experiences", "suggestions",
+        "present_keywords", "missing_keywords", "missing_hard_skills",
+        "missing_soft_skills", "sections_to_improve", "questions_for_user"
     ]
     for field in list_fields:
         value = result.get(field)
-        normalized[field] = value if isinstance(value, list) and value else fallback[field]
+        normalized[field] = value if isinstance(value, list) and value else fallback.get(field, [])
 
     normalized["summary"] = result.get("summary") or fallback["summary"]
     normalized["ats_analysis"] = result.get("ats_analysis") if isinstance(result.get("ats_analysis"), dict) else fallback.get("ats_analysis", {})
+    normalized["ats_analysis"]["keyword_score"] = normalized["ats_analysis"].get("keyword_score", normalized["keyword_score"])
+    normalized["ats_analysis"]["format_score"] = normalized["ats_analysis"].get("format_score", normalized["format_score"])
+    normalized["ats_analysis"]["present_keywords"] = normalized["ats_analysis"].get(
+        "present_keywords",
+        normalized["ats_analysis"].get("keywords_present", normalized["present_keywords"])
+    )
+    normalized["ats_analysis"]["missing_keywords"] = normalized["ats_analysis"].get(
+        "missing_keywords",
+        normalized["ats_analysis"].get("keywords_missing", normalized["missing_keywords"])
+    )
+    normalized["ats_analysis"]["keywords_present"] = normalized["ats_analysis"].get(
+        "keywords_present",
+        normalized["ats_analysis"].get("present_keywords", normalized["present_keywords"])
+    )
+    normalized["ats_analysis"]["keywords_missing"] = normalized["ats_analysis"].get(
+        "keywords_missing",
+        normalized["ats_analysis"].get("missing_keywords", normalized["missing_keywords"])
+    )
+    normalized["ats_analysis"]["missing_hard_skills"] = normalized["ats_analysis"].get("missing_hard_skills", normalized["missing_hard_skills"])
+    normalized["ats_analysis"]["missing_soft_skills"] = normalized["ats_analysis"].get("missing_soft_skills", normalized["missing_soft_skills"])
+    normalized["ats_analysis"]["sections_to_improve"] = normalized["ats_analysis"].get(
+        "sections_to_improve",
+        normalized["ats_analysis"].get("missing_sections", normalized["sections_to_improve"])
+    )
+    normalized["strong_points"] = normalized["strengths"]
+    normalized["weak_points"] = normalized["weaknesses"]
     return normalized
 
 
@@ -5189,6 +5355,7 @@ def evaluate_cv_for_job(
 Sei un recruiter senior e career coach.
 
 Valuta questo CV rispetto a una candidatura specifica.
+Questa e una simulazione interna: parla sempre di "ATS simulato" o "compatibilita ATS stimata", mai dell'ATS reale dell'azienda.
 
 Azienda: {company}
 Ruolo desiderato: {role}
@@ -5211,6 +5378,9 @@ Restituisci SOLO JSON valido con questa struttura:
 {{
   "overall_score": 0,
   "ats_score": 0,
+  "job_match_score": 0,
+  "keyword_score": 0,
+  "format_score": 0,
   "role_match_score": 0,
   "company_fit_score": 0,
   "clarity_score": 0,
@@ -5218,16 +5388,31 @@ Restituisci SOLO JSON valido con questa struttura:
   "professionalism_score": 0,
   "strengths": ["..."],
   "weaknesses": ["..."],
+  "strong_points": ["..."],
+  "weak_points": ["..."],
   "relevant_skills_found": ["..."],
   "missing_skills_for_role": ["..."],
+  "present_keywords": ["..."],
+  "missing_keywords": ["..."],
+  "missing_hard_skills": ["..."],
+  "missing_soft_skills": ["..."],
+  "sections_to_improve": [{{"section": "...", "suggestion": "..."}}],
+  "questions_for_user": [{{"question": "...", "reason": "...", "category": "..."}}],
   "relevant_experiences": ["..."],
   "suggestions": ["..."],
   "ats_analysis": {{
     "ats_score": 0,
+    "keyword_score": 0,
+    "format_score": 0,
     "keyword_coverage": 0,
     "keywords_present": ["..."],
     "keywords_missing": ["..."],
+    "present_keywords": ["..."],
+    "missing_keywords": ["..."],
+    "missing_hard_skills": ["..."],
+    "missing_soft_skills": ["..."],
     "missing_sections": [{{"section": "...", "suggestion": "..."}}],
+    "sections_to_improve": [{{"section": "...", "suggestion": "..."}}],
     "issues": ["..."],
     "suggestions": ["..."]
   }},
@@ -5240,17 +5425,22 @@ Regole:
 - Non essere generico: collega ogni giudizio a ruolo, azienda, descrizione e fonti.
 - Distingui competenze presenti da competenze mancanti.
 - Non inventare esperienze non presenti nel CV.
-- Valuta compatibilita ATS: sezioni leggibili, keyword, struttura, completezza, testo estraibile.
+- Valuta compatibilita ATS stimata: sezioni leggibili, keyword, struttura, completezza, testo estraibile.
+- Non affermare che il punteggio rappresenti il vero ATS dell'azienda.
 """
 
     try:
         result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1800))
         normalized = normalize_cv_job_evaluation(result, fallback)
-        normalized["optimization_questions"] = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
+        questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
+        normalized["optimization_questions"] = questions
+        normalized["questions_for_user"] = questions
         return normalized
     except Exception as exc:
         print(f"Valutazione CV per candidatura non riuscita, uso fallback: {exc}")
-        fallback["optimization_questions"] = generate_cv_optimization_questions(cv_text, fallback, fallback.get("ats_analysis", ats_analysis))
+        questions = generate_cv_optimization_questions(cv_text, fallback, fallback.get("ats_analysis", ats_analysis))
+        fallback["optimization_questions"] = questions
+        fallback["questions_for_user"] = questions
         return fallback
 
 
@@ -5274,6 +5464,7 @@ async def analyze_cv_for_job_endpoint(
     description: str = Form(""),
     company: str = Form(""),
     role: str = Form(""),
+    role_level: str = Form(""),
     link: str = Form(""),
     sector: str = Form(""),
     required_skills: str = Form(""),
@@ -5302,8 +5493,9 @@ async def analyze_cv_for_job_endpoint(
     if not job_validation["is_valid"]:
         raise HTTPException(status_code=400, detail=job_validation)
 
-    sources = search_job_context(company, role, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
-    cv_evaluation = evaluate_cv_for_job(cv_text, company, role, description, link, sources, required_skills)
+    role_context = f"{role} ({role_level.strip()})" if role_level.strip() else role
+    sources = search_job_context(company, role_context, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
+    cv_evaluation = evaluate_cv_for_job(cv_text, company, role_context, description, link, sources, required_skills)
     cv_evaluation["sources"] = sources
 
     return {
@@ -5351,6 +5543,7 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
     description = (data.description or "").strip()
     company = (data.company or "").strip()
     role = (data.role or "").strip()
+    role_level = (data.role_level or "").strip()
     link = (data.link or "").strip()
     sector = (data.sector or "").strip()
     required_skills = (data.required_skills or "").strip()
@@ -5358,8 +5551,9 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
     if not job_validation["is_valid"]:
         raise HTTPException(status_code=400, detail=job_validation)
 
-    sources = search_job_context(company, role, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
-    cv_evaluation = evaluate_cv_for_job(cv_text, company, role, description, link, sources, required_skills)
+    role_context = f"{role} ({role_level})" if role_level else role
+    sources = search_job_context(company, role_context, job_validation.get("normalized_link") or link) if TAVILY_API_KEY else job_validation.get("sources", [])
+    cv_evaluation = evaluate_cv_for_job(cv_text, company, role_context, description, link, sources, required_skills)
     cv_evaluation["sources"] = sources
 
     return {
@@ -5394,6 +5588,8 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     job_data = data.job_data or {}
     company = (job_data.get("company") or data.company or "Generica").strip() or "Generica"
     role = (job_data.get("role") or data.role or public_user.get("target_role") or "").strip()
+    role_level = (job_data.get("role_level") or data.role_level or "").strip()
+    role_context = f"{role} ({role_level})" if role_level else role
     goal = (job_data.get("description") or data.goal or "").strip()
     job_link = normalize_public_profile_url(data.job_link or job_data.get("link"))
     user_additional_data, rejected_additional_fields = sanitize_cv_additional_data(data.user_additional_data)
@@ -5429,10 +5625,10 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     elif not isinstance(application_sources, list):
         application_sources = []
 
-    sources = application_sources or (search_job_context(company, role, job_link) if TAVILY_API_KEY else [])
+    sources = application_sources or (search_job_context(company, role_context, job_link) if TAVILY_API_KEY else [])
     analysis = data.strategic_analysis if isinstance(data.strategic_analysis, dict) else None
     if not analysis:
-        analysis = analyze_cv_strategy(public_user, company, role, goal, job_link, sources)
+        analysis = analyze_cv_strategy(public_user, company, role_context, goal, job_link, sources)
     if sources and not analysis.get("sources"):
         analysis["sources"] = sources
 
@@ -5440,7 +5636,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         cv_text,
         analysis,
         company,
-        role,
+        role_context,
         goal,
         job_link,
         sources,
@@ -5448,6 +5644,14 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         data.strategic_analysis,
         data.recommended_adaptations,
         user_additional_data,
+    )
+    hallucination_warnings = detect_unsupported_optimized_claims(
+        optimized_text,
+        cv_text,
+        user_additional_data,
+        company,
+        role_context,
+        goal,
     )
     file_bytes, content_type, extension = create_optimized_cv_file(optimized_text)
     filename = get_optimized_cv_filename(existing_user[10], extension)
@@ -5477,6 +5681,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         },
         "candidate_sources": sources,
         "analysis": analysis,
+        "hallucination_warnings": hallucination_warnings,
         "message": "CV ottimizzato generato correttamente.",
     }
 
@@ -5823,10 +6028,12 @@ def analyze_user_cv_for_optimization(user_id: int, data: CvOptimizationAnalysisR
 
     company = (data.company or "Generica").strip() or "Generica"
     role = (data.role or public_user.get("target_role") or "Ruolo da definire").strip() or "Ruolo da definire"
+    role_level = (data.role_level or "").strip()
+    role_context = f"{role} ({role_level})" if role_level else role
     goal = (data.goal or "").strip()
     job_link = normalize_public_profile_url(data.job_link)
-    sources = search_job_context(company, role, job_link)
-    analysis = analyze_cv_strategy(public_user, company, role, goal, job_link, sources)
+    sources = search_job_context(company, role_context, job_link)
+    analysis = analyze_cv_strategy(public_user, company, role_context, goal, job_link, sources)
 
     return {
         "analysis": analysis,
