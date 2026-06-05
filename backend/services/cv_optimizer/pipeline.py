@@ -519,8 +519,8 @@ class DocxPreserver:
         return (
             not instruction.original.strip()
             and (
-                section in {"progetti", "pagina aggiuntiva", "esperienze aggiuntive", "certificazioni", "attivita rilevanti", "competenze tecniche"}
-                or category in {"project", "extra_page"}
+                section in {"progetti", "pagina aggiuntiva", "esperienze aggiuntive", "certificazioni", "attivita rilevanti", "competenze tecniche", "hard skills", "soft skills"}
+                or category in {"project", "extra_page", "skills", "soft_skills"}
             )
         )
 

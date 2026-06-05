@@ -1540,6 +1540,29 @@ textarea {
   color: #9a5f00;
 }
 
+.skill-confirmation-card {
+  border-color: #d8e5dc;
+  background: #fbfdf9;
+}
+
+.ai-suggestion-card-list {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-suggestion-card {
+  min-width: 0;
+}
+
+.skill-confirmation-card .cv-additional-field {
+  margin-top: 6px;
+}
+
+.confirmation-summary-grid,
+.confirmed-changes-summary {
+  gap: 12px;
+}
+
 .inline-link-button {
   justify-self: start;
   border: 0;
