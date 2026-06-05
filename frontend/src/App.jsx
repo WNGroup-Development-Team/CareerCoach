@@ -33,6 +33,9 @@ const CV_COACH_CATEGORY_LABELS = {
   skills: "Competenze da evidenziare",
   ats_keywords: "Parole chiave ATS da inserire",
   education: "Formazione",
+  project: "Progetti",
+  extra_page: "Pagina aggiuntiva",
+  soft_skills: "Soft skills",
   experiences: "Esperienze da riscrivere meglio",
   missing_info: "Informazioni mancanti da confermare",
   sections: "Sezioni poco chiare o poco efficaci",
@@ -53,6 +56,17 @@ const getSuggestionText = (item) => {
   }
   return item.description || item.suggestion || item.coach_tip || item.title || "";
 };
+
+const GENERIC_CV_CONFIRMATION_KEYWORDS = new Set([
+  "data",
+  "analyst",
+  "data analyst",
+  "analysis",
+  "business",
+  "project",
+  "manager",
+  "team",
+]);
 
 const CV_SECTION_MARKERS = [
   "CONTATTI",
@@ -111,6 +125,53 @@ const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => 
     keywords_added: Array.isArray(item.keywords_added) ? item.keywords_added : [],
     requires_confirmation: Boolean(item.requires_confirmation),
   };
+};
+
+const normalizeConfirmationName = (value) => {
+  if (typeof value === "string") {
+    return value;
+  }
+  return value?.name || value?.label || value?.keyword || value?.title || "";
+};
+
+const normalizeSkillConfirmationItem = (value, index, fallback = {}) => {
+  const name = normalizeConfirmationName(value).trim();
+  if (!name || GENERIC_CV_CONFIRMATION_KEYWORDS.has(name.toLowerCase())) {
+    return null;
+  }
+  const isKeyword = fallback.type === "keywordConfirmation";
+  const category = value?.category || fallback.category || (isKeyword ? "keyword" : "hard_skill");
+  const alreadyPresent = Boolean(value?.already_present ?? value?.status === "present" ?? fallback.already_present);
+  const id = String(value?.id || `${isKeyword ? "keyword" : "skill"}-${category}-${name}-${index}`)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return {
+    id,
+    type: value?.type || fallback.type || (isKeyword ? "keywordConfirmation" : "skillConfirmation"),
+    name,
+    category,
+    reason: value?.reason || fallback.reason || (isKeyword
+      ? "Keyword specifica utile per rendere il CV piu coerente con ruolo e annuncio."
+      : "Competenza utile per questa candidatura, da inserire solo se reale o gia supportata dal CV."),
+    already_present: alreadyPresent,
+    requires_confirmation: Boolean(value?.requires_confirmation ?? !alreadyPresent),
+    status: "pending",
+    user_example: "",
+    target_section: value?.target_section || fallback.target_section || (category === "soft_skill" ? "SOFT SKILLS" : "HARD SKILLS"),
+  };
+};
+
+const getConfirmationCategoryLabel = (category = "") => {
+  const labels = {
+    hard_skill: "Hard skill",
+    soft_skill: "Soft skill",
+    tool: "Strumento",
+    language: "Linguaggio",
+    keyword: "Keyword ATS",
+  };
+  return labels[category] || String(category || "Suggerimento").replaceAll("_", " ");
 };
 
 const isActionableCoachSuggestion = (item) =>
@@ -399,22 +460,6 @@ function getItalianCvIntroSummary(analysis, role, company) {
   return `Il CV è stato valutato rispetto al ruolo ${targetRole} presso ${targetCompany}. Il punteggio complessivo è ${score}/100: consulta punteggi, punti di forza, aree da migliorare e suggerimenti per adattarlo meglio alla candidatura.`;
 }
 
-function getIdentityCheckMessage(identityCheck) {
-  if (!identityCheck) {
-    return "";
-  }
-
-  if (identityCheck.matches_user === true) {
-    return "Identità coerente: il nome presente nel CV corrisponde a quello dell'utente.";
-  }
-
-  if (identityCheck.matches_user === false) {
-    return "Possibile incoerenza: il nome presente nel CV non sembra corrispondere a quello dell'utente.";
-  }
-
-  return "Non è stato possibile verificare la coerenza tra il nome indicato e il CV caricato, perché nome e cognome utente non sono disponibili.";
-}
-
 function downloadOptimizedCvFile(optimizedCvFile) {
   if (!optimizedCvFile?.file_base64) {
     return;
@@ -633,9 +678,13 @@ function App() {
   const [optimizedCv, setOptimizedCv] = useState(null);
   const [optimizedCvWarnings, setOptimizedCvWarnings] = useState([]);
   const [optimizedCvsList, setOptimizedCvsList] = useState([]);
+  const [showOptimizedCvVersions, setShowOptimizedCvVersions] = useState(false);
   const [cvAdditionalData, setCvAdditionalData] = useState(getEmptyCvAdditionalData);
   const [cvAdaptationAnswers, setCvAdaptationAnswers] = useState({});
   const [selectedCoachSuggestions, setSelectedCoachSuggestions] = useState({});
+  const [currentCoachSuggestionIndex, setCurrentCoachSuggestionIndex] = useState(0);
+  const [currentSkillConfirmationIndex, setCurrentSkillConfirmationIndex] = useState(0);
+  const [confirmedSkillDetails, setConfirmedSkillDetails] = useState({});
   const [expandedCoachSuggestionText, setExpandedCoachSuggestionText] = useState({});
   const [cvAdditionalDataError, setCvAdditionalDataError] = useState("");
   const [cvFieldErrors, setCvFieldErrors] = useState({
@@ -785,6 +834,13 @@ function App() {
 
     loadCvFile();
   }, [step, userId, profile.cv_filename]);
+
+  useEffect(() => {
+    if (!userId) {
+      return;
+    }
+    loadOptimizedCvsList(userId);
+  }, [userId]);
 
   useEffect(() => {
     const handleBrowserBack = (event) => {
@@ -1495,12 +1551,6 @@ function App() {
       });
       setCvFile(null);
       setCvPreview(null);
-      if (data.identity_check?.message && data.identity_check?.matches_user === null) {
-        setCvValidation((current) => ({
-          ...current,
-          message: data.identity_check.message,
-        }));
-      }
       if (personalizeIntent === "cv") {
         await analyzeCvOptimization(updatedUser, selectedCvFile);
         return;
@@ -1757,18 +1807,21 @@ function App() {
         },
         identity_check: data.identity_check,
         job_validation: data.job_validation,
-        warnings: data.warnings || [],
+        warnings: (data.warnings || []).filter((warning) => !String(warning).toLowerCase().includes("verificare la coerenza")),
       };
       setCvOptimizationAnalysis(nextAnalysis);
       const nextCoachSuggestions = getCoachSuggestionsFromAnalysis(nextAnalysis);
       setSelectedCoachSuggestions(
         nextCoachSuggestions.reduce((selected, suggestion) => ({
           ...selected,
-          [suggestion.id]: !suggestion.requires_confirmation,
+          [suggestion.id]: "pending",
         }), {})
       );
+      setCurrentCoachSuggestionIndex(0);
+      setCurrentSkillConfirmationIndex(0);
       setCvAdaptationAnswers({});
       setCvAdditionalData(getEmptyCvAdditionalData());
+      setConfirmedSkillDetails({});
       setExpandedCoachSuggestionText({});
       transitionToStep("cv-strategy");
     } catch (err) {
@@ -1806,7 +1859,39 @@ function App() {
       ? {}
       : {
         additional_notes: cvAdditionalData.additional_notes || "",
+        adaptation_answers: cvOptimizationQuestions.map((question, index) => ({
+          question: question.question,
+          reason: question.reason,
+          category: question.category,
+          answer: cvAdaptationAnswers[index] || "",
+        })).filter((item) => item.answer.trim()),
       };
+    const confirmedSkillPayload = acceptedSkillConfirmations.map((item) => ({
+      id: item.id,
+      type: item.type,
+      name: item.name,
+      category: item.category,
+      reason: item.reason,
+      already_present: item.already_present,
+      requires_confirmation: item.requires_confirmation,
+      status: "confirmed",
+      user_example: item.user_example || "",
+      detail: item.user_example || "",
+      target_section: item.target_section,
+    }));
+    const rejectedSkillPayload = rejectedSkillConfirmations.map((item) => ({
+      id: item.id,
+      type: item.type,
+      name: item.name,
+      category: item.category,
+      status: "rejected",
+      target_section: item.target_section,
+    }));
+    const hasAdditionalInfo = Boolean(userAdditionalData.additional_notes?.trim()) || (userAdditionalData.adaptation_answers || []).length > 0 || confirmedSkillPayload.length > 0;
+    if (selectedCoachSuggestionItems.filter(isActionableCoachSuggestion).length === 0 && !hasAdditionalInfo) {
+      setError("Non hai confermato modifiche da applicare.");
+      return;
+    }
 
     const candidateSources = cvOptimizationAnalysis?.sources || [];
 
@@ -1838,8 +1923,16 @@ function App() {
           strategic_analysis: cvOptimizationAnalysis,
           recommended_adaptations: recommendedAdaptations,
           selected_suggestion_ids: selectedCoachSuggestionItems.filter(isActionableCoachSuggestion).map((item) => item.id),
+          acceptedSuggestionIds: selectedCoachSuggestionItems.filter(isActionableCoachSuggestion).map((item) => item.id),
+          rejected_suggestion_ids: rejectedCoachSuggestionItems.map((item) => item.id),
           accepted_suggestions: selectedCoachSuggestionItems.filter(isActionableCoachSuggestion),
+          rejected_suggestions: rejectedCoachSuggestionItems,
           user_additional_data: userAdditionalData,
+          answers: userAdditionalData.adaptation_answers || [],
+          extraAnswers: userAdditionalData.adaptation_answers || [],
+          confirmedSkills: confirmedSkillPayload,
+          acceptedSkillConfirmations: confirmedSkillPayload,
+          rejectedSkillConfirmations: rejectedSkillPayload,
         })
       }, 90000);
 
@@ -1872,12 +1965,17 @@ function App() {
         return;
       }
 
-      setOptimizedCv(data.optimized_cv || null);
+      setOptimizedCv(data.optimizedCv || data.optimized_cv || null);
       setOptimizedCvWarnings([
         ...(data.hallucination_warnings || []),
         ...(data.format_warnings || []).map((message) => ({ claim: message, reason: "" })),
+        ...(data.skipped_changes || []).map((item) => ({
+          claim: item.reason || String(item),
+          reason: item.applied_changes_count !== undefined ? "Modifica confermata non applicata" : "",
+        })),
       ]);
-      downloadOptimizedCvFile(data.optimized_cv);
+      downloadOptimizedCvFile(data.optimizedCv || data.optimized_cv);
+      await loadOptimizedCvsList(userId);
       transitionToStep("cv-optimized");
       if (data.candidate_sources?.length && !cvOptimizationAnalysis?.sources?.length) {
         setCvOptimizationAnalysis((current) => ({
@@ -1924,11 +2022,96 @@ function App() {
     }));
   };
 
-  const toggleCoachSuggestion = (suggestionId) => {
+  const loadOptimizedCvsList = async (targetUserId = userId) => {
+    if (!targetUserId) {
+      return;
+    }
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${targetUserId}/optimized-cvs`, {}, 15000);
+      const data = await response.json();
+      if (response.ok) {
+        setOptimizedCvsList(data.optimized_cvs || []);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const deleteOptimizedCv = async (optimizedCvId) => {
+    if (!userId || !optimizedCvId) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/optimized-cvs/${optimizedCvId}`, {
+        method: "DELETE",
+      }, 15000);
+      if (response.ok) {
+        await loadOptimizedCvsList(userId);
+      } else {
+        setError("Non e stato possibile eliminare il CV ottimizzato.");
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Errore di connessione durante l'eliminazione del CV ottimizzato.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const goToNextCoachSuggestion = () => {
+    setCurrentCoachSuggestionIndex((current) => Math.min(current + 1, Math.max(coachSuggestions.length - 1, 0)));
+  };
+
+  const updateCoachSuggestionStatus = (suggestionId, status) => {
     setCvAdditionalDataError("");
     setSelectedCoachSuggestions((current) => ({
       ...current,
-      [suggestionId]: !current[suggestionId],
+      [suggestionId]: status,
+    }));
+    goToNextCoachSuggestion();
+  };
+
+  const goToPreviousCoachSuggestion = () => {
+    setCurrentCoachSuggestionIndex((current) => Math.max(current - 1, 0));
+  };
+
+  const skipAllCoachSuggestions = () => {
+    setSelectedCoachSuggestions((current) =>
+      coachSuggestions.reduce((next, suggestion) => ({
+        ...next,
+        [suggestion.id]: current[suggestion.id] === "accepted" ? "accepted" : "rejected",
+      }), {})
+    );
+    setCurrentCoachSuggestionIndex(Math.max(coachSuggestions.length - 1, 0));
+  };
+
+  const goToNextSkillConfirmation = () => {
+    setCurrentSkillConfirmationIndex((current) => Math.min(current + 1, Math.max(skillConfirmationItems.length - 1, 0)));
+  };
+
+  const goToPreviousSkillConfirmation = () => {
+    setCurrentSkillConfirmationIndex((current) => Math.max(current - 1, 0));
+  };
+
+  const updateSkillConfirmation = (skillId, status) => {
+    setConfirmedSkillDetails((current) => ({
+      ...current,
+      [skillId]: {
+        ...(current[skillId] || {}),
+        status,
+      },
+    }));
+    goToNextSkillConfirmation();
+  };
+
+  const updateSkillConfirmationDetail = (skillId, detail) => {
+    setConfirmedSkillDetails((current) => ({
+      ...current,
+      [skillId]: {
+        ...(current[skillId] || { status: "pending" }),
+        user_example: detail,
+      },
     }));
   };
 
@@ -2530,10 +2713,58 @@ function App() {
   const cvAtsAnalysis = cvOptimizationAnalysis?.ats_analysis || {};
   const cvAtsPresentKeywords = cvAtsAnalysis.present_keywords || cvAtsAnalysis.keywords_present || cvOptimizationAnalysis?.present_keywords || [];
   const cvAtsMissingKeywords = cvAtsAnalysis.missing_keywords || cvAtsAnalysis.keywords_missing || cvOptimizationAnalysis?.missing_keywords || [];
+  const cvAtsPartiallyPresentKeywords = cvAtsAnalysis.keywords_partially_present || [];
+  const cvAtsKeywordsToConfirm = cvAtsAnalysis.keywords_to_confirm || [];
   const cvAtsMissingHardSkills = cvAtsAnalysis.missing_hard_skills || cvOptimizationAnalysis?.missing_hard_skills || [];
   const cvAtsMissingSoftSkills = cvAtsAnalysis.missing_soft_skills || cvOptimizationAnalysis?.missing_soft_skills || [];
+  const suggestedSkills = cvOptimizationAnalysis?.suggested_skills || {};
+  const rawSkillConfirmationItems = [
+    ...(suggestedSkills.confirmation_items || []),
+    ...(suggestedSkills.to_confirm || []).map((skill, index) => normalizeSkillConfirmationItem(skill, index, {
+      type: "skillConfirmation",
+      category: "hard_skill",
+      target_section: "HARD SKILLS",
+    })),
+    ...cvAtsKeywordsToConfirm.map((keyword, index) => normalizeSkillConfirmationItem(keyword, index, {
+      type: "keywordConfirmation",
+      category: "keyword",
+      target_section: "HARD SKILLS",
+    })),
+    ...cvAtsMissingKeywords.map((keyword, index) => normalizeSkillConfirmationItem(keyword, index, {
+      type: "keywordConfirmation",
+      category: "keyword",
+      target_section: "HARD SKILLS",
+    })),
+  ].filter(Boolean);
+  const skillConfirmationItems = rawSkillConfirmationItems
+    .map((item, index) => normalizeSkillConfirmationItem(item, index))
+    .filter(Boolean)
+    .filter((item, index, list) =>
+      list.findIndex((candidate) => candidate.name.toLowerCase() === item.name.toLowerCase()) === index
+    )
+    .map((item) => {
+      const saved = confirmedSkillDetails[item.id] || {};
+      return {
+        ...item,
+        status: saved.status || item.status || "pending",
+        user_example: saved.user_example || "",
+      };
+    });
+  const acceptedSkillConfirmations = skillConfirmationItems.filter((item) => item.status === "confirmed" || item.status === "accepted");
+  const rejectedSkillConfirmations = skillConfirmationItems.filter((item) => item.status === "rejected");
+  const currentSkillConfirmation = skillConfirmationItems[currentSkillConfirmationIndex] || null;
+  const skillConfirmationProgressLabel = skillConfirmationItems.length
+    ? `${currentSkillConfirmation?.type === "keywordConfirmation" ? "Keyword" : "Skill"} ${Math.min(currentSkillConfirmationIndex + 1, skillConfirmationItems.length)} di ${skillConfirmationItems.length}`
+    : "Nessuna skill o keyword";
+  const latestOptimizedCv = optimizedCvsList[0] || null;
   const coachSuggestions = getCoachSuggestionsFromAnalysis(cvOptimizationAnalysis);
-  const selectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id]);
+  const selectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "accepted" || selectedCoachSuggestions[item.id] === true);
+  const rejectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "rejected");
+  const pendingCoachSuggestionItems = coachSuggestions.filter((item) => !selectedCoachSuggestions[item.id] || selectedCoachSuggestions[item.id] === "pending");
+  const currentCoachSuggestion = coachSuggestions[currentCoachSuggestionIndex] || null;
+  const coachSuggestionProgressLabel = coachSuggestions.length
+    ? `Suggerimento ${Math.min(currentCoachSuggestionIndex + 1, coachSuggestions.length)} di ${coachSuggestions.length}`
+    : "Nessun suggerimento";
   const coachSuggestionsByCategory = coachSuggestions.reduce((groups, item) => {
     const category = item.category || "phrases";
     return {
@@ -2556,6 +2787,26 @@ function App() {
       reason: item.description || item.coach_tip || "",
       category: "approfondimento",
     }));
+  const confirmedChangesSummary = {
+    profile: selectedCoachSuggestionItems.filter((item) => ["profile", "profilo"].includes(item.category) || normalizeSuggestionText(item.section).includes("profilo")),
+    skills: [
+      ...selectedCoachSuggestionItems.filter((item) => ["skills", "ats_keywords", "soft_skills"].includes(item.category) || normalizeSuggestionText(item.section).includes("skill") || normalizeSuggestionText(item.section).includes("competenze")),
+      ...acceptedSkillConfirmations,
+    ],
+    experience: selectedCoachSuggestionItems.filter((item) => ["experience", "experiences"].includes(item.category) || normalizeSuggestionText(item.section).includes("esperienz")),
+    education: selectedCoachSuggestionItems.filter((item) => item.category === "education" || normalizeSuggestionText(item.section).includes("formazione")),
+    projects: [
+      ...selectedCoachSuggestionItems.filter((item) => item.category === "project" || normalizeSuggestionText(item.section).includes("progett")),
+      ...(cvAdditionalData.additional_notes?.trim() ? [{ id: "additional-notes", title: "Informazioni extra confermate", name: "Informazioni extra confermate" }] : []),
+      ...Object.entries(cvAdaptationAnswers)
+        .filter(([, answer]) => String(answer || "").trim())
+        .map(([index, answer]) => ({
+          id: `answer-${index}`,
+          title: cvOptimizationQuestions[Number(index)]?.category || "Risposta extra confermata",
+          name: String(answer).slice(0, 80),
+        })),
+    ],
+  };
   const screenshotUploadBoxes = [
     {
       type: "instagram",
@@ -3427,59 +3678,9 @@ function App() {
                   </div>
                 </>
               )}
-              {cvAtsMissingKeywords.length > 0 && (
-                <>
-                  <p className="cv-strategy-note">Keyword da verificare prima dell'inserimento</p>
-                  <div className="tag-row cv-skill-tags warning">
-                    {cvAtsMissingKeywords.map((keyword) => (
-                      <span key={keyword}>{keyword}</span>
-                    ))}
-                  </div>
-                </>
-              )}
-              {cvAtsMissingHardSkills.length > 0 && (
-                <>
-                  <p className="cv-strategy-note">Hard skill mancanti o poco evidenti</p>
-                  <div className="tag-row cv-skill-tags warning">
-                    {cvAtsMissingHardSkills.map((skill) => (
-                      <span key={skill}>{skill}</span>
-                    ))}
-                  </div>
-                </>
-              )}
-              {cvAtsMissingSoftSkills.length > 0 && (
-                <>
-                  <p className="cv-strategy-note">Soft skill mancanti o poco evidenti</p>
-                  <div className="tag-row cv-skill-tags warning">
-                    {cvAtsMissingSoftSkills.map((skill) => (
-                      <span key={skill}>{skill}</span>
-                    ))}
-                  </div>
-                </>
-              )}
-              {(cvOptimizationAnalysis.ats_analysis.issues || []).map((issue, index) => (
-                <div className="cv-strategy-item warning" key={`${issue}-${index}`}>
-                  <span>!</span>
-                  <div>
-                    <strong>Criticità ATS</strong>
-                    <p>{issue}</p>
-                  </div>
-                </div>
-              ))}
             </div>
           )}
 
-          {cvOptimizationAnalysis?.identity_check?.message && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span className={cvOptimizationAnalysis.identity_check.matches_user === null ? "warning" : "success"}>
-                  {cvOptimizationAnalysis.identity_check.matches_user === null ? "!" : "+"}
-                </span>
-                <h3>Verifica identità</h3>
-              </div>
-              <p className="cv-strategy-note">{getIdentityCheckMessage(cvOptimizationAnalysis.identity_check)}</p>
-            </div>
-          )}
 
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
@@ -3523,121 +3724,7 @@ function App() {
             })}
           </div>
 
-          {(cvOptimizationAnalysis?.relevant_skills_found || []).length > 0 && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span className="success">+</span>
-                <h3>Competenze Rilevanti</h3>
-              </div>
-              <div className="tag-row cv-skill-tags">
-                {cvOptimizationAnalysis.relevant_skills_found.map((skill) => (
-                  <span key={skill}>{skill}</span>
-                ))}
-              </div>
-            </div>
-          )}
 
-          {(cvOptimizationAnalysis?.missing_skills_for_role || []).length > 0 && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span className="warning">~</span>
-                <h3>Keyword da confermare</h3>
-              </div>
-              <div className="tag-row cv-skill-tags warning">
-                {cvOptimizationAnalysis.missing_skills_for_role.map((skill) => (
-                  <span key={skill}>{skill}</span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {(cvOptimizationAnalysis?.relevant_experiences || []).length > 0 && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span>i</span>
-                <h3>Esperienze Coerenti</h3>
-              </div>
-              {cvOptimizationAnalysis.relevant_experiences.map((item, index) => (
-                <div className="cv-strategy-item" key={`${item}-${index}`}>
-                  <span>i</span>
-                  <div>
-                    <strong>Esperienza rilevante</strong>
-                    <p>{item}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Suggerimenti coach selezionabili</h3>
-            </div>
-            {coachSuggestions.length > 0 ? (
-              <>
-                <p className="cv-strategy-note">
-                  Lascia selezionate solo le modifiche che vuoi applicare. Le voci non selezionate non entreranno nel CV ottimizzato.
-                </p>
-                {Object.entries(CV_COACH_CATEGORY_LABELS).map(([category, label]) => {
-                  const items = coachSuggestionsByCategory[category] || [];
-                  if (!items.length) {
-                    return null;
-                  }
-                  return (
-                    <div className="coach-suggestion-group" key={category}>
-                      <strong>{label}</strong>
-                      {items.map((item) => {
-                        const originalKey = `${item.id}:original`;
-                        const proposedKey = `${item.id}:proposed`;
-                        const originalExpanded = Boolean(expandedCoachSuggestionText[originalKey]);
-                        const proposedExpanded = Boolean(expandedCoachSuggestionText[proposedKey]);
-                        return (
-                          <label className="coach-suggestion-option" key={item.id}>
-                            <input
-                              type="checkbox"
-                              checked={Boolean(selectedCoachSuggestions[item.id])}
-                              onChange={() => toggleCoachSuggestion(item.id)}
-                            />
-                            <span>
-                              <b>{item.title}</b>
-                              <small>Sezione: {item.section}</small>
-                              <small>{item.reason || item.description}</small>
-                              <small><b>Testo originale:</b> {previewSuggestionText(item.original_text, originalExpanded)}</small>
-                              {item.original_text.length > 300 && (
-                                <button className="inline-link-button" type="button" onClick={(event) => {
-                                  event.preventDefault();
-                                  toggleCoachSuggestionPreview(item.id, "original");
-                                }}>
-                                  {originalExpanded ? "Mostra meno" : "Mostra di più"}
-                                </button>
-                              )}
-                              <small><b>Modifica proposta:</b> {previewSuggestionText(item.proposed_text, proposedExpanded)}</small>
-                              {item.proposed_text.length > 300 && (
-                                <button className="inline-link-button" type="button" onClick={(event) => {
-                                  event.preventDefault();
-                                  toggleCoachSuggestionPreview(item.id, "proposed");
-                                }}>
-                                  {proposedExpanded ? "Mostra meno" : "Mostra di più"}
-                                </button>
-                              )}
-                              {item.requires_confirmation && (
-                                <em>Richiede conferma: verra applicato solo se supportato dal CV o da una tua risposta.</em>
-                              )}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  );
-                })}
-              </>
-            ) : (
-              <p className="cv-strategy-note">
-                Nessun suggerimento applicabile generato. Puoi continuare senza modifiche oppure inserire informazioni extra.
-              </p>
-            )}
-          </div>
 
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
@@ -3664,28 +3751,9 @@ function App() {
             )}
           </div>
 
-          <div className="cv-strategy-section optimized-cv-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>CV ottimizzato</h3>
-            </div>
-            <p className="cv-strategy-note">
-              Genera una versione adattata alla candidatura applicando solo i suggerimenti selezionati e mantenendo solo informazioni reali o confermate.
-            </p>
-            <div className="optimized-cv-actions">
-              <button
-                className="cv-next-button"
-                type="button"
-                onClick={() => transitionToStep("cv-optimize-details")}
-                disabled={loading}
-              >
-                Genera CV ottimizzato
-              </button>
-            </div>
-          </div>
 
-          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
-            Torna alla home
+          <button className="cv-next-button" onClick={() => transitionToStep("cv-optimize-details")}>
+            Continua con l'ottimizzazione
             <span>-&gt;</span>
           </button>
         </section>
@@ -3694,11 +3762,173 @@ function App() {
       {step === "cv-optimize-details" && (
         <section className="cv-strategy-page cv-optimize-details-page">
           <div className="cv-strategy-heading">
-            <h2>Completa i dati per ottimizzare il tuo CV</h2>
+            <h2>Personalizza e genera CV ottimizzato</h2>
             <p>
-              Puoi aggiungere informazioni extra per rendere il CV più preciso. Questo passaggio è facoltativo:
-              se non vuoi aggiungere altro, puoi continuare direttamente con la generazione del CV.
+              Rivedi i suggerimenti proposti dal coach, conferma solo quelli che vuoi applicare e aggiungi eventuali informazioni extra. Le modifiche rifiutate non verranno inserite nel CV finale.
             </p>
+          </div>
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span>i</span>
+              <h3>Suggerimenti del coach</h3>
+            </div>
+            {coachSuggestions.length > 0 ? (
+              <div className="ai-suggestion-card-list">
+                {coachSuggestions.map((suggestion, index) => (
+                  <div className="coach-suggestion-option ai-suggestion-card" key={suggestion.id}>
+                    <span aria-hidden="true">{selectedCoachSuggestions[suggestion.id] === "accepted" ? "+" : selectedCoachSuggestions[suggestion.id] === "rejected" ? "x" : "i"}</span>
+                    <span>
+                      <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
+                      <b>{suggestion.title}</b>
+                      <small><b>Categoria:</b> {suggestion.category_label}</small>
+                      <small><b>Sezione:</b> {suggestion.section}</small>
+                      <small>{suggestion.reason || suggestion.description}</small>
+                      <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
+                      {suggestion.original_text.length > 300 && (
+                        <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
+                          {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
+                        </button>
+                      )}
+                      <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
+                      {suggestion.proposed_text.length > 300 && (
+                        <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
+                          {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
+                        </button>
+                      )}
+                      {suggestion.keywords_added.length > 0 && (
+                        <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
+                      )}
+                      <div className="optimized-cv-actions">
+                        <button className="cv-next-button" type="button" onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}>
+                          Conferma
+                        </button>
+                        <button className="secondary-button" type="button" onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}>
+                          Rifiuta
+                        </button>
+                      </div>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="cv-strategy-note">
+                Nessun suggerimento applicabile generato. Puoi continuare aggiungendo informazioni extra reali.
+              </p>
+            )}
+            <div className="coach-suggestion-group">
+              <strong>Modifiche confermate</strong>
+              {selectedCoachSuggestionItems.length > 0 ? (
+                selectedCoachSuggestionItems.map((item) => (
+                  <div className="cv-strategy-item success" key={`accepted-${item.id}`}>
+                    <span>+</span>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <p>{item.section}</p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="cv-strategy-note">Nessuna modifica confermata finora.</p>
+              )}
+            </div>
+            {coachSuggestions.length > 0 && (
+              <div className="optimized-cv-actions">
+                <button className="secondary-button" type="button" onClick={skipAllCoachSuggestions}>
+                  Rifiuta tutti i suggerimenti coach non confermati
+                </button>
+              </div>
+            )}
+            {rejectedCoachSuggestionItems.length > 0 && (
+              <div className="coach-suggestion-group">
+                <strong>Modifiche rifiutate</strong>
+                {rejectedCoachSuggestionItems.map((item) => (
+                  <div className="cv-strategy-item warning" key={`rejected-${item.id}`}>
+                    <span>x</span>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <p>{item.section}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="cv-strategy-section">
+            <div className="cv-strategy-section-title">
+              <span>?</span>
+              <h3>Hard skill, soft skill e keyword ATS</h3>
+            </div>
+            {skillConfirmationItems.length > 0 ? (
+              <div className="ai-suggestion-card-list">
+                {skillConfirmationItems.map((item, index) => (
+                  <div className="coach-suggestion-option skill-confirmation-card ai-suggestion-card" key={item.id}>
+                    <span aria-hidden="true">{item.status === "confirmed" || item.status === "accepted" ? "+" : item.status === "rejected" ? "x" : "?"}</span>
+                    <span>
+                      <small>{item.type === "keywordConfirmation" ? "Keyword ATS" : "Skill"} {index + 1} di {skillConfirmationItems.length}</small>
+                      <b>{item.name}</b>
+                      <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
+                      <small><b>Perche puo essere utile:</b> {item.reason}</small>
+                      <small>
+                        <b>Stato:</b> {item.already_present
+                          ? "Risulta gia presente o supportata dal CV."
+                          : "Non risulta chiaramente presente nel CV."}
+                      </small>
+                      {!item.already_present && (
+                        <small>
+                          Se la confermi, aggiungi un esempio reale o un contesto: verra usata solo se coerente con CV e informazioni fornite.
+                        </small>
+                      )}
+                      <label className="cv-additional-field">
+                        <span>Dove l'hai usata?</span>
+                        <textarea
+                          value={item.user_example}
+                          onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
+                          placeholder={`Esempio: ho usato ${item.name} in un progetto universitario o lavorativo...`}
+                          rows={2}
+                        />
+                      </label>
+                      <div className="optimized-cv-actions">
+                        <button className="cv-next-button" type="button" onClick={() => updateSkillConfirmation(item.id, "confirmed")}>
+                          Conferma
+                        </button>
+                        <button className="secondary-button" type="button" onClick={() => updateSkillConfirmation(item.id, "rejected")}>
+                          Rifiuta
+                        </button>
+                      </div>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="cv-strategy-note">Nessuna skill o keyword specifica da confermare.</p>
+            )}
+            <div className="coach-suggestion-group confirmation-summary-grid">
+              <strong>Riepilogo competenze</strong>
+              {acceptedSkillConfirmations.length > 0 ? (
+                acceptedSkillConfirmations.map((item) => (
+                  <div className="cv-strategy-item success" key={`confirmed-${item.id}`}>
+                    <span>+</span>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <p>{item.target_section}{item.user_example ? ` - ${item.user_example}` : ""}</p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="cv-strategy-note">Nessuna skill o keyword confermata finora.</p>
+              )}
+              {rejectedSkillConfirmations.map((item) => (
+                <div className="cv-strategy-item warning" key={`rejected-skill-${item.id}`}>
+                  <span>x</span>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <p>Non verra inserita nel CV finale.</p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="cv-strategy-section cv-additional-data-form">
@@ -3717,21 +3947,83 @@ function App() {
               <textarea
                 value={cvAdditionalData.additional_notes}
                 onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
-                placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho ottenuto risultati misurabili..."
+                placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
                 rows={5}
               />
               <small>
-                Scrivi solo informazioni vere e verificabili. Se non vuoi aggiungere nulla, lascia vuoto e continua.
+                Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
               </small>
               {cvFieldErrors.additional.additional_notes && (
                 <small className="cv-field-error">{cvFieldErrors.additional.additional_notes}</small>
               )}
             </label>
 
+            {cvOptimizationQuestions.length > 0 && (
+              <div className="coach-suggestion-group">
+                <strong>Domande facoltative</strong>
+                {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
+                  <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
+                    <span>{question.question}</span>
+                    <textarea
+                      value={cvAdaptationAnswers[index] || ""}
+                      onChange={(event) => updateCvAdaptationAnswer(index, event.target.value)}
+                      placeholder="Risposta facoltativa: aggiungi solo dettagli reali e verificabili."
+                      rows={3}
+                    />
+                    {question.reason && <small>{question.reason}</small>}
+                    {cvFieldErrors.adaptation[index] && (
+                      <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
+                    )}
+                  </label>
+                ))}
+              </div>
+            )}
+
             {cvAdditionalDataError && (
               <p className="cv-additional-error">{cvAdditionalDataError}</p>
             )}
 
+          </div>
+
+          <div className="cv-strategy-section confirmed-changes-summary">
+            <div className="cv-strategy-section-title">
+              <span>+</span>
+              <h3>Modifiche confermate</h3>
+            </div>
+            {[
+              ["Profilo", confirmedChangesSummary.profile],
+              ["Competenze", confirmedChangesSummary.skills],
+              ["Esperienze", confirmedChangesSummary.experience],
+              ["Formazione", confirmedChangesSummary.education],
+              ["Progetti", confirmedChangesSummary.projects],
+            ].map(([label, items]) => (
+              <div className="coach-suggestion-group" key={`summary-${label}`}>
+                <strong>{label}</strong>
+                {items.length > 0 ? (
+                  items.map((item, index) => (
+                    <div className="cv-strategy-item success" key={`summary-${label}-${item.id || item.name || index}`}>
+                      <span>+</span>
+                      <div>
+                        <strong>{item.title || item.name}</strong>
+                        {item.section && <p>{item.section}</p>}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="cv-strategy-note">Nessuna modifica confermata.</p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="cv-strategy-section optimized-cv-section">
+            <div className="cv-strategy-section-title">
+              <span>i</span>
+              <h3>Genera CV ottimizzato</h3>
+            </div>
+            <p className="cv-strategy-note">
+              Genera una versione adattata alla candidatura applicando solo le modifiche selezionate e usando solo informazioni reali o confermate.
+            </p>
             <div className="optimized-cv-actions">
               <button
                 className="cv-next-button"
@@ -3745,10 +4037,10 @@ function App() {
               <button
                 className="secondary-button"
                 type="button"
-                onClick={() => optimizeCv({ skipAdditional: true })}
+                onClick={() => transitionToStep("cv-strategy")}
                 disabled={loading}
               >
-                Salta e genera CV
+                Torna all'analisi
               </button>
             </div>
           </div>
@@ -3758,8 +4050,8 @@ function App() {
       {step === "cv-optimized" && (
         <section className="cv-strategy-page">
           <div className="cv-strategy-heading">
-            <h2>CV ottimizzato pronto</h2>
-            <p>Abbiamo creato una nuova versione separata del CV, senza modificare il file originale.</p>
+            <h2>CV ottimizzato generato</h2>
+            <p>Il tuo CV per {optimizedCv?.target_role || cvStrategyTargetRole} presso {optimizedCv?.target_company || cvStrategyTargetCompany} e pronto.</p>
           </div>
 
           <div className="cv-strategy-section optimized-cv-section">
@@ -3767,13 +4059,33 @@ function App() {
               <span className="success">+</span>
               <h3>Scarica il nuovo CV</h3>
             </div>
+            {optimizedCv && (
+              <div className="ats-summary-grid">
+                <div>
+                  <strong>{optimizedCv.filename || "CV ottimizzato"}</strong>
+                  <p>Nome file</p>
+                </div>
+                <div>
+                  <strong>{optimizedCv.generated_at || optimizedCv.created_at || "-"}</strong>
+                  <p>Data generazione</p>
+                </div>
+                <div>
+                  <strong>{optimizedCv.analysis_score || cvStrategyOverallScore || 0}</strong>
+                  <p>Punteggio</p>
+                </div>
+                <div>
+                  <strong>{optimizedCv.applied_changes_count ?? 0}</strong>
+                  <p>Modifiche applicate</p>
+                </div>
+              </div>
+            )}
             {optimizedCv?.file_base64 ? (
               <a
                 className="cv-next-button optimized-cv-download"
                 href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
                 download={optimizedCv.filename || "cv-ottimizzato.pdf"}
               >
-                Scarica CV ottimizzato
+                Scarica {optimizedCv.content_type?.includes("wordprocessingml") ? "DOCX" : "PDF"}
                 <span aria-hidden="true">-&gt;</span>
               </a>
             ) : (
@@ -3813,7 +4125,10 @@ function App() {
               </div>
             )}
             <button className="secondary-button" type="button" onClick={() => transitionToStep("home")}>
-              Torna alla home
+              Crea un altro CV ottimizzato
+            </button>
+            <button className="secondary-button" type="button" onClick={() => transitionToStep("profile")}>
+              Vai al profilo
             </button>
           </div>
         </section>
@@ -4062,14 +4377,54 @@ function App() {
                 </button>
               </div>
             </div>
-            <div>
+            <div className="document-item">
               <span>AI</span>
               <div>
-                <strong>CV Ottimizzato</strong>
-                <p>{digitalAnalysis ? `Versione per ${company || "il tuo ruolo"}` : "Analisi da completare"}</p>
+                <strong>{latestOptimizedCv ? "CV Ottimizzato" : "Nessun CV ottimizzato generato"}</strong>
+                <p>{latestOptimizedCv ? `${latestOptimizedCv.target_role || "Ruolo"} - ${latestOptimizedCv.target_company || "Azienda"} · ${latestOptimizedCv.created_at || ""}` : "Genera una versione ottimizzata dalla pagina Analisi Strategica CV"}</p>
               </div>
-              <button type="button" onClick={() => transitionToStep("cv-digital")} aria-label="Apri analisi digitale">v</button>
+              <div className="document-actions">
+                {latestOptimizedCv?.has_docx && (
+                  <a href={`${API_URL}${latestOptimizedCv.docx_download_url}`} download aria-label="Scarica DOCX" title="Scarica DOCX">DOCX</a>
+                )}
+                {latestOptimizedCv?.has_pdf && (
+                  <a href={`${API_URL}${latestOptimizedCv.pdf_download_url}`} download aria-label="Scarica PDF" title="Scarica PDF">PDF</a>
+                )}
+                {optimizedCvsList.length > 1 && (
+                  <button type="button" onClick={() => setShowOptimizedCvVersions((current) => !current)} aria-label="Vedi tutte le versioni" title="Vedi tutte le versioni">
+                    Vedi tutte
+                  </button>
+                )}
+                {latestOptimizedCv && (
+                  <button className="danger-icon-button" type="button" onClick={() => deleteOptimizedCv(latestOptimizedCv.id)} disabled={loading} aria-label="Elimina ultimo CV ottimizzato" title="Elimina ultimo CV ottimizzato">
+                    <TrashIcon />
+                  </button>
+                )}
+              </div>
             </div>
+            {showOptimizedCvVersions && optimizedCvsList.map((item) => (
+              <div className="document-item" key={`profile-optimized-${item.id}`}>
+                <span>CV</span>
+                <div>
+                  <strong>{item.target_role || "Ruolo"} - {item.target_company || "Azienda"}</strong>
+                  <p>{item.created_at || ""}{item.generation_status ? ` - ${item.generation_status}` : ""}</p>
+                </div>
+                <div className="document-actions">
+                  {item.has_docx && (
+                    <a href={`${API_URL}${item.docx_download_url}`} download aria-label="Scarica DOCX" title="Scarica DOCX">DOCX</a>
+                  )}
+                  {item.has_pdf && (
+                    <a href={`${API_URL}${item.pdf_download_url}`} download aria-label="Scarica PDF" title="Scarica PDF">PDF</a>
+                  )}
+                  <button type="button" onClick={() => { setOptimizedCv(item); transitionToStep("cv-optimized"); }} aria-label="Visualizza dettagli" title="Visualizza dettagli">
+                    <EyeIcon />
+                  </button>
+                  <button className="danger-icon-button" type="button" onClick={() => deleteOptimizedCv(item.id)} disabled={loading} aria-label="Elimina CV ottimizzato" title="Elimina CV ottimizzato">
+                    <TrashIcon />
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
 
           <div className="profile-danger-zone">

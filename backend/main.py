@@ -35,6 +35,7 @@ from services.cv_optimizer import (
     MatchingEngine,
     ResumeParser,
     ResumeRewriter,
+    RewriteInstruction,
 )
 
 
@@ -290,6 +291,23 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id)
     )
     """)
+    add_column_if_not_exists(cursor, "optimized_cvs", "target_role", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "target_company", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "job_description", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "analysis_score", "INTEGER")
+    add_column_if_not_exists(cursor, "optimized_cvs", "selected_suggestions_json", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "rejected_suggestions_json", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "additional_info_json", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "confirmed_skills_json", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "generation_status", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "applied_changes_count", "INTEGER")
+    add_column_if_not_exists(cursor, "optimized_cvs", "skipped_changes_json", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "docx_filename", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "docx_content_type", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "docx_file_base64", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "pdf_filename", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "pdf_content_type", "TEXT")
+    add_column_if_not_exists(cursor, "optimized_cvs", "pdf_file_base64", "TEXT")
 
     conn.commit()
     conn.close()
@@ -350,12 +368,21 @@ class CvOptimizationAnalysisRequest(BaseModel):
     cv_evaluation: Optional[Any] = None
     strategic_analysis: Optional[Any] = None
     recommended_adaptations: Optional[Any] = None
+    acceptedSuggestionIds: Optional[List[str]] = None
     selected_suggestion_ids: Optional[List[str]] = None
+    rejected_suggestion_ids: Optional[List[str]] = None
     accepted_suggestions: Optional[Any] = None
+    rejected_suggestions: Optional[Any] = None
     user_additional_data: Optional[Dict[str, Any]] = None
     additionalInfo: Optional[Any] = None
     answers: Optional[Any] = None
+    extraAnswers: Optional[Any] = None
     confirmedSkills: Optional[Any] = None
+    confirmedKeywords: Optional[Any] = None
+    acceptedSkillConfirmations: Optional[Any] = None
+    acceptedKeywordConfirmations: Optional[Any] = None
+    rejectedSkillConfirmations: Optional[Any] = None
+    rejectedKeywordConfirmations: Optional[Any] = None
 
 
 class JobValidationRequest(BaseModel):
@@ -3705,7 +3732,9 @@ def build_resume_rewrite_result(
         "description": goal or "",
     }
     instructions = rewriter.instructions_from_suggestions(accepted)
-    if not instructions:
+    instructions.extend(build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}))
+    instructions.extend(build_additional_rewrite_instructions(user_additional_data or {}, role or ""))
+    if not instructions and not accepted:
         prompt = rewriter.build_prompt(
             cv_text=cv_text,
             target=target,
@@ -3719,11 +3748,14 @@ def build_resume_rewrite_result(
             print(f"Riscrittura strutturata CV non riuscita, uso fallback conservativo: {exc}")
             result = {}
         instructions = rewriter.instructions_from_result(result)
+    instructions = sort_rewrite_instructions(instructions)
+    grouped_changes = group_rewrite_instructions(instructions)
     optimized_text = rewriter.fallback_text(cv_text, accepted, user_additional_data or {})
 
     return {
         "optimized_text": optimized_text,
         "instructions": instructions,
+        "grouped_changes": grouped_changes,
         "accepted_suggestions": accepted,
         "missing_proposed_text_count": sum(1 for item in accepted if not str(item.get("proposed_text") or "").strip()),
         "sections": sections,
@@ -3790,6 +3822,213 @@ def get_optimized_cv_filename(filename: Optional[str] = None, extension: str = "
         if sanitized:
             base = f"{sanitized}-ottimizzato"
     return f"{base}.{extension}"
+
+
+def get_target_optimized_cv_filename(user_name: str, role: str, company: str, extension: str = "docx") -> str:
+    raw = "_".join(part for part in ["CV", user_name, role, company, "ottimizzato"] if part)
+    sanitized = re.sub(r"[^0-9A-Za-z]+", "_", strip_accents(raw)).strip("_")
+    return f"{sanitized or 'CV_ottimizzato'}.{extension}"
+
+
+def build_professional_extra_text(user_additional_data: Dict[str, Any], role: str) -> str:
+    support = flatten_cv_support_data(user_additional_data)
+    if not support:
+        return ""
+    support_plain = normalize_plain_text(support)
+    role_family = infer_role_family(role)
+    if role_family == "data analyst":
+        details = []
+        if "excel" in support_plain:
+            details.append("utilizzo di Excel per analisi dati")
+        if "dataset" in support_plain:
+            details.append("lavoro su dataset in progetti universitari")
+        if any(term in support_plain for term in ["dashboard", "power bi", "tableau", "report", "kpi"]):
+            details.append("realizzazione o lettura di report, dashboard e indicatori")
+        if not details:
+            details.append("attivita progettuali legate all'analisi dei dati")
+        return "Progetto universitario orientato a " + ", ".join(dict.fromkeys(details)) + "."
+    if role_family == "game design":
+        details = []
+        if any(term in support_plain for term in ["prototipo", "prototype", "gioco", "game"]):
+            details.append("realizzazione di un prototipo di gioco universitario")
+        if any(term in support_plain for term in ["unity", "unreal", "blender", "c#"]):
+            details.append("uso di strumenti tecnici per prototipazione e sviluppo")
+        if any(term in support_plain for term in ["level", "meccaniche", "storytelling", "testing"]):
+            details.append("attenzione a meccaniche, livelli, esperienza utente e testing")
+        if not details:
+            details.append("attivita progettuali coerenti con il game design")
+        return "Progetto universitario di game design con " + ", ".join(dict.fromkeys(details)) + "."
+    first_sentence = re.split(r"(?<=[.!?])\s+", support.strip())[0][:240].strip()
+    return f"Attivita rilevante: {first_sentence}"
+
+
+def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], role: str) -> List[RewriteInstruction]:
+    extra_text = build_professional_extra_text(user_additional_data, role)
+    if not extra_text:
+        return []
+    section = "PROGETTI" if infer_role_family(role) in {"data analyst", "game design"} else "ATTIVITA RILEVANTI"
+    return [RewriteInstruction(
+        section=section,
+        original="",
+        replacement=extra_text,
+        reason="Informazioni extra confermate dall'utente trasformate in testo CV professionale.",
+        category="project",
+        source_id="user_additional_info",
+    )]
+
+
+def build_confirmed_skill_rewrite_instructions(cv_text: str, user_additional_data: Dict[str, Any]) -> List[RewriteInstruction]:
+    confirmed = user_additional_data.get("confirmed_skills", [])
+    if not isinstance(confirmed, list) or not confirmed:
+        return []
+    skill_names = []
+    for item in confirmed:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name and normalize_plain_text(name) not in {normalize_plain_text(existing) for existing in skill_names}:
+            skill_names.append(name)
+    if not skill_names:
+        return []
+    sections = extract_resume_sections(cv_text)
+    original = sections.get("hard_skills", "")
+    existing_parts = [
+        part.strip()
+        for part in re.split(r"[·,\n;|]+", original)
+        if part.strip()
+    ]
+    merged = list(dict.fromkeys([*existing_parts, *skill_names]))
+    return [RewriteInstruction(
+        section="HARD SKILLS" if original else "COMPETENZE TECNICHE",
+        original=original,
+        replacement=" · ".join(merged),
+        reason="Skill confermate dall'utente integrate nella sezione competenze.",
+        category="skills",
+        source_id="confirmed_skills",
+    )]
+
+
+def build_confirmed_skill_rewrite_instructions(cv_text: str, user_additional_data: Dict[str, Any]) -> List[RewriteInstruction]:
+    confirmed = user_additional_data.get("confirmed_skills", [])
+    if not isinstance(confirmed, list) or not confirmed:
+        return []
+    skill_names_by_section: Dict[str, List[str]] = {}
+    example_lines: List[str] = []
+    for item in confirmed:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            detail = str(item.get("user_example") or item.get("detail") or "").strip()
+            category = normalize_plain_text(str(item.get("category") or "hard_skill"))
+            target_section = str(item.get("target_section") or "").strip()
+        else:
+            name = str(item or "").strip()
+            detail = ""
+            category = "hard_skill"
+            target_section = ""
+        if not name:
+            continue
+        section = target_section or ("SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS")
+        existing_normalized = {normalize_plain_text(existing) for existing in skill_names_by_section.get(section, [])}
+        if normalize_plain_text(name) not in existing_normalized:
+            skill_names_by_section.setdefault(section, []).append(name)
+        if detail:
+            example_lines.append(format_confirmed_skill_example(name, detail))
+    if not skill_names_by_section and not example_lines:
+        return []
+
+    sections = extract_resume_sections(cv_text)
+    instructions: List[RewriteInstruction] = []
+    for section, skill_names in skill_names_by_section.items():
+        is_soft = normalize_plain_text(section) == "soft skills"
+        original = sections.get("soft_skills" if is_soft else "hard_skills", "")
+        existing_parts = [
+            part.strip()
+            for part in re.split(r"[,;|•·\n]+", original)
+            if part.strip()
+        ]
+        merged = list(dict.fromkeys([*existing_parts, *skill_names]))
+        instructions.append(RewriteInstruction(
+            section=section if original else ("SOFT SKILLS" if is_soft else "COMPETENZE TECNICHE"),
+            original=original,
+            replacement=" · ".join(merged),
+            reason="Skill e keyword confermate dall'utente integrate nella sezione corretta.",
+            category="soft_skills" if is_soft else "skills",
+            source_id=f"confirmed_{normalize_plain_text(section).replace(' ', '_')}",
+        ))
+    if example_lines:
+        instructions.append(RewriteInstruction(
+            section="PROGETTI",
+            original="",
+            replacement="\n".join(example_lines[:4]),
+            reason="Esempi forniti dall'utente trasformati in testo professionale senza inventare esperienze.",
+            category="project",
+            source_id="confirmed_skill_examples",
+        ))
+    return instructions
+
+
+def format_confirmed_skill_example(skill_name: str, detail: str) -> str:
+    clean_detail = re.sub(r"\s+", " ", detail or "").strip().rstrip(".")
+    if not clean_detail:
+        return skill_name
+    if len(clean_detail) > 180:
+        clean_detail = clean_detail[:180].rsplit(" ", 1)[0].strip()
+    return f"Utilizzo di {skill_name}: {clean_detail}."
+
+
+def group_rewrite_instructions(instructions: List[RewriteInstruction]) -> Dict[str, List[Dict[str, str]]]:
+    grouped = {
+        "profile_updates": [],
+        "hard_skills_updates": [],
+        "soft_skills_updates": [],
+        "experience_updates": [],
+        "education_updates": [],
+        "projects_updates": [],
+        "extra_sections": [],
+    }
+    for instruction in instructions:
+        section = normalize_plain_text(instruction.section)
+        category = normalize_plain_text(instruction.category)
+        payload = {
+            "id": instruction.source_id,
+            "section": instruction.section,
+            "replacement": instruction.replacement,
+        }
+        if any(term in section for term in ["chi sono", "profilo"]) or category == "profile":
+            grouped["profile_updates"].append(payload)
+        elif "soft" in section or category == "soft_skills":
+            grouped["soft_skills_updates"].append(payload)
+        elif any(term in section for term in ["hard", "competenze", "skills"]) or category == "skills":
+            grouped["hard_skills_updates"].append(payload)
+        elif any(term in section for term in ["esperienze", "esperienza", "tirocinio"]) or category in {"experience", "experiences"}:
+            grouped["experience_updates"].append(payload)
+        elif any(term in section for term in ["formazione", "istruzione"]) or category == "education":
+            grouped["education_updates"].append(payload)
+        elif any(term in section for term in ["progetti", "attivita"]) or category == "project":
+            grouped["projects_updates"].append(payload)
+        else:
+            grouped["extra_sections"].append(payload)
+    return grouped
+
+
+def sort_rewrite_instructions(instructions: List[RewriteInstruction]) -> List[RewriteInstruction]:
+    order = {
+        "profile_updates": 0,
+        "hard_skills_updates": 1,
+        "soft_skills_updates": 2,
+        "experience_updates": 3,
+        "education_updates": 4,
+        "projects_updates": 5,
+        "extra_sections": 6,
+    }
+    grouped = group_rewrite_instructions(instructions)
+    rank_by_id = {
+        item["id"]: rank
+        for group_name, rank in order.items()
+        for item in grouped[group_name]
+    }
+    return sorted(instructions, key=lambda item: rank_by_id.get(item.source_id, 99))
 
 
 def create_plain_optimized_pdf(optimized_text: str) -> tuple[bytes, str, str]:
@@ -4072,7 +4311,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     rejected_candidates = []
 
     for key, value in (data or {}).items():
-        if key == "adaptation_answers":
+        if key in {"adaptation_answers", "confirmed_skills"}:
             continue
         if not isinstance(value, str) or not value.strip():
             continue
@@ -4102,6 +4341,40 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     if answers:
         sanitized["adaptation_answers"] = answers
 
+    confirmed_skills = []
+    for item in (data or {}).get("confirmed_skills", []):
+        if isinstance(item, str):
+            name = item.strip()
+            detail = ""
+            category = "hard_skill"
+            target_section = "HARD SKILLS"
+            item_type = "skillConfirmation"
+        elif isinstance(item, dict):
+            name = str(item.get("name") or item.get("skill") or "").strip()
+            detail = str(item.get("user_example") or item.get("detail") or item.get("example") or "").strip()
+            category = str(item.get("category") or "hard_skill").strip()
+            target_section = str(item.get("target_section") or ("SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS")).strip()
+            item_type = str(item.get("type") or "skillConfirmation").strip()
+        else:
+            continue
+        if not name:
+            continue
+        if detail and is_low_quality_text(detail, min_chars=6, min_words=2):
+            rejected_candidates.append(f"conferma skill {name}")
+            continue
+        confirmed_skills.append({
+            "id": str(item.get("id") or name).strip() if isinstance(item, dict) else name,
+            "type": item_type,
+            "name": name,
+            "category": category,
+            "detail": detail,
+            "user_example": detail,
+            "target_section": target_section,
+            "status": "confirmed",
+        })
+    if confirmed_skills:
+        sanitized["confirmed_skills"] = confirmed_skills
+
     rejected = rejected_candidates if rejected_candidates and not sanitized else []
     return sanitized, rejected
 
@@ -4115,6 +4388,12 @@ def flatten_cv_support_data(data: Optional[Dict[str, Any]]) -> str:
             for item in value:
                 if isinstance(item, dict):
                     parts.append(str(item.get("answer", "")).strip())
+        elif key == "confirmed_skills" and isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    parts.append(" ".join([str(item.get("name", "")).strip(), str(item.get("detail", "")).strip()]).strip())
+                elif isinstance(item, str):
+                    parts.append(item.strip())
     return "\n".join(part for part in parts if part)
 
 
@@ -5434,7 +5713,9 @@ def filter_cv_keyword_list(values: List[Any]) -> List[str]:
 ATS_HARD_SKILL_TERMS = [
     "python", "sql", "postgresql", "mysql", "excel", "power bi", "tableau",
     "database", "etl", "data cleaning", "data analysis", "analisi dati",
-    "machine learning", "pandas", "numpy", "cplex", "ottimizzazione",
+    "machine learning", "ai", "ml", "llm", "nlp", "clustering testuale",
+    "accuratezza", "tempi di risposta", "preparazione dati", "confronto modelli",
+    "pandas", "numpy", "cplex", "ottimizzazione",
 ]
 
 ATS_SOFT_SKILL_TERMS = [
@@ -5451,14 +5732,233 @@ def split_requested_skill_terms(role: str, description: str, required_skills: st
     return hard_skills[:12], soft_skills[:12]
 
 
+ROLE_KEYWORD_GROUPS = {
+    "data analyst": [
+        ("Python", ["python"]),
+        ("SQL", ["sql"]),
+        ("Machine Learning / AI", ["machine learning", "intelligenza artificiale", " ai ", " ml "]),
+        ("Analisi dei dati", ["analisi dei dati", "analisi dati", "data analysis"]),
+        ("NLP / LLM", ["nlp", "natural language processing", "llm", "large language"]),
+        ("clustering testuale", ["clustering testuale", "clustering"]),
+        ("accuratezza", ["accuratezza"]),
+        ("tempi di risposta", ["tempi di risposta"]),
+        ("preparazione dati", ["preparazione dati", "preparazione dei dati"]),
+        ("confronto modelli", ["confronto modelli", "confronto delle prestazioni", "valutazione delle prestazioni"]),
+        ("problem solving", ["problem solving", "risoluzione di problemi"]),
+    ],
+    "game design": [
+        ("Game design", ["game design", "game designer"]),
+        ("Level design", ["level design"]),
+        ("Storytelling", ["storytelling", "narrazione"]),
+        ("UX", ["ux", "user experience", "esperienza utente"]),
+        ("Unity", ["unity"]),
+        ("Unreal Engine", ["unreal engine", "unreal"]),
+        ("C#", ["c#"]),
+        ("prototipazione", ["prototipazione", "prototype", "prototipi"]),
+        ("playtesting", ["playtesting", "play test"]),
+        ("portfolio progetti", ["portfolio", "progetti"]),
+    ],
+}
+
+DATA_ANALYST_KEYWORDS_TO_CONFIRM = ["Excel avanzato", "Power BI", "Tableau", "dashboard", "KPI", "reporting"]
+GAME_DESIGN_KEYWORDS_TO_CONFIRM = ["Unity", "Unreal Engine", "C#", "prototipazione", "playtesting", "portfolio progetti"]
+
+ROLE_SKILL_LIBRARY = {
+    "data analyst": {
+        "hard_skills": ["Analisi dei dati", "SQL", "Python", "Machine Learning", "Statistica", "Data visualization", "Reporting", "KPI", "Database"],
+        "soft_skills": ["Problem solving", "Attenzione ai dettagli", "Pensiero analitico", "Comunicazione dei risultati", "Team working"],
+        "programming_languages": ["Python", "SQL"],
+        "tools": ["Excel avanzato", "Power BI", "Tableau", "Google Analytics", "BigQuery"],
+    },
+    "game design": {
+        "hard_skills": ["Game design", "Level design", "Prototipazione", "Game mechanics", "User experience", "Playtesting", "Storytelling"],
+        "soft_skills": ["Creativita", "Problem solving", "Collaborazione", "Comunicazione", "Iterazione su feedback"],
+        "programming_languages": ["C#", "C++", "Python"],
+        "tools": ["Unity", "Unreal Engine", "Blender", "Figma", "Miro"],
+    },
+    "backend developer": {
+        "hard_skills": ["API development", "Database design", "Autenticazione", "Testing backend", "Architetture REST", "Deploy"],
+        "soft_skills": ["Problem solving", "Precisione", "Collaborazione", "Pensiero logico", "Documentazione tecnica"],
+        "programming_languages": ["Python", "Java", "JavaScript", "Node.js"],
+        "tools": ["FastAPI", "Django", "Spring", "PostgreSQL", "MongoDB", "Docker", "Cloud"],
+    },
+}
+
+
+def keyword_group_present(cv_plain: str, variants: List[str]) -> bool:
+    padded = f" {cv_plain} "
+    for variant in variants:
+        normalized = normalize_plain_text(variant)
+        if not normalized:
+            continue
+        if len(normalized) <= 3 and re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", padded):
+            return True
+        if len(normalized) > 3 and normalized in padded:
+            return True
+    return False
+
+
+def role_keyword_snapshot(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, List[str]]:
+    cv_plain = normalize_plain_text(cv_text)
+    target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
+    family = infer_role_family(role, description, required_skills)
+    groups = ROLE_KEYWORD_GROUPS.get(family, [])
+    present = [label for label, variants in groups if keyword_group_present(cv_plain, variants)]
+    partially_present = []
+    if family == "data analyst" and any(item in present for item in ["Machine Learning / AI", "NLP / LLM"]) and "Analisi dei dati" not in present:
+        partially_present.append("Analisi dei dati")
+    confirm_library = {
+        "data analyst": DATA_ANALYST_KEYWORDS_TO_CONFIRM,
+        "game design": GAME_DESIGN_KEYWORDS_TO_CONFIRM,
+    }.get(family, [])
+    to_confirm = [keyword for keyword in confirm_library if not keyword_group_present(cv_plain, [keyword])]
+    return {
+        "present": present,
+        "partially_present": partially_present,
+        "to_confirm": to_confirm,
+    }
+
+
+def infer_role_family(role: str, description: str = "", required_skills: str = "") -> str:
+    target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
+    if any(term in target_plain for term in ["game design", "game designer", "level design", "unity", "unreal"]):
+        return "game design"
+    if any(term in target_plain for term in ["backend developer", "back end", "backend", "api", "fastapi", "django", "spring"]):
+        return "backend developer"
+    if any(term in target_plain for term in ["data analyst", "analista dati", "analisi dati", "data analysis", "business intelligence"]):
+        return "data analyst"
+    return ""
+
+
+def build_role_skill_suggestions(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, Any]:
+    family = infer_role_family(role, description, required_skills)
+    library = ROLE_SKILL_LIBRARY.get(family, {"hard_skills": [], "soft_skills": [], "programming_languages": [], "tools": []})
+    cv_plain = normalize_plain_text(cv_text)
+    result = {
+        "role_family": family,
+        "hard_skills": [],
+        "soft_skills": [],
+        "programming_languages": [],
+        "tools": [],
+        "already_present": [],
+        "to_highlight": [],
+        "to_confirm": [],
+        "confirmation_items": [],
+    }
+    for group_name in ["hard_skills", "soft_skills", "programming_languages", "tools"]:
+        for skill in library.get(group_name, []):
+            present = keyword_group_present(cv_plain, [skill])
+            item = {"name": skill, "status": "present" if present else "to_confirm"}
+            result[group_name].append(item)
+            category = {
+                "soft_skills": "soft_skill",
+                "programming_languages": "language",
+                "tools": "tool",
+            }.get(group_name, "hard_skill")
+            result["confirmation_items"].append({
+                "id": f"{family.replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
+                "type": "skillConfirmation",
+                "name": skill,
+                "category": category,
+                "reason": f"Competenza utile per il ruolo {role or family}; puo essere valorizzata solo se confermata e coerente con il CV.",
+                "already_present": present,
+                "requires_confirmation": True,
+                "status": "pending",
+                "user_example": "",
+                "target_section": "SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS",
+            })
+            if present:
+                result["already_present"].append(skill)
+                result["to_highlight"].append(skill)
+            else:
+                result["to_confirm"].append(skill)
+    for keyword in role_keyword_snapshot(cv_text, role, description, required_skills).get("to_confirm", []):
+        if normalize_plain_text(keyword) in {normalize_plain_text(item["name"]) for item in result["confirmation_items"]}:
+            continue
+        result["confirmation_items"].append({
+            "id": f"{family.replace(' ', '-')}-keyword-{normalize_plain_text(keyword).replace(' ', '-')}",
+            "type": "keywordConfirmation",
+            "name": keyword,
+            "category": "keyword",
+            "reason": f"Keyword specifica utile per rendere il CV piu coerente con {role or family}.",
+            "already_present": False,
+            "requires_confirmation": True,
+            "status": "pending",
+            "user_example": "",
+            "target_section": "HARD SKILLS",
+        })
+    return result
+
+
+def compute_cv_completeness_score(cv_text: str, role: str = "", description: str = "", required_skills: str = "") -> int:
+    heuristic = analyze_cv_heuristics(cv_text)
+    detected = set(heuristic.get("detected_sections", []))
+    cv_plain = normalize_plain_text(cv_text)
+    sections = extract_resume_sections(cv_text)
+    score = 0
+    if re.search(r"[\w.+-]+@[\w.-]+\.\w+", cv_text or "") or re.search(r"\+?\d[\d\s().-]{7,}", cv_text or ""):
+        score += 15
+    if "formazione" in detected or sections.get("education"):
+        score += 15
+    if "esperienze professionali" in detected or sections.get("experience"):
+        score += 15
+    if "competenze" in detected or sections.get("hard_skills"):
+        score += 10
+    if "soft skills" in cv_plain or any(term in cv_plain for term in ATS_SOFT_SKILL_TERMS):
+        score += 5
+    if "lingue" in detected or "inglese" in cv_plain or "english" in cv_plain:
+        score += 5
+    if sections.get("profile"):
+        score += 10
+    if re.search(r"\b\d+[%+]?\b", cv_text or "") or any(term in cv_plain for term in ["accuratezza", "tempi di risposta", "metriche", "kpi"]):
+        score += 10
+    if any(term in cv_plain for term in ["progetto", "portfolio", "github"]):
+        score += 5
+    if any(term in cv_plain for term in ["certificazione", "certificazioni", "certificato", "certificati"]):
+        score += 5
+    if any(term in cv_plain for term in ATS_HARD_SKILL_TERMS):
+        score += 5
+    role_snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
+    if len(role_snapshot["present"]) >= 4:
+        score += 10
+    elif len(role_snapshot["present"]) >= 2:
+        score += 6
+    missing_optional_caps = 0
+    if not any(term in cv_plain for term in ["progetto", "portfolio", "github"]):
+        missing_optional_caps += 4
+    if not any(term in cv_plain for term in ["certificazione", "certificazioni", "certificato", "certificati"]):
+        missing_optional_caps += 4
+    if not (re.search(r"\b\d+[%+]?\b", cv_text or "") or any(term in cv_plain for term in ["accuratezza", "tempi di risposta", "metriche", "kpi"])):
+        missing_optional_caps += 6
+    return min(clamp_score(score), 100 - missing_optional_caps)
+
+
+def compute_role_match_score(cv_text: str, role: str, description: str = "", required_skills: str = "") -> int:
+    cv_plain = normalize_plain_text(cv_text)
+    snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
+    keyword_score = min(len(snapshot["present"]) * 7, 45)
+    education_score = 15 if any(term in cv_plain for term in ["ingegneria informatica", "computer engineering", "informatica"]) else 0
+    experience_score = 18 if any(term in cv_plain for term in ["tirocinio", "tesi", "progetto", "esperienza"]) else 0
+    profile_score = 12 if extract_resume_sections(cv_text).get("profile") else 0
+    baseline = 28 if role.strip() else 18
+    return clamp_score(baseline + keyword_score + education_score + experience_score + profile_score)
+
+
 def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: str = "") -> Dict:
     heuristic = analyze_cv_heuristics(cv_text)
     cv_plain = normalize_plain_text(cv_text)
     requested_keywords = extract_requested_keywords(role, description, required_skills)
     requested_hard_skills, requested_soft_skills = split_requested_skill_terms(role, description, required_skills)
     keyword_match = MatchingEngine(normalize_plain_text).split_present_missing(cv_text, requested_keywords)
-    present_keywords = filter_cv_keyword_list(keyword_match["present"])
+    role_snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
+    present_keywords = filter_cv_keyword_list([*keyword_match["present"], *role_snapshot["present"]])
     missing_keywords = filter_cv_keyword_list(keyword_match["missing"])
+    missing_keywords = [
+        keyword for keyword in missing_keywords
+        if normalize_plain_text(keyword) not in {
+            "data", "analyst", "data analyst", "machine learning / ai", "nlp / llm", "analisi dei dati"
+        }
+    ]
 
     required_sections = {
         "contatti": "Aggiungi o rendi piu visibili email, telefono o link professionali.",
@@ -5473,12 +5973,19 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
         if section not in detected_sections
     ]
 
-    keyword_coverage = len(present_keywords) / max(len(requested_keywords), 1)
+    keyword_denominator = max(len(filter_cv_keyword_list(requested_keywords)), len(present_keywords) + len(missing_keywords), 1)
+    keyword_coverage = len(present_keywords) / keyword_denominator
     section_score = (len(required_sections) - len(missing_sections)) / len(required_sections)
     text_length_score = min(len(cv_text) / 3500, 1)
     keyword_score = clamp_score(round(keyword_coverage * 100))
+    family = infer_role_family(role, description, required_skills)
+    if role_snapshot["present"]:
+        role_group_score = round((len(role_snapshot["present"]) / max(len(ROLE_KEYWORD_GROUPS.get(family, [])), 1)) * 100)
+        keyword_score = max(keyword_score, clamp_score(role_group_score))
     format_score = clamp_score(round((section_score * 70) + (text_length_score * 30)))
     ats_score = clamp_score(round((keyword_coverage * 42) + (section_score * 32) + (text_length_score * 16) + 10))
+    if keyword_score > ats_score:
+        ats_score = clamp_score(round((ats_score * 0.65) + (keyword_score * 0.35)))
     missing_hard_skills = filter_cv_keyword_list([
         skill for skill in requested_hard_skills
         if normalize_plain_text(skill) not in cv_plain
@@ -5517,6 +6024,8 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
         "keywords_missing": missing_keywords[:12],
         "present_keywords": present_keywords[:12],
         "missing_keywords": missing_keywords[:12],
+        "keywords_partially_present": role_snapshot["partially_present"][:8],
+        "keywords_to_confirm": role_snapshot["to_confirm"][:8],
         "missing_hard_skills": missing_hard_skills[:10],
         "missing_soft_skills": missing_soft_skills[:10],
         "missing_sections": missing_sections,
@@ -5528,6 +6037,38 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
 
 def generate_cv_optimization_questions(cv_text: str, evaluation: Dict, ats_analysis: Dict) -> List[Dict[str, str]]:
     questions = []
+    target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+    role_family = infer_role_family(str(target.get("role") or ""), str(target.get("description") or ""))
+
+    role_questions = {
+        "data analyst": [
+            ("data_projects", "Hai svolto progetti universitari o personali legati all'analisi dei dati?", "progetti"),
+            ("data_tools", "Hai usato Python, SQL, Excel, Power BI, Tableau o strumenti simili?", "strumenti"),
+            ("data_outputs", "Hai lavorato con dataset, report, dashboard o KPI?", "risultati"),
+            ("data_internship", "Hai svolto stage, tirocini o esperienze coerenti con questo ruolo?", "esperienze"),
+            ("data_metrics", "Puoi indicare risultati concreti, anche universitari, come accuratezza, tempi ridotti, modelli confrontati o quantita di dati analizzati?", "risultati"),
+        ],
+        "game design": [
+            ("game_prototypes", "Hai creato prototipi di giochi, livelli, meccaniche o concept?", "progetti"),
+            ("game_tools", "Hai usato Unity, Unreal Engine, C#, Blender o strumenti simili?", "strumenti"),
+            ("game_projects", "Hai realizzato progetti universitari o personali legati al game design?", "progetti"),
+            ("game_design_skills", "Hai esperienze in storytelling, level design, user experience o testing?", "competenze"),
+        ],
+        "backend developer": [
+            ("backend_api", "Hai sviluppato API, database o servizi backend?", "progetti"),
+            ("backend_stack", "Hai usato Python, Java, Node.js, Spring, FastAPI o Django?", "strumenti"),
+            ("backend_data", "Hai lavorato con SQL, PostgreSQL, MongoDB o Docker?", "strumenti"),
+            ("backend_projects", "Hai realizzato progetti universitari o personali backend?", "progetti"),
+            ("backend_auth_cloud", "Hai esperienze con autenticazione, deploy o cloud?", "esperienze"),
+        ],
+    }
+    for question_id, question, category in role_questions.get(role_family, []):
+        questions.append({
+            "id": question_id,
+            "question": question,
+            "reason": "Risposta facoltativa: verra usata solo se aggiungi informazioni reali.",
+            "category": category,
+        })
 
     if len(cv_text.strip()) < 800:
         questions.append({
@@ -5693,8 +6234,11 @@ COACH_SUGGESTION_CATEGORY_LABELS = {
     "experience": "Esperienze da riscrivere meglio",
     "phrases": "Frasi da migliorare",
     "skills": "Competenze da evidenziare",
+    "soft_skills": "Soft skills",
     "ats_keywords": "Parole chiave ATS da inserire",
     "education": "Formazione",
+    "project": "Progetti",
+    "extra_page": "Pagina aggiuntiva",
     "experiences": "Esperienze da riscrivere meglio",
     "missing_info": "Informazioni mancanti da confermare",
     "sections": "Sezioni poco chiare o poco efficaci",
@@ -5755,6 +6299,8 @@ EDIT_SECTION_ALIASES = {
     "SOFT SKILLS": ["soft skills"],
     "FORMAZIONE": ["formazione", "istruzione"],
     "ESPERIENZE PROFESSIONALI": ["esperienze professionali", "esperienza professionale", "esperienze", "esperienza"],
+    "PROGETTI": ["progetti", "projects"],
+    "PAGINA AGGIUNTIVA": ["pagina aggiuntiva", "esperienze aggiuntive", "attivita rilevanti"],
     "LINGUE": ["lingue", "languages"],
     "CONTATTI": ["contatti", "contact", "contacts"],
 }
@@ -5763,6 +6309,7 @@ EDIT_SECTION_MARKERS = [
     "CONTATTI", "LINGUE", "HARD SKILLS", "SOFT SKILLS", "CHI SONO",
     "PROFILO PROFESSIONALE", "PROFILO", "FORMAZIONE", "ISTRUZIONE",
     "ESPERIENZE PROFESSIONALI", "ESPERIENZA PROFESSIONALE", "ESPERIENZE",
+    "PROGETTI", "PAGINA AGGIUNTIVA",
 ]
 
 CANONICAL_EDIT_SECTION_NAMES = {
@@ -6024,7 +6571,7 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
             "profile",
             "Riscrivi il profilo professionale per Data Analyst",
             "Rende il profilo più vicino al ruolo Data Analyst usando solo informazioni già presenti nel CV.",
-            section=profile_section or "CHI SONO",
+            section="CHI SONO",
             original_text=profile_original,
             proposed_text=(
                 "Studentessa magistrale in Ingegneria Informatica, con interesse per analisi dei dati, machine learning "
@@ -6060,10 +6607,26 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
             "skills",
             "Riorganizza le hard skills in modo più ATS-friendly",
             "Rende le competenze tecniche più leggibili dagli ATS senza aggiungere skill non supportate.",
-            section=skills_section or "HARD SKILLS",
+            section="HARD SKILLS",
             original_text=skills_original,
             proposed_text=" · ".join(dict.fromkeys(supported_skills)),
             keywords_added=supported_skills,
+        ))
+
+    education_original = first_supported_line("formazione", ["ingegneria", "informatica", "machine learning", "ai", "artificiale"])
+    if education_original and data_role and any(term in cv_plain for term in ["ingegneria", "informatica", "machine learning", "intelligenza artificiale", " ai "]):
+        safe_add(make_coach_suggestion(
+            "education",
+            "Valorizza il percorso formativo in AI e Machine Learning",
+            "Collega meglio la formazione al ruolo target senza inserire certificazioni o strumenti non confermati.",
+            section="FORMAZIONE",
+            original_text=education_original,
+            proposed_text=(
+                "Percorso universitario in Ingegneria Informatica orientato allo sviluppo di competenze informatiche, "
+                "analitiche e quantitative applicabili all'analisi dei dati, all'Intelligenza Artificiale e alla "
+                "progettazione di soluzioni digitali."
+            ),
+            keywords_added=["Ingegneria Informatica", "AI", "Machine Learning", "analisi dei dati"],
         ))
 
     unique = []
@@ -6136,13 +6699,16 @@ def build_fallback_cv_job_evaluation(
     description_tokens = tokenize_meaningful(description)
     company_tokens = tokenize_meaningful(company)
 
-    role_hits = len(cv_tokens.intersection(role_tokens.union(description_tokens)))
     company_hits = len(cv_tokens.intersection(company_tokens))
     heuristic = analyze_cv_heuristics(cv_text)
 
-    completeness = clamp_score(35 + heuristic["score"])
-    role_match = clamp_score(42 + role_hits * 8)
-    company_fit = clamp_score(45 + company_hits * 10 + (8 if sources else 0))
+    completeness = compute_cv_completeness_score(cv_text, role, description, required_skills)
+    role_match = compute_role_match_score(cv_text, role, description, required_skills)
+    sector_hits = len(cv_tokens.intersection(description_tokens))
+    if company.strip() or description.strip():
+        company_fit = clamp_score(28 + min(company_hits * 12, 24) + min(sector_hits * 4, 32) + (8 if sources else 0))
+    else:
+        company_fit = 35
     clarity = clamp_score(55 + min(len(cv_text) // 600, 18))
     professionalism = clamp_score(58 + (10 if "contatti" in heuristic["detected_sections"] else 0))
     overall = clamp_score(round((role_match * 0.32) + (company_fit * 0.18) + (completeness * 0.22) + (clarity * 0.14) + (professionalism * 0.14)))
@@ -6151,6 +6717,7 @@ def build_fallback_cv_job_evaluation(
     relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens).union(required_skill_tokens))))[:8]
     missing = filter_cv_keyword_list(sorted(list((role_tokens.union(description_tokens).union(required_skill_tokens)) - cv_tokens)))[:8]
     ats_analysis = analyze_cv_ats(cv_text, role, description, required_skills)
+    suggested_skills = build_role_skill_suggestions(cv_text, role, description, required_skills)
     questions_for_user = generate_cv_optimization_questions(cv_text, {
         "weaknesses": [],
         "missing_skills_for_role": missing,
@@ -6174,6 +6741,7 @@ def build_fallback_cv_job_evaluation(
         "keyword_score": ats_analysis.get("keyword_score", ats_analysis["ats_score"]),
         "format_score": ats_analysis.get("format_score", completeness),
         "ats_analysis": ats_analysis,
+        "suggested_skills": suggested_skills,
         "role_match_score": role_match,
         "company_fit_score": company_fit,
         "clarity_score": clarity,
@@ -6224,6 +6792,15 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
     normalized["format_score"] = clamp_score(
         result.get("format_score", fallback.get("format_score", normalized["completeness_score"]))
     )
+    normalized["completeness_score"] = min(
+        normalized["completeness_score"],
+        clamp_score(fallback.get("completeness_score", normalized["completeness_score"]) + 6),
+    )
+    if fallback.get("keyword_score", 0) > 0:
+        normalized["keyword_score"] = max(normalized["keyword_score"], clamp_score(fallback["keyword_score"] - 5))
+    if fallback.get("role_match_score", 0) > 0:
+        normalized["role_match_score"] = max(normalized["role_match_score"], clamp_score(fallback["role_match_score"] - 8))
+        normalized["job_match_score"] = max(normalized["job_match_score"], clamp_score(fallback.get("job_match_score", fallback["role_match_score"]) - 8))
 
     if "strengths" not in result and isinstance(result.get("strong_points"), list):
         result["strengths"] = result["strong_points"]
@@ -6243,6 +6820,7 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
     normalized["summary"] = result.get("summary") or fallback["summary"]
     normalized["target"] = fallback.get("target", {})
     normalized["cv_text"] = fallback.get("cv_text", "")
+    normalized["suggested_skills"] = result.get("suggested_skills") if isinstance(result.get("suggested_skills"), dict) else fallback.get("suggested_skills", {})
     normalized["ats_analysis"] = result.get("ats_analysis") if isinstance(result.get("ats_analysis"), dict) else fallback.get("ats_analysis", {})
     normalized["ats_analysis"]["keyword_score"] = normalized["ats_analysis"].get("keyword_score", normalized["keyword_score"])
     normalized["ats_analysis"]["format_score"] = normalized["ats_analysis"].get("format_score", normalized["format_score"])
@@ -6264,6 +6842,14 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
     )
     normalized["ats_analysis"]["missing_hard_skills"] = normalized["ats_analysis"].get("missing_hard_skills", normalized["missing_hard_skills"])
     normalized["ats_analysis"]["missing_soft_skills"] = normalized["ats_analysis"].get("missing_soft_skills", normalized["missing_soft_skills"])
+    normalized["ats_analysis"]["keywords_partially_present"] = normalized["ats_analysis"].get(
+        "keywords_partially_present",
+        fallback.get("ats_analysis", {}).get("keywords_partially_present", [])
+    )
+    normalized["ats_analysis"]["keywords_to_confirm"] = normalized["ats_analysis"].get(
+        "keywords_to_confirm",
+        fallback.get("ats_analysis", {}).get("keywords_to_confirm", [])
+    )
     normalized["ats_analysis"]["sections_to_improve"] = normalized["ats_analysis"].get(
         "sections_to_improve",
         normalized["ats_analysis"].get("missing_sections", normalized["sections_to_improve"])
@@ -6294,6 +6880,8 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
             continue
         seen_suggestion_ids.add(suggestion_id)
         normalized["coach_suggestions"].append(item)
+        if len(normalized["coach_suggestions"]) >= 4:
+            break
     normalized["strong_points"] = normalized["strengths"]
     normalized["weak_points"] = normalized["weaknesses"]
     return normalized
@@ -6488,7 +7076,7 @@ async def analyze_cv_for_job_endpoint(
         "identity_check": identity_check,
         "job_validation": job_validation,
         "cv_evaluation": cv_evaluation,
-        "warnings": ([identity_check["message"]] if identity_check["matches_user"] is None else []) + job_validation.get("warnings", []),
+        "warnings": job_validation.get("warnings", []),
     }
 
 
@@ -6550,7 +7138,7 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
         "identity_check": identity_check,
         "job_validation": job_validation,
         "cv_evaluation": cv_evaluation,
-        "warnings": ([identity_check["message"]] if identity_check["matches_user"] is None else []) + job_validation.get("warnings", []),
+        "warnings": job_validation.get("warnings", []),
     }
 
 
@@ -6589,10 +7177,50 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             raw_additional_data["additional_notes"] = data.additionalInfo
     if data.answers and "adaptation_answers" not in raw_additional_data:
         raw_additional_data["adaptation_answers"] = data.answers
-    if data.confirmedSkills:
-        raw_additional_data["confirmed_skills"] = data.confirmedSkills
+    if data.extraAnswers and "adaptation_answers" not in raw_additional_data:
+        raw_additional_data["adaptation_answers"] = data.extraAnswers
+    confirmed_skill_payload = []
+    for payload in [
+        data.acceptedSkillConfirmations,
+        data.confirmedSkills,
+        data.acceptedKeywordConfirmations,
+        data.confirmedKeywords,
+    ]:
+        if isinstance(payload, list):
+            confirmed_skill_payload.extend(payload)
+    if confirmed_skill_payload:
+        raw_additional_data["confirmed_skills"] = confirmed_skill_payload
     user_additional_data, rejected_additional_fields = sanitize_cv_additional_data(raw_additional_data)
     accepted_suggestions = normalize_accepted_coach_suggestions(data.accepted_suggestions)
+    rejected_suggestions = data.rejected_suggestions if isinstance(data.rejected_suggestions, list) else []
+    rejected_suggestion_ids = [
+        str(suggestion_id).strip()
+        for suggestion_id in (data.rejected_suggestion_ids or [])
+        if str(suggestion_id).strip()
+    ]
+    confirmed_skills = user_additional_data.get("confirmed_skills", []) if isinstance(user_additional_data.get("confirmed_skills"), list) else []
+    selected_ids = {
+        str(suggestion_id).strip()
+        for suggestion_id in ((data.selected_suggestion_ids or []) + (data.acceptedSuggestionIds or []))
+        if str(suggestion_id).strip()
+    }
+    if selected_ids:
+        accepted_suggestions = [
+            suggestion for suggestion in accepted_suggestions
+            if str(suggestion.get("id") or "").strip() in selected_ids
+        ]
+        if not accepted_suggestions:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="Nessuna modifica selezionata e applicabile: controlla i suggerimenti o riprova.",
+            )
+    if not accepted_suggestions and not flatten_cv_support_data(user_additional_data):
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Non hai selezionato modifiche né aggiunto informazioni extra. Seleziona almeno una modifica o continua scaricando il CV originale.",
+        )
 
     if rejected_additional_fields:
         conn.close()
@@ -6654,14 +7282,21 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     if original_filename.endswith(".docx") and original_file_bytes:
         try:
             file_bytes, applied_changes_count = DocxPreserver().apply(original_file_bytes, rewrite_result["instructions"])
-            if accepted_suggestions and applied_changes_count == 0:
+            if rewrite_result.get("instructions") and applied_changes_count == 0:
                 print(
                     "CV DOCX generato senza sostituzioni automatiche: "
                     f"suggerimenti selezionati={len(accepted_suggestions)}, "
                     f"proposed_text mancanti={rewrite_result.get('missing_proposed_text_count', 0)}"
                 )
-                format_warnings.append(
-                    "Non sono state applicate sostituzioni automatiche al DOCX: verifica che i suggerimenti selezionati abbiano testo originale e testo proposto compatibili con il documento."
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": "Nessuna modifica selezionata e stata applicata. Controlla i suggerimenti o riprova.",
+                        "applied_changes_count": applied_changes_count,
+                        "selected_suggestions_count": len(accepted_suggestions),
+                    },
                 )
             final_docx_text = extract_docx_text_bytes(file_bytes)
             original_docx_text = extract_docx_text_bytes(original_file_bytes)
@@ -6718,7 +7353,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             converted_pdf = export_service.docx_to_pdf(file_bytes)
             if converted_pdf:
                 alternatives.append({
-                    "filename": get_optimized_cv_filename(existing_user[10], "pdf"),
+                    "filename": get_target_optimized_cv_filename(public_user.get("name") or "", role, company, "pdf"),
                     "content_type": "application/pdf",
                     "file_base64": base64.b64encode(converted_pdf).decode("utf-8"),
                 })
@@ -6726,6 +7361,17 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             raise
         except Exception as exc:
             print(f"Preservazione DOCX non riuscita, uso export di sicurezza: {exc}")
+            if rewrite_result.get("instructions"):
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": "Nessuna modifica selezionata e stata applicata. Controlla i suggerimenti o riprova.",
+                        "applied_changes_count": applied_changes_count,
+                        "selected_suggestions_count": len(accepted_suggestions),
+                    },
+                )
             file_bytes, content_type, extension = create_optimized_docx_file(optimized_text, original_file_bytes)
             if not file_bytes:
                 file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
@@ -6740,52 +7386,147 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                     "Nessuna modifica è stata applicata al documento: controlla il CV finale prima dell'invio."
                 )
     elif original_filename.endswith(".pdf") and original_file_bytes:
+        if rewrite_result.get("instructions"):
+            conn.close()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "success": False,
+                    "error": "Per applicare davvero le modifiche o le informazioni extra mantenendo il layout, carica il CV originale in formato DOCX.",
+                    "applied_changes_count": applied_changes_count,
+                    "selected_suggestions_count": len(accepted_suggestions),
+                },
+            )
         file_bytes = original_file_bytes
         content_type = "application/pdf"
         extension = "pdf"
     else:
         file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
 
-    filename = get_optimized_cv_filename(existing_user[10], extension)
+    filename = get_target_optimized_cv_filename(public_user.get("name") or "", role, company, extension)
     file_base64 = base64.b64encode(file_bytes).decode("utf-8")
     generated_at = datetime.utcnow().isoformat()
+    docx_file = {
+        "filename": filename,
+        "content_type": content_type,
+        "file_base64": file_base64,
+    } if extension == "docx" else None
+    pdf_file = {
+        "filename": filename,
+        "content_type": content_type,
+        "file_base64": file_base64,
+    } if extension == "pdf" else None
+    for alternative in alternatives:
+        alt_name = str(alternative.get("filename") or "").lower()
+        if alt_name.endswith(".pdf"):
+            pdf_file = alternative
+        elif alt_name.endswith(".docx"):
+            docx_file = alternative
+    analysis_score = int((analysis or {}).get("overall_score") or (data.cv_evaluation or {}).get("overall_score") or 0) if isinstance(data.cv_evaluation, dict) or isinstance(analysis, dict) else 0
+    confirmed_score_bonus = min((applied_changes_count * 3) + (len(confirmed_skills) * 2), 14)
+    analysis_score = clamp_score(analysis_score + confirmed_score_bonus) if applied_changes_count else analysis_score
+    grouped_changes = rewrite_result.get("grouped_changes", {})
+    requested_changes_count = len(rewrite_result.get("instructions", []))
+    skipped_change_details = []
+    if requested_changes_count and applied_changes_count < requested_changes_count:
+        skipped_change_details.append({
+            "reason": "Alcune modifiche confermate non sono state applicate automaticamente per preservare layout e sezioni del DOCX.",
+            "requested_changes_count": requested_changes_count,
+            "applied_changes_count": applied_changes_count,
+        })
+    skipped_change_details.extend({"reason": warning} for warning in format_warnings)
 
     cursor.execute("""
-    INSERT INTO optimized_cvs (user_id, filename, content_type, text, file_base64)
-    VALUES (?, ?, ?, ?, ?)
-    """, (user_id, filename, content_type, optimized_text, file_base64))
+    INSERT INTO optimized_cvs (
+        user_id, filename, content_type, text, file_base64,
+        target_role, target_company, job_description, analysis_score,
+        selected_suggestions_json, rejected_suggestions_json, additional_info_json,
+        confirmed_skills_json, generation_status, applied_changes_count, skipped_changes_json,
+        docx_filename, docx_content_type, docx_file_base64,
+        pdf_filename, pdf_content_type, pdf_file_base64
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        user_id, filename, content_type, optimized_text, file_base64,
+        role, company, goal, analysis_score,
+        json.dumps(accepted_suggestions, ensure_ascii=False),
+        json.dumps({"ids": rejected_suggestion_ids, "suggestions": rejected_suggestions}, ensure_ascii=False),
+        json.dumps(user_additional_data, ensure_ascii=False),
+        json.dumps(confirmed_skills, ensure_ascii=False),
+        "completed",
+        applied_changes_count,
+        json.dumps(skipped_change_details, ensure_ascii=False),
+        docx_file.get("filename") if docx_file else None,
+        docx_file.get("content_type") if docx_file else None,
+        docx_file.get("file_base64") if docx_file else None,
+        pdf_file.get("filename") if pdf_file else None,
+        pdf_file.get("content_type") if pdf_file else None,
+        pdf_file.get("file_base64") if pdf_file else None,
+    ))
     optimized_cv_id = cursor.lastrowid
     conn.commit()
     conn.close()
 
-    return {
-        "optimized_cv": {
+    optimized_cv_payload = {
             "id": optimized_cv_id,
             "filename": filename,
+            "file_name": filename,
             "content_type": content_type,
             "file_base64": file_base64,
             "text": optimized_text,
             "download_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file",
+            "docx_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file?format=docx" if docx_file else None,
+            "pdf_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file?format=pdf" if pdf_file else None,
             "alternatives": alternatives,
             "applied_changes_count": applied_changes_count,
+            "skipped_changes": skipped_change_details,
             "generated_at": generated_at,
-        },
+            "created_at": generated_at,
+            "target_role": role,
+            "role": role,
+            "target_company": company,
+            "company": company,
+            "analysis_score": analysis_score,
+            "score": analysis_score,
+            "has_docx": bool(docx_file),
+            "has_pdf": bool(pdf_file),
+            "generation_status": "completed",
+        }
+    return {
+        "success": True,
+        "optimized_cv": optimized_cv_payload,
+        "optimizedCv": optimized_cv_payload,
         "candidate_sources": sources,
         "analysis": analysis,
         "hallucination_warnings": hallucination_warnings,
         "format_warnings": format_warnings,
         "accepted_suggestions": accepted_suggestions,
+        "rejected_suggestion_ids": rejected_suggestion_ids,
+        "skipped_changes": skipped_change_details,
+        "grouped_changes": grouped_changes,
+        "appliedChanges": {
+            "profile": grouped_changes.get("profile_updates", []),
+            "hard_skills": grouped_changes.get("hard_skills_updates", []),
+            "soft_skills": grouped_changes.get("soft_skills_updates", []),
+            "experience": grouped_changes.get("experience_updates", []),
+            "education": grouped_changes.get("education_updates", []),
+            "projects": grouped_changes.get("projects_updates", []),
+            "extra_sections": grouped_changes.get("extra_sections", []),
+        },
         "applied_changes_count": applied_changes_count,
+        "warnings": [*hallucination_warnings, *skipped_change_details],
         "message": "CV ottimizzato generato correttamente.",
     }
 
 
 @app.get("/users/{user_id}/optimized-cvs/{optimized_cv_id}/file")
-def download_optimized_cv(user_id: int, optimized_cv_id: int):
+def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[str] = None):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT filename, content_type, file_base64
+    SELECT filename, content_type, file_base64,
+           docx_filename, docx_content_type, docx_file_base64,
+           pdf_filename, pdf_content_type, pdf_file_base64
     FROM optimized_cvs
     WHERE id = ? AND user_id = ?
     """, (optimized_cv_id, user_id))
@@ -6795,7 +7536,12 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="CV ottimizzato non trovato.")
 
-    filename, content_type, file_base64 = row
+    filename, content_type, file_base64, docx_filename, docx_content_type, docx_file_base64, pdf_filename, pdf_content_type, pdf_file_base64 = row
+    requested_format = (format or "").lower().strip(".")
+    if requested_format == "docx" and docx_file_base64:
+        filename, content_type, file_base64 = docx_filename, docx_content_type, docx_file_base64
+    elif requested_format == "pdf" and pdf_file_base64:
+        filename, content_type, file_base64 = pdf_filename, pdf_content_type, pdf_file_base64
     if not filename or not file_base64:
         raise HTTPException(status_code=500, detail="File CV ottimizzato non leggibile.")
 
@@ -6813,6 +7559,16 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int):
     )
 
 
+@app.get("/users/{user_id}/optimized-cvs/{optimized_cv_id}/download-docx")
+def download_optimized_cv_docx(user_id: int, optimized_cv_id: int):
+    return download_optimized_cv(user_id, optimized_cv_id, format="docx")
+
+
+@app.get("/users/{user_id}/optimized-cvs/{optimized_cv_id}/download-pdf")
+def download_optimized_cv_pdf(user_id: int, optimized_cv_id: int):
+    return download_optimized_cv(user_id, optimized_cv_id, format="pdf")
+
+
 @app.get("/users/{user_id}/optimized-cvs")
 def list_optimized_cvs(user_id: int):
     conn = get_connection()
@@ -6823,7 +7579,8 @@ def list_optimized_cvs(user_id: int):
         raise HTTPException(status_code=404, detail="Utente non trovato.")
     
     cursor.execute("""
-    SELECT id, filename, content_type, created_at
+    SELECT id, filename, content_type, created_at, target_role, target_company,
+           job_description, analysis_score, docx_file_base64, pdf_file_base64, generation_status
     FROM optimized_cvs
     WHERE user_id = ?
     ORDER BY created_at DESC
@@ -6838,6 +7595,16 @@ def list_optimized_cvs(user_id: int):
                 "filename": row[1],
                 "content_type": row[2],
                 "created_at": row[3],
+                "target_role": row[4],
+                "target_company": row[5],
+                "job_description": row[6],
+                "analysis_score": row[7],
+                "has_docx": bool(row[8]),
+                "has_pdf": bool(row[9]),
+                "generation_status": row[10] or "completed",
+                "docx_download_url": f"/users/{user_id}/optimized-cvs/{row[0]}/file?format=docx" if row[8] else None,
+                "pdf_download_url": f"/users/{user_id}/optimized-cvs/{row[0]}/file?format=pdf" if row[9] else None,
+                "download_url": f"/users/{user_id}/optimized-cvs/{row[0]}/file",
             }
             for row in rows
         ]

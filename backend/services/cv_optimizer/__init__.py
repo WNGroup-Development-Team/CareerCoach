@@ -6,6 +6,7 @@ from .pipeline import (
     MatchingEngine,
     ResumeParser,
     ResumeRewriter,
+    RewriteInstruction,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "MatchingEngine",
     "ResumeParser",
     "ResumeRewriter",
+    "RewriteInstruction",
 ]
