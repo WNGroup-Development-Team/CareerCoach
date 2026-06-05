@@ -25,7 +25,7 @@ SECTION_ALIASES = {
     "competenze": {"competenze", "skills", "hard skills", "soft skills", "competenze tecniche"},
     "lingue": {"lingue", "languages"},
     "certificazioni": {"certificazioni", "certificati", "certifications"},
-    "progetti": {"progetti", "projects"},
+    "progetti": {"progetti", "projects", "pagina aggiuntiva", "esperienze aggiuntive", "attivita rilevanti"},
     "contatti": {"contatti", "contact", "contacts"},
 }
 
@@ -201,16 +201,16 @@ class CoachSuggestionEngine:
             return []
         accepted = []
         for item in suggestions:
-            if isinstance(item, str) and item.strip():
-                accepted.append({"title": "", "description": item.strip(), "category": "phrases"})
-            elif isinstance(item, dict):
+            if isinstance(item, dict) and item.get("type") == "actionableEdit":
                 description = str(item.get("description") or item.get("action") or item.get("coach_tip") or "").strip()
                 proposed_text = str(item.get("proposed_text") or item.get("replacement") or "").strip()
                 original_text = str(item.get("original_text") or item.get("original") or "").strip()
-                if description or proposed_text:
+                section = str(item.get("section") or "").strip()
+                if proposed_text and original_text and section:
                     accepted.append({
                         **item,
                         "description": description,
+                        "section": section,
                         "original_text": original_text,
                         "proposed_text": proposed_text,
                     })
@@ -413,13 +413,17 @@ class DocxPreserver:
         for instruction in instructions:
             if not self._valid_instruction(instruction):
                 continue
+            if self._should_append(instruction):
+                self._append_section(document, instruction)
+                applied += 1
+                continue
             if instruction.original and self._replace_exact(paragraphs, instruction):
                 applied += 1
                 continue
             if instruction.original and self._replace_similar(paragraphs, instruction):
                 applied += 1
                 continue
-            if not instruction.original and self._replace_in_section(paragraphs, instruction):
+            if self._replace_in_section(paragraphs, instruction):
                 applied += 1
 
         output = io.BytesIO()
@@ -482,10 +486,6 @@ class DocxPreserver:
         return False
 
     def _replace_in_section(self, paragraphs: List[Any], instruction: RewriteInstruction) -> bool:
-        if instruction.original and instruction.original.strip():
-            self._log_blocked(instruction, "istruzione con testo originale ma senza match sicuro")
-            return False
-
         section_names = self._section_candidates(instruction)
         if not section_names:
             return False
@@ -512,6 +512,38 @@ class DocxPreserver:
             return True
         self._log_blocked(instruction, "nessun paragrafo sostituibile trovato sotto la sezione")
         return False
+
+    def _should_append(self, instruction: RewriteInstruction) -> bool:
+        section = normalize_text(instruction.section)
+        category = normalize_text(instruction.category)
+        return (
+            not instruction.original.strip()
+            and (
+                section in {"progetti", "pagina aggiuntiva", "esperienze aggiuntive", "certificazioni", "attivita rilevanti", "competenze tecniche"}
+                or category in {"project", "extra_page"}
+            )
+        )
+
+    def _append_section(self, document, instruction: RewriteInstruction) -> None:
+        heading = (instruction.section or "PROGETTI").strip().upper()
+        if heading == "PAGINA AGGIUNTIVA":
+            heading = "PROGETTI"
+        document.add_page_break()
+        heading_paragraph = document.add_paragraph(heading)
+        body_paragraph = document.add_paragraph(instruction.replacement)
+        reference = self._last_styled_paragraph(document)
+        if reference is not None:
+            try:
+                body_paragraph.style = reference.style
+            except Exception:
+                pass
+
+    def _last_styled_paragraph(self, document):
+        for paragraph in reversed(document.paragraphs):
+            text = (paragraph.text or "").strip()
+            if text and not is_section_heading(text):
+                return paragraph
+        return None
 
     def _section_candidates(self, instruction: RewriteInstruction) -> List[str]:
         raw_values = [instruction.section, instruction.category]
