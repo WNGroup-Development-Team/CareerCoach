@@ -1505,6 +1505,19 @@ textarea {
   border: 1px solid #cfe2f2;
   border-radius: 8px;
   background: #f8fbff;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.coach-suggestion-option.accepted {
+  border-color: #7cc89a;
+  background: #f2fbf5;
+  box-shadow: 0 12px 26px rgba(46, 125, 50, 0.1);
+}
+
+.coach-suggestion-option.rejected {
+  border-color: #ef9a9a;
+  background: #fff7f7;
+  box-shadow: 0 12px 26px rgba(180, 35, 24, 0.08);
 }
 
 .coach-suggestion-option input {
@@ -1518,6 +1531,31 @@ textarea {
   display: grid;
   gap: 5px;
   min-width: 0;
+}
+
+.coach-suggestion-option .suggestion-state-icon {
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  background: #e7f1fb;
+  color: #43617d;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  transition: background-color 180ms ease, color 180ms ease, transform 180ms ease;
+}
+
+.coach-suggestion-option.accepted .suggestion-state-icon {
+  background: #2e7d32;
+  color: #ffffff;
+  transform: scale(1.05);
+}
+
+.coach-suggestion-option.rejected .suggestion-state-icon {
+  background: #b42318;
+  color: #ffffff;
+  transform: scale(1.05);
 }
 
 .coach-suggestion-option b {
@@ -1538,6 +1576,88 @@ textarea {
 
 .coach-suggestion-option em {
   color: #9a5f00;
+}
+
+.suggestion-status-pill {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 5px 9px;
+  border: 1px solid #cfe2f2;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #506579;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.suggestion-status-pill.accepted {
+  border-color: #2e7d32;
+  background: #eaf7ed;
+  color: #246328;
+}
+
+.suggestion-status-pill.rejected {
+  border-color: #b42318;
+  background: #fff0ef;
+  color: #912018;
+}
+
+.suggestion-choice-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.suggestion-choice-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 10px 14px;
+  border: 1px solid #cbd8e5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #506579;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.suggestion-choice-button:not(.active):hover {
+  border-color: #8fb2d4;
+  background: #f3f8fc;
+  color: #263548;
+  transform: translateY(-1px);
+}
+
+.suggestion-choice-button.active {
+  color: #ffffff;
+  transform: scale(1.02);
+}
+
+.suggestion-choice-button.accept.active {
+  border-color: #2e7d32;
+  background: #2e7d32;
+  box-shadow: 0 10px 22px rgba(46, 125, 50, 0.22);
+}
+
+.suggestion-choice-button.reject.active {
+  border-color: #b42318;
+  background: #b42318;
+  box-shadow: 0 10px 22px rgba(180, 35, 24, 0.18);
+}
+
+.suggestion-choice-button.accept:not(.active):hover {
+  border-color: #2e7d32;
+  color: #246328;
+}
+
+.suggestion-choice-button.reject:not(.active):hover {
+  border-color: #b42318;
+  color: #912018;
 }
 
 .skill-confirmation-card {

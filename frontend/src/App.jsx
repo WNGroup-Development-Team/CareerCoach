@@ -6,6 +6,7 @@ import PersonalizeExperience from "./PersonalizeExperience";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
+const CV_SUGGESTION_STATUS_KEY_PREFIX = "careercoach_cv_suggestion_status";
 const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
 const CV_FLOW_STEPS = [
@@ -189,6 +190,47 @@ const isActionableCoachSuggestion = (item) =>
       normalizeSuggestionText(`${item.original_text} ${item.proposed_text}`).includes(marker)
     )
   );
+
+const getCvSuggestionStatusStorageKey = (targetUserId, suggestions = []) => {
+  const ids = suggestions.map((suggestion) => suggestion.id).sort().join("|");
+  return `${CV_SUGGESTION_STATUS_KEY_PREFIX}:${targetUserId || "guest"}:${ids}`;
+};
+
+const getPendingCoachSuggestionStatuses = (suggestions = []) =>
+  suggestions.reduce((selected, suggestion) => ({
+    ...selected,
+    [suggestion.id]: "pending",
+  }), {});
+
+const loadCoachSuggestionStatuses = (targetUserId, suggestions = []) => {
+  const pending = getPendingCoachSuggestionStatuses(suggestions);
+  if (!suggestions.length) {
+    return pending;
+  }
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(getCvSuggestionStatusStorageKey(targetUserId, suggestions)) || "{}");
+    return suggestions.reduce((selected, suggestion) => {
+      const savedStatus = saved[suggestion.id];
+      return {
+        ...selected,
+        [suggestion.id]: savedStatus === "accepted" || savedStatus === "rejected" ? savedStatus : "pending",
+      };
+    }, {});
+  } catch {
+    return pending;
+  }
+};
+
+const saveCoachSuggestionStatuses = (targetUserId, suggestions = [], statuses = {}) => {
+  if (!suggestions.length) {
+    return;
+  }
+  localStorage.setItem(
+    getCvSuggestionStatusStorageKey(targetUserId, suggestions),
+    JSON.stringify(statuses)
+  );
+};
 
 const getCoachSuggestionsFromAnalysis = (analysis) => {
   if (!analysis) {
@@ -682,7 +724,6 @@ function App() {
   const [cvAdditionalData, setCvAdditionalData] = useState(getEmptyCvAdditionalData);
   const [cvAdaptationAnswers, setCvAdaptationAnswers] = useState({});
   const [selectedCoachSuggestions, setSelectedCoachSuggestions] = useState({});
-  const [currentCoachSuggestionIndex, setCurrentCoachSuggestionIndex] = useState(0);
   const [currentSkillConfirmationIndex, setCurrentSkillConfirmationIndex] = useState(0);
   const [confirmedSkillDetails, setConfirmedSkillDetails] = useState({});
   const [expandedCoachSuggestionText, setExpandedCoachSuggestionText] = useState({});
@@ -1811,13 +1852,7 @@ function App() {
       };
       setCvOptimizationAnalysis(nextAnalysis);
       const nextCoachSuggestions = getCoachSuggestionsFromAnalysis(nextAnalysis);
-      setSelectedCoachSuggestions(
-        nextCoachSuggestions.reduce((selected, suggestion) => ({
-          ...selected,
-          [suggestion.id]: "pending",
-        }), {})
-      );
-      setCurrentCoachSuggestionIndex(0);
+      setSelectedCoachSuggestions(loadCoachSuggestionStatuses(userId, nextCoachSuggestions));
       setCurrentSkillConfirmationIndex(0);
       setCvAdaptationAnswers({});
       setCvAdditionalData(getEmptyCvAdditionalData());
@@ -1889,7 +1924,7 @@ function App() {
     }));
     const hasAdditionalInfo = Boolean(userAdditionalData.additional_notes?.trim()) || (userAdditionalData.adaptation_answers || []).length > 0 || confirmedSkillPayload.length > 0;
     if (selectedCoachSuggestionItems.filter(isActionableCoachSuggestion).length === 0 && !hasAdditionalInfo) {
-      setError("Non hai confermato modifiche da applicare.");
+      setError("Non hai accettato modifiche da applicare.");
       return;
     }
 
@@ -2059,31 +2094,16 @@ function App() {
     }
   };
 
-  const goToNextCoachSuggestion = () => {
-    setCurrentCoachSuggestionIndex((current) => Math.min(current + 1, Math.max(coachSuggestions.length - 1, 0)));
-  };
-
   const updateCoachSuggestionStatus = (suggestionId, status) => {
     setCvAdditionalDataError("");
-    setSelectedCoachSuggestions((current) => ({
-      ...current,
-      [suggestionId]: status,
-    }));
-    goToNextCoachSuggestion();
-  };
-
-  const goToPreviousCoachSuggestion = () => {
-    setCurrentCoachSuggestionIndex((current) => Math.max(current - 1, 0));
-  };
-
-  const skipAllCoachSuggestions = () => {
-    setSelectedCoachSuggestions((current) =>
-      coachSuggestions.reduce((next, suggestion) => ({
-        ...next,
-        [suggestion.id]: current[suggestion.id] === "accepted" ? "accepted" : "rejected",
-      }), {})
-    );
-    setCurrentCoachSuggestionIndex(Math.max(coachSuggestions.length - 1, 0));
+    setSelectedCoachSuggestions((current) => {
+      const next = {
+        ...current,
+        [suggestionId]: status,
+      };
+      saveCoachSuggestionStatuses(userId, coachSuggestions, next);
+      return next;
+    });
   };
 
   const goToNextSkillConfirmation = () => {
@@ -2760,11 +2780,6 @@ function App() {
   const coachSuggestions = getCoachSuggestionsFromAnalysis(cvOptimizationAnalysis);
   const selectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "accepted" || selectedCoachSuggestions[item.id] === true);
   const rejectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "rejected");
-  const pendingCoachSuggestionItems = coachSuggestions.filter((item) => !selectedCoachSuggestions[item.id] || selectedCoachSuggestions[item.id] === "pending");
-  const currentCoachSuggestion = coachSuggestions[currentCoachSuggestionIndex] || null;
-  const coachSuggestionProgressLabel = coachSuggestions.length
-    ? `Suggerimento ${Math.min(currentCoachSuggestionIndex + 1, coachSuggestions.length)} di ${coachSuggestions.length}`
-    : "Nessun suggerimento";
   const coachSuggestionsByCategory = coachSuggestions.reduce((groups, item) => {
     const category = item.category || "phrases";
     return {
@@ -3764,7 +3779,7 @@ function App() {
           <div className="cv-strategy-heading">
             <h2>Personalizza e genera CV ottimizzato</h2>
             <p>
-              Rivedi i suggerimenti proposti dal coach, conferma solo quelli che vuoi applicare e aggiungi eventuali informazioni extra. Le modifiche rifiutate non verranno inserite nel CV finale.
+              Rivedi i suggerimenti proposti dal coach, accetta solo quelli che vuoi applicare e aggiungi eventuali informazioni extra. Le modifiche rifiutate non verranno inserite nel CV finale.
             </p>
           </div>
 
@@ -3775,41 +3790,62 @@ function App() {
             </div>
             {coachSuggestions.length > 0 ? (
               <div className="ai-suggestion-card-list">
-                {coachSuggestions.map((suggestion, index) => (
-                  <div className="coach-suggestion-option ai-suggestion-card" key={suggestion.id}>
-                    <span aria-hidden="true">{selectedCoachSuggestions[suggestion.id] === "accepted" ? "+" : selectedCoachSuggestions[suggestion.id] === "rejected" ? "x" : "i"}</span>
-                    <span>
-                      <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
-                      <b>{suggestion.title}</b>
-                      <small><b>Categoria:</b> {suggestion.category_label}</small>
-                      <small><b>Sezione:</b> {suggestion.section}</small>
-                      <small>{suggestion.reason || suggestion.description}</small>
-                      <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
-                      {suggestion.original_text.length > 300 && (
-                        <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
-                          {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
-                        </button>
-                      )}
-                      <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
-                      {suggestion.proposed_text.length > 300 && (
-                        <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
-                          {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
-                        </button>
-                      )}
-                      {suggestion.keywords_added.length > 0 && (
-                        <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
-                      )}
-                      <div className="optimized-cv-actions">
-                        <button className="cv-next-button" type="button" onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}>
-                          Conferma
-                        </button>
-                        <button className="secondary-button" type="button" onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}>
-                          Rifiuta
-                        </button>
-                      </div>
-                    </span>
-                  </div>
-                ))}
+                {coachSuggestions.map((suggestion, index) => {
+                  const suggestionStatus = selectedCoachSuggestions[suggestion.id] || "pending";
+                  const isAccepted = suggestionStatus === "accepted";
+                  const isRejected = suggestionStatus === "rejected";
+
+                  return (
+                    <div className={`coach-suggestion-option ai-suggestion-card ${suggestionStatus}`} key={suggestion.id}>
+                      <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
+                      <span>
+                        <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
+                        <b>{suggestion.title}</b>
+                        <small><b>Categoria:</b> {suggestion.category_label}</small>
+                        <small><b>Sezione:</b> {suggestion.section}</small>
+                        <small>{suggestion.reason || suggestion.description}</small>
+                        <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
+                        {suggestion.original_text.length > 300 && (
+                          <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
+                            {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
+                          </button>
+                        )}
+                        <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
+                        {suggestion.proposed_text.length > 300 && (
+                          <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
+                            {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
+                          </button>
+                        )}
+                        {suggestion.keywords_added.length > 0 && (
+                          <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
+                        )}
+                        <small className={`suggestion-status-pill ${suggestionStatus}`}>
+                          Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
+                        </small>
+                        <div className="suggestion-choice-actions" aria-label={`Scelta per ${suggestion.title}`}>
+                          <button
+                            className={`suggestion-choice-button accept ${isAccepted ? "active" : ""}`}
+                            type="button"
+                            aria-pressed={isAccepted}
+                            onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}
+                          >
+                            <span aria-hidden="true">✓</span>
+                            Accetta
+                          </button>
+                          <button
+                            className={`suggestion-choice-button reject ${isRejected ? "active" : ""}`}
+                            type="button"
+                            aria-pressed={isRejected}
+                            onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}
+                          >
+                            <span aria-hidden="true">✖</span>
+                            Rifiuta
+                          </button>
+                        </div>
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <p className="cv-strategy-note">
@@ -3817,7 +3853,7 @@ function App() {
               </p>
             )}
             <div className="coach-suggestion-group">
-              <strong>Modifiche confermate</strong>
+              <strong>Modifiche accettate</strong>
               {selectedCoachSuggestionItems.length > 0 ? (
                 selectedCoachSuggestionItems.map((item) => (
                   <div className="cv-strategy-item success" key={`accepted-${item.id}`}>
@@ -3829,16 +3865,9 @@ function App() {
                   </div>
                 ))
               ) : (
-                <p className="cv-strategy-note">Nessuna modifica confermata finora.</p>
+                <p className="cv-strategy-note">Nessuna modifica accettata finora.</p>
               )}
             </div>
-            {coachSuggestions.length > 0 && (
-              <div className="optimized-cv-actions">
-                <button className="secondary-button" type="button" onClick={skipAllCoachSuggestions}>
-                  Rifiuta tutti i suggerimenti coach non confermati
-                </button>
-              </div>
-            )}
             {rejectedCoachSuggestionItems.length > 0 && (
               <div className="coach-suggestion-group">
                 <strong>Modifiche rifiutate</strong>
@@ -3862,47 +3891,68 @@ function App() {
             </div>
             {skillConfirmationItems.length > 0 ? (
               <div className="ai-suggestion-card-list">
-                {skillConfirmationItems.map((item, index) => (
-                  <div className="coach-suggestion-option skill-confirmation-card ai-suggestion-card" key={item.id}>
-                    <span aria-hidden="true">{item.status === "confirmed" || item.status === "accepted" ? "+" : item.status === "rejected" ? "x" : "?"}</span>
-                    <span>
-                      <small>{item.type === "keywordConfirmation" ? "Keyword ATS" : "Skill"} {index + 1} di {skillConfirmationItems.length}</small>
-                      <b>{item.name}</b>
-                      <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
-                      <small><b>Perche puo essere utile:</b> {item.reason}</small>
-                      <small>
-                        <b>Stato:</b> {item.already_present
-                          ? "Risulta gia presente o supportata dal CV."
-                          : "Non risulta chiaramente presente nel CV."}
-                      </small>
-                      {!item.already_present && (
+                {skillConfirmationItems.map((item, index) => {
+                  const itemStatus = item.status === "confirmed" ? "accepted" : item.status;
+                  const isAccepted = itemStatus === "accepted";
+                  const isRejected = itemStatus === "rejected";
+
+                  return (
+                    <div className={`coach-suggestion-option skill-confirmation-card ai-suggestion-card ${itemStatus}`} key={item.id}>
+                      <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
+                      <span>
+                        <small>{item.type === "keywordConfirmation" ? "Keyword ATS" : "Skill"} {index + 1} di {skillConfirmationItems.length}</small>
+                        <b>{item.name}</b>
+                        <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
+                        <small><b>Perche puo essere utile:</b> {item.reason}</small>
                         <small>
-                          Se la confermi, aggiungi un esempio reale o un contesto: verra usata solo se coerente con CV e informazioni fornite.
+                          <b>Stato:</b> {item.already_present
+                            ? "Risulta gia presente o supportata dal CV."
+                            : "Non risulta chiaramente presente nel CV."}
                         </small>
-                      )}
-                      <label className="cv-additional-field">
-                        <span>Dove l'hai usata?</span>
-                        <textarea
-                          value={item.user_example}
-                          onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
-                          placeholder={`Esempio: ho usato ${item.name} in un progetto universitario o lavorativo...`}
-                          rows={2}
-                        />
-                      </label>
-                      <div className="optimized-cv-actions">
-                        <button className="cv-next-button" type="button" onClick={() => updateSkillConfirmation(item.id, "confirmed")}>
-                          Conferma
-                        </button>
-                        <button className="secondary-button" type="button" onClick={() => updateSkillConfirmation(item.id, "rejected")}>
-                          Rifiuta
-                        </button>
-                      </div>
-                    </span>
-                  </div>
-                ))}
+                        {!item.already_present && (
+                          <small>
+                            Se la accetti, aggiungi un esempio reale o un contesto: verra usata solo se coerente con CV e informazioni fornite.
+                          </small>
+                        )}
+                        <label className="cv-additional-field">
+                          <span>Dove l'hai usata?</span>
+                          <textarea
+                            value={item.user_example}
+                            onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
+                            placeholder={`Esempio: ho usato ${item.name} in un progetto universitario o lavorativo...`}
+                            rows={2}
+                          />
+                        </label>
+                        <small className={`suggestion-status-pill ${itemStatus}`}>
+                          Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
+                        </small>
+                        <div className="suggestion-choice-actions" aria-label={`Scelta per ${item.name}`}>
+                          <button
+                            className={`suggestion-choice-button accept ${isAccepted ? "active" : ""}`}
+                            type="button"
+                            aria-pressed={isAccepted}
+                            onClick={() => updateSkillConfirmation(item.id, "accepted")}
+                          >
+                            <span aria-hidden="true">✓</span>
+                            Accetta
+                          </button>
+                          <button
+                            className={`suggestion-choice-button reject ${isRejected ? "active" : ""}`}
+                            type="button"
+                            aria-pressed={isRejected}
+                            onClick={() => updateSkillConfirmation(item.id, "rejected")}
+                          >
+                            <span aria-hidden="true">✖</span>
+                            Rifiuta
+                          </button>
+                        </div>
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
-              <p className="cv-strategy-note">Nessuna skill o keyword specifica da confermare.</p>
+              <p className="cv-strategy-note">Nessuna skill o keyword specifica da valutare.</p>
             )}
             <div className="coach-suggestion-group confirmation-summary-grid">
               <strong>Riepilogo competenze</strong>
@@ -3917,7 +3967,7 @@ function App() {
                   </div>
                 ))
               ) : (
-                <p className="cv-strategy-note">Nessuna skill o keyword confermata finora.</p>
+                <p className="cv-strategy-note">Nessuna skill o keyword accettata finora.</p>
               )}
               {rejectedSkillConfirmations.map((item) => (
                 <div className="cv-strategy-item warning" key={`rejected-skill-${item.id}`}>
@@ -3988,7 +4038,7 @@ function App() {
           <div className="cv-strategy-section confirmed-changes-summary">
             <div className="cv-strategy-section-title">
               <span>+</span>
-              <h3>Modifiche confermate</h3>
+              <h3>Modifiche accettate</h3>
             </div>
             {[
               ["Profilo", confirmedChangesSummary.profile],
@@ -4010,7 +4060,7 @@ function App() {
                     </div>
                   ))
                 ) : (
-                  <p className="cv-strategy-note">Nessuna modifica confermata.</p>
+                  <p className="cv-strategy-note">Nessuna modifica accettata.</p>
                 )}
               </div>
             ))}
@@ -4022,7 +4072,7 @@ function App() {
               <h3>Genera CV ottimizzato</h3>
             </div>
             <p className="cv-strategy-note">
-              Genera una versione adattata alla candidatura applicando solo le modifiche selezionate e usando solo informazioni reali o confermate.
+              Genera una versione adattata alla candidatura applicando solo le modifiche selezionate e usando solo informazioni reali o accettate.
             </p>
             <div className="optimized-cv-actions">
               <button
