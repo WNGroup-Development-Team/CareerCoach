@@ -69,10 +69,11 @@ def tokenize(value: str) -> List[str]:
 
 def is_section_heading(line: str) -> bool:
     clean = normalize_text(line).strip(":")
+    stripped = (line or "").strip().strip(":")
     return clean in SECTION_HEADINGS or (
         bool(clean)
         and len(clean) <= 42
-        and clean.upper() == (line or "").strip().upper()
+        and stripped.upper() == stripped
         and any(char.isalpha() for char in clean)
     )
 
@@ -106,15 +107,34 @@ class RewriteInstruction:
     source_id: str = ""
 
 
+@dataclass
+class ParagraphContext:
+    paragraph: Any
+    section: str
+
+
 class ResumeParser:
+    def _prepared_lines(self, cv_text: str) -> List[str]:
+        prepared = re.sub(r"\r\n?", "\n", cv_text or "")
+        prepared = re.sub(r"[ \t]+", " ", prepared)
+        heading_pattern = "|".join(
+            re.escape(heading)
+            for heading in sorted(SECTION_HEADINGS, key=len, reverse=True)
+        )
+        if heading_pattern:
+            prepared = re.sub(
+                rf"(?<![\wÀ-ÖØ-öø-ÿ])({heading_pattern})\s*:?(?=\s|$)",
+                lambda match: f"\n{match.group(1).strip()}\n",
+                prepared,
+                flags=re.IGNORECASE,
+            )
+        return [line.strip() for line in prepared.splitlines() if line.strip()]
+
     def parse_text(self, cv_text: str) -> List[ResumeSection]:
         sections: List[ResumeSection] = []
         current = ResumeSection(name="intestazione", heading="", lines=[])
 
-        for raw_line in (cv_text or "").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
+        for line in self._prepared_lines(cv_text):
             if is_section_heading(line):
                 if current.heading or current.lines:
                     sections.append(current)
@@ -408,7 +428,7 @@ class DocxPreserver:
         from docx import Document
 
         document = Document(io.BytesIO(original_file_bytes))
-        paragraphs = self._paragraphs(document)
+        contexts = self._paragraph_contexts(document)
         applied = 0
         for instruction in instructions:
             if not self._valid_instruction(instruction):
@@ -417,26 +437,53 @@ class DocxPreserver:
                 self._append_section(document, instruction)
                 applied += 1
                 continue
-            if instruction.original and self._replace_exact(paragraphs, instruction):
+            if instruction.original and self._replace_exact(contexts, instruction):
                 applied += 1
                 continue
-            if instruction.original and self._replace_similar(paragraphs, instruction):
+            if instruction.original and self._replace_similar(contexts, instruction):
                 applied += 1
                 continue
-            if self._replace_in_section(paragraphs, instruction):
+            if self._replace_in_section(contexts, instruction):
                 applied += 1
 
         output = io.BytesIO()
         document.save(output)
         return output.getvalue(), applied
 
-    def _paragraphs(self, document) -> List[Any]:
-        paragraphs = list(document.paragraphs)
+    def _paragraph_contexts(self, document) -> List[ParagraphContext]:
+        contexts: List[ParagraphContext] = []
+        current_section = "intestazione"
+        for paragraph in document.paragraphs:
+            text = (paragraph.text or "").strip()
+            if is_section_heading(text):
+                current_section = canonical_section(text)
+            contexts.append(ParagraphContext(paragraph=paragraph, section=current_section))
         for table in document.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    paragraphs.extend(cell.paragraphs)
-        return paragraphs
+            contexts.extend(self._table_paragraph_contexts(table, current_section))
+        return contexts
+
+    def _table_paragraph_contexts(self, table, inherited_section: str = "intestazione") -> List[ParagraphContext]:
+        contexts: List[ParagraphContext] = []
+        current_section = inherited_section or "intestazione"
+        for row in table.rows:
+            row_section = current_section
+            for cell in row.cells:
+                cell_section = row_section
+                for paragraph in cell.paragraphs:
+                    text = (paragraph.text or "").strip()
+                    if is_section_heading(text):
+                        cell_section = canonical_section(text)
+                        row_section = cell_section
+                        current_section = cell_section
+                    contexts.append(ParagraphContext(paragraph=paragraph, section=cell_section))
+                for nested_table in cell.tables:
+                    nested_contexts = self._table_paragraph_contexts(nested_table, cell_section)
+                    contexts.extend(nested_contexts)
+                    if nested_contexts:
+                        cell_section = nested_contexts[-1].section
+                        row_section = cell_section
+                        current_section = cell_section
+        return contexts
 
     def _valid_instruction(self, instruction: RewriteInstruction) -> bool:
         if not instruction.replacement.strip():
@@ -446,14 +493,15 @@ class DocxPreserver:
             return False
         return True
 
-    def _replace_exact(self, paragraphs: List[Any], instruction: RewriteInstruction) -> bool:
+    def _replace_exact(self, contexts: List[ParagraphContext], instruction: RewriteInstruction) -> bool:
         original_norm = normalize_text(instruction.original)
-        for index, paragraph in enumerate(paragraphs):
+        for context in contexts:
+            paragraph = context.paragraph
             paragraph_text = paragraph.text or ""
             if not self._is_editable_paragraph(paragraph):
                 continue
             if normalize_text(paragraph_text) == original_norm or instruction.original in paragraph_text:
-                section = self._section_before(paragraphs, index)
+                section = context.section
                 if not self._section_matches_instruction(section, instruction):
                     self._log_blocked(instruction, f"testo originale trovato fuori sezione: {section or 'sconosciuta'}")
                     continue
@@ -461,16 +509,17 @@ class DocxPreserver:
                 return True
         return False
 
-    def _replace_similar(self, paragraphs: List[Any], instruction: RewriteInstruction) -> bool:
+    def _replace_similar(self, contexts: List[ParagraphContext], instruction: RewriteInstruction) -> bool:
         original_tokens = set(tokenize(instruction.original))
         if len(original_tokens) < 4:
             return False
         best = None
         best_score = 0
-        for index, paragraph in enumerate(paragraphs):
+        for context in contexts:
+            paragraph = context.paragraph
             if not self._is_editable_paragraph(paragraph):
                 continue
-            current_section = self._section_before(paragraphs, index)
+            current_section = context.section
             if not self._section_matches_instruction(current_section, instruction):
                 continue
             paragraph_tokens = set(tokenize(paragraph.text or ""))
@@ -485,14 +534,14 @@ class DocxPreserver:
             return True
         return False
 
-    def _replace_in_section(self, paragraphs: List[Any], instruction: RewriteInstruction) -> bool:
+    def _replace_in_section(self, contexts: List[ParagraphContext], instruction: RewriteInstruction) -> bool:
         section_names = self._section_candidates(instruction)
         if not section_names:
             return False
 
         start_index = None
-        for index, paragraph in enumerate(paragraphs):
-            text = normalize_text(paragraph.text or "").strip(":")
+        for index, context in enumerate(contexts):
+            text = normalize_text(context.paragraph.text or "").strip(":")
             if self._is_heading_for_candidates(text, section_names):
                 start_index = index
                 break
@@ -500,12 +549,15 @@ class DocxPreserver:
             self._log_blocked(instruction, "sezione non trovata in modo sicuro")
             return False
 
-        for paragraph in paragraphs[start_index + 1:start_index + 8]:
+        for context in contexts[start_index + 1:start_index + 10]:
+            paragraph = context.paragraph
             text = (paragraph.text or "").strip()
             if not text:
                 continue
             if is_section_heading(text):
                 break
+            if not self._section_matches_instruction(context.section, instruction):
+                continue
             if not self._is_editable_paragraph(paragraph):
                 continue
             self._replace_preserving_first_run(paragraph, instruction.replacement)
@@ -570,13 +622,6 @@ class DocxPreserver:
     def _is_heading_for_candidates(self, normalized_text: str, section_names: List[str]) -> bool:
         clean = normalize_text(normalized_text).strip(":")
         return clean in section_names
-
-    def _section_before(self, paragraphs: List[Any], index: int) -> str:
-        for paragraph in reversed(paragraphs[:index]):
-            text = (paragraph.text or "").strip()
-            if is_section_heading(text):
-                return canonical_section(text)
-        return "intestazione"
 
     def _section_matches_instruction(self, current_section: str, instruction: RewriteInstruction) -> bool:
         expected = canonical_section(instruction.section or instruction.category or "")

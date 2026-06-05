@@ -6417,10 +6417,14 @@ def find_education_fallback(cv_text: str) -> str:
 def split_cv_edit_sections(cv_text: str) -> Dict[str, str]:
     prepared = re.sub(r"\r\n?", "\n", cv_text or "").strip()
     prepared = re.sub(r"[ \t]+", " ", prepared)
-    for marker in sorted(EDIT_SECTION_MARKERS, key=len, reverse=True):
+    marker_pattern = "|".join(
+        re.escape(marker)
+        for marker in sorted(EDIT_SECTION_MARKERS, key=len, reverse=True)
+    )
+    if marker_pattern:
         prepared = re.sub(
-            rf"(?<![\r\n])\b{re.escape(marker)}\b",
-            f"\n{marker}",
+            rf"(?<![\wÀ-ÖØ-öø-ÿ])({marker_pattern})\s*:?(?=\s|$)",
+            lambda match: f"\n{match.group(1).strip()}\n",
             prepared,
             flags=re.IGNORECASE,
         )
