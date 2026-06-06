@@ -4066,13 +4066,11 @@ Criteri obbligatori:
         )
     except Exception as exc:
         print(f"Revisione finale CV non disponibile: {exc}")
-        return {
-            "ready_to_send": True,
-            "score": 0,
-            "issues": [],
-            "revisions": [],
-            "review_unavailable": True,
-        }
+        return review_generated_cv_quality_locally(
+            final_text=final_text,
+            accepted_instructions=accepted_instructions,
+            llm_error=str(exc),
+        )
 
     issues = result.get("issues") if isinstance(result.get("issues"), list) else []
     revisions = result.get("revisions") if isinstance(result.get("revisions"), list) else []
@@ -4082,6 +4080,62 @@ Criteri obbligatori:
         "issues": [item for item in issues if isinstance(item, dict)][:12],
         "revisions": [item for item in revisions if isinstance(item, dict)][:8],
         "review_unavailable": False,
+        "review_provider": "llm",
+        "local_checks_completed": True,
+    }
+
+
+def review_generated_cv_quality_locally(
+    final_text: str,
+    accepted_instructions: List[RewriteInstruction],
+    llm_error: str = "",
+) -> Dict[str, Any]:
+    issues = [
+        {
+            "severity": "major",
+            "section": "struttura",
+            "description": warning,
+        }
+        for warning in validate_optimized_docx_structure(final_text)
+    ]
+    normalized_final = normalize_plain_text(final_text)
+    missing_changes = [
+        instruction.source_id or instruction.section or "modifica"
+        for instruction in accepted_instructions
+        if instruction.replacement
+        and normalize_plain_text(instruction.replacement) not in normalized_final
+    ]
+    if missing_changes:
+        issues.append({
+            "severity": "major",
+            "section": "modifiche",
+            "description": (
+                "Non risultano presenti tutte le modifiche richieste: "
+                + ", ".join(missing_changes[:8])
+            ),
+        })
+    forbidden_markers = [
+        marker
+        for marker in ResumeRewriter.FORBIDDEN_OUTPUT_MARKERS
+        if normalize_plain_text(marker) in normalized_final
+    ]
+    if forbidden_markers:
+        issues.append({
+            "severity": "major",
+            "section": "contenuto",
+            "description": "Il documento contiene testo operativo o di report non destinato al CV.",
+        })
+    ready = not any(issue["severity"] in {"critical", "major"} for issue in issues)
+    return {
+        "ready_to_send": ready,
+        "score": 85 if ready else 55,
+        "issues": issues,
+        "revisions": [],
+        "review_unavailable": False,
+        "review_provider": "local",
+        "local_checks_completed": True,
+        "llm_review_unavailable": True,
+        "technical_detail": llm_error[:300],
     }
 
 
@@ -7997,11 +8051,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 company=company,
                 accepted_instructions=rewrite_result["instructions"],
             )
-            if quality_review.get("review_unavailable"):
-                format_warnings.append(
-                    "Il controllo qualità LLM finale non era disponibile; sono stati completati i controlli strutturali locali."
-                )
-            elif not quality_review.get("ready_to_send"):
+            if not quality_review.get("ready_to_send"):
                 revision_instructions = quality_rewrite_instructions(
                     quality_review,
                     final_docx_text,

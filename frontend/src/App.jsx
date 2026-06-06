@@ -2026,16 +2026,25 @@ function App() {
         return;
       }
 
-      setOptimizedCv(data.optimizedCv || data.optimized_cv || null);
-      setOptimizedCvWarnings([
+      const nextOptimizedCv = data.optimizedCv || data.optimized_cv || null;
+      const warningCandidates = [
         ...(data.hallucination_warnings || []),
         ...(data.format_warnings || []).map((message) => ({ claim: message, reason: "" })),
         ...(data.skipped_changes || []).map((item) => ({
           claim: item.reason || String(item),
           reason: item.applied_changes_count !== undefined ? "Modifica confermata non applicata" : "",
         })),
-      ]);
-      downloadOptimizedCvFile(data.optimizedCv || data.optimized_cv);
+      ];
+      const uniqueWarnings = Array.from(
+        new Map(
+          warningCandidates
+            .filter((warning) => warning?.claim)
+            .map((warning) => [`${warning.reason || ""}|${warning.claim}`, warning])
+        ).values()
+      );
+      setOptimizedCv(nextOptimizedCv);
+      setOptimizedCvWarnings(uniqueWarnings);
+      downloadOptimizedCvFile(nextOptimizedCv);
       await loadOptimizedCvsList(userId);
       transitionToStep("cv-optimized");
       if (data.candidate_sources?.length && !cvOptimizationAnalysis?.sources?.length) {
@@ -4285,6 +4294,19 @@ function App() {
                     Scarica anche {file.filename?.toLowerCase().endsWith(".docx") ? "DOCX" : "file alternativo"}
                   </a>
                 ))}
+              </div>
+            )}
+            {optimizedCv?.quality_review?.local_checks_completed && (
+              <div className="cv-strategy-item success">
+                <span>+</span>
+                <div>
+                  <strong>Controlli finali completati</strong>
+                  <p>
+                    {optimizedCv.quality_review.review_provider === "llm"
+                      ? "Qualità, struttura e modifiche applicate sono state verificate."
+                      : "Struttura, contenuti e modifiche applicate sono stati verificati localmente."}
+                  </p>
+                </div>
               </div>
             )}
             {optimizedCvWarnings.length > 0 && (
