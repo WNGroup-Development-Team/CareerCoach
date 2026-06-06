@@ -2824,6 +2824,20 @@ function App() {
   const acceptedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "confirmed" || item.status === "accepted");
   const rejectedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "rejected");
   const latestOptimizedCv = optimizedCvsList[0] || null;
+  const previousInterviewTargets = optimizedCvsList
+    .filter((item) => item.target_company || item.target_role)
+    .map((item) => ({
+      company: item.target_company || "Generica",
+      role: item.target_role || "Ruolo da definire",
+      id: `${(item.target_company || "Generica").trim().toLowerCase()}::${(item.target_role || "").trim().toLowerCase()}`,
+    }))
+    .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+  const difficultyOptions = [
+    { value: "base", label: "Base", description: "Domande dirette, perfette per iniziare con ritmo tranquillo." },
+    { value: "intermedio", label: "Intermedio", description: "Domande realistiche e professionali su competenze e motivazione." },
+    { value: "avanzato", label: "Avanzato", description: "Domande sfidanti, tecniche e situazionali per un vero test di preparazione." },
+  ];
+  const currentDifficulty = difficultyOptions.find((option) => option.value === difficulty) || difficultyOptions[1];
   const coachSuggestions = getCoachSuggestionsFromAnalysis(cvOptimizationAnalysis);
   const selectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "accepted" || selectedCoachSuggestions[item.id] === true);
   const rejectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "rejected");
@@ -4656,22 +4670,64 @@ function App() {
             L’app genererà 10 domande realistiche e personalizzate per simulare un colloquio completo.
           </p>
 
-          <div className="interview-context">
-            <div>
-              <span>Azienda</span>
-              <strong>{company || "Generica"}</strong>
+          <div className="interview-context interview-context-form">
+            <div className="field-card">
+              <label htmlFor="gym-company">Azienda</label>
+              <input
+                id="gym-company"
+                type="text"
+                value={personalizeForm.company}
+                placeholder={company || "Generica"}
+                onChange={(event) => updatePersonalizeForm("company", event.target.value)}
+              />
             </div>
-            <div>
-              <span>Candidatura</span>
-              <strong>{personalizeForm.role || profile.target_role || "Ruolo da definire"}</strong>
+            <div className="field-card">
+              <label htmlFor="gym-role">Candidatura</label>
+              <input
+                id="gym-role"
+                type="text"
+                value={personalizeForm.role}
+                placeholder={profile.target_role || "Ruolo da definire"}
+                onChange={(event) => updatePersonalizeForm("role", event.target.value)}
+              />
             </div>
             {personalizeForm.goal && (
-              <div className="full">
-                <span>Obiettivo</span>
-                <strong>{personalizeForm.goal}</strong>
+              <div className="field-card full">
+                <label>Obiettivo</label>
+                <input
+                  type="text"
+                  value={personalizeForm.goal}
+                  placeholder="Obiettivo specifico della candidatura"
+                  onChange={(event) => updatePersonalizeForm("goal", event.target.value)}
+                />
               </div>
             )}
           </div>
+
+          {previousInterviewTargets.length > 0 && (
+            <div className="previous-targets-card">
+              <label>Usa un'azienda e candidatura già ottimizzate</label>
+              <div className="previous-target-list">
+                {previousInterviewTargets.map((target) => {
+                  const isActive = target.company === (personalizeForm.company.trim() || company) && target.role === (personalizeForm.role.trim() || profile.target_role);
+                  return (
+                    <button
+                      key={target.id}
+                      type="button"
+                      className={isActive ? "target-chip active" : "target-chip"}
+                      onClick={() => {
+                        updatePersonalizeForm("company", target.company);
+                        updatePersonalizeForm("role", target.role);
+                      }}
+                    >
+                      <strong>{target.company}</strong>
+                      <span>{target.role}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <h3 className="sub-title">Tipo di allenamento</h3>
 
@@ -4711,14 +4767,19 @@ function App() {
           </div>
 
           <label>Difficoltà</label>
-          <select
-            value={difficulty}
-            onChange={(e) => setDifficulty(e.target.value)}
-          >
-            <option value="base">Base</option>
-            <option value="intermedio">Intermedio</option>
-            <option value="avanzato">Avanzato</option>
-          </select>
+          <div className="difficulty-grid">
+            {difficultyOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={difficulty === option.value ? "difficulty-pill active" : "difficulty-pill"}
+                onClick={() => setDifficulty(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <p className="difficulty-description">{currentDifficulty.description}</p>
 
           <div className="actions">
             <button className="primary-button" onClick={generateQuestion} disabled={loading}>
@@ -4740,62 +4801,38 @@ function App() {
             Domanda {currentQuestionIndex + 1} di {questions.length || 10}
           </div>
 
-          <div className="tag-row">
-            <span>{company}</span>
-            <span>{interviewType}</span>
-            <span>{difficulty}</span>
-          </div>
-
           <div className="question-box">{question}</div>
 
-          <div className="info-box">
-            La domanda è stata generata in base al tuo profilo, al ruolo scelto, all’azienda e al livello di difficoltà.
-            Le eventuali fonti usate sono salvate nel database dell’app.
-          </div>
-
-          <div className="mode-switch">
-            <button
-              className={answerMode === "text" ? "mode active" : "mode"}
-              onClick={() => setAnswerMode("text")}
-            >
-              Risposta scritta
-            </button>
-
-            <button
-              className={answerMode === "voice" ? "mode active" : "mode"}
-              onClick={() => setAnswerMode("voice")}
-            >
-              Risposta con microfono
-            </button>
-          </div>
-
-          {answerMode === "voice" && (
-            <div className="voice-panel">
-              <h3>Allenamento vocale</h3>
-              <p>
-                Parla come se fossi davanti a un recruiter. L’app trascrive la tua
-                risposta e analizza il modo di parlare, senza mostrare numeri tecnici a schermo.
-              </p>
-
-              {!isListening ? (
-                <button className="primary-button" onClick={startVoiceAnswer}>
-                  Avvia microfono
-                </button>
-              ) : (
-                <button className="danger-button" onClick={stopVoiceAnswer}>
-                  Ferma registrazione
-                </button>
-              )}
+          <div className="response-field">
+            <label htmlFor="answer">La tua risposta</label>
+            <div className="textarea-wrapper">
+              <textarea
+                id="answer"
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Scrivi qui la tua risposta oppure usa il microfono per trascrivere la risposta..."
+                rows={9}
+              />
+              <button
+                type="button"
+                className={`mic-button ${isListening ? "active" : ""}`}
+                onClick={() => {
+                  if (isListening) {
+                    stopVoiceAnswer();
+                  } else {
+                    setAnswerMode("voice");
+                    startVoiceAnswer();
+                  }
+                }}
+                title="Usa il microfono"
+                aria-label="Usa il microfono"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2Zm-5 9a7 7 0 0 0 7-7h2a9 9 0 0 1-18 0h2a7 7 0 0 0 7 7Zm-1 2h2v2h-2v-2Z"/>
+                </svg>
+              </button>
             </div>
-          )}
-
-          <label>La tua risposta</label>
-          <textarea
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            placeholder="Scrivi qui la tua risposta oppure usa il microfono e poi correggi la trascrizione..."
-            rows={9}
-          />
+          </div>
 
           <div className="actions">
             <button className="primary-button" onClick={evaluateAnswer} disabled={loading}>
