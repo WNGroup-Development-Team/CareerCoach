@@ -3900,20 +3900,7 @@ def build_resume_rewrite_result(
 
     coach_engine = CoachSuggestionEngine()
     accepted = coach_engine.accepted_only(accepted_suggestions)
-
-    confirmed_skills = (user_additional_data or {}).get("confirmed_skills", [])
-    for skill in confirmed_skills:
-        skill_name = (skill.get("proposed_text") or skill.get("name") or "").strip()
-        if not skill_name:
-            continue
-        accepted.append({
-            "type": "actionableEdit",
-            "section": "COMPETENZE",
-            "category": "skills",
-            "original_text": "",
-            "proposed_text": skill_name,
-            "description": f"Aggiunta competenza: {skill_name}"
-        })
+    confirmed_skill_instructions = build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}, role)
 
     # Raccogliamo anche user_additional_data in modo organizzato
     clean_additional_data = {
@@ -3949,6 +3936,10 @@ def build_resume_rewrite_result(
     except Exception as exc:
         print(f"Errore nella generazione istruzioni LLM: {exc}")
         instructions = rewriter.instructions_from_suggestions(accepted)
+
+    instructions.extend(confirmed_skill_instructions)
+    if instructions:
+        instructions = consolidate_rewrite_instructions(cv_text, instructions, company, role, goal)
 
     optimized_text = rewriter.apply_to_text(cv_text, instructions)
 
@@ -4263,6 +4254,25 @@ def infer_extra_content_section(value: str) -> tuple[str, str]:
     return "ATTIVITA RILEVANTI", "extra_page"
 
 
+def is_role_like_confirmation(name: str, role: str) -> bool:
+    normalized_name = normalize_plain_text(name)
+    normalized_role = normalize_plain_text(role)
+    if not normalized_name:
+        return False
+    if normalized_name == normalized_role:
+        return True
+    if normalized_role and normalized_role in normalized_name:
+        return True
+    generic_role_terms = {
+        "project manager", "project manager stage", "data scientist", "data analyst",
+        "software engineer", "manager", "developper", "developer", "engineer", "analyst",
+        "specialist", "consultant", "researcher", "assistant", "intern", "stage"
+    }
+    if normalized_name in generic_role_terms:
+        return True
+    return False
+
+
 def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], role: str) -> List[RewriteInstruction]:
     general_additional_data = {
         key: value
@@ -4455,9 +4465,11 @@ def build_confirmed_skill_rewrite_instructions(
             detail = ""
             category = "hard_skill"
             target_section = ""
-        if not name:
+        if not name or is_role_like_confirmation(name, role):
             continue
         section = target_section or ("SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS")
+        if category == "keyword" and not target_section:
+            section = "COMPETENZE TECNICHE"
         existing_normalized = {normalize_plain_text(existing) for existing in skill_names_by_section.get(section, [])}
         if normalize_plain_text(name) not in existing_normalized:
             skill_names_by_section.setdefault(section, []).append(name)
@@ -6349,7 +6361,9 @@ def extract_requested_keywords(role: str, description: str, required_skills: str
 
 
 def filter_cv_keyword_list(values: List[Any]) -> List[str]:
-    blocked = {"data", "analyst", "analysis", "business", "project", "manager", "team", "office"}
+    # Block generic single-word role nouns and weak tokens from appearing as ATS keywords
+    blocked = {"data", "analyst", "analysis", "business", "project", "manager", "team", "office",
+               "scientist", "engineer", "developer", "specialist", "consultant", "designer", "researcher"}
     cleaned = []
     seen = set()
     for value in values or []:
@@ -6438,6 +6452,30 @@ ROLE_SKILL_LIBRARY = {
         "programming_languages": ["Python", "Java", "JavaScript", "Node.js"],
         "tools": ["FastAPI", "Django", "Spring", "PostgreSQL", "MongoDB", "Docker", "Cloud"],
     },
+    "data scientist": {
+        "hard_skills": ["Python", "Machine Learning", "SQL", "Analisi predittiva", "Modelli statistici", "Data preprocessing", "Feature engineering", "Data visualization"],
+        "soft_skills": ["Problem solving", "Pensiero analitico", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+        "programming_languages": ["Python", "SQL", "R"],
+        "tools": ["pandas", "scikit-learn", "Jupyter Notebook", "TensorFlow", "Tableau", "Excel avanzato"],
+    },
+    "project manager": {
+        "hard_skills": ["Pianificazione attività", "Gestione scadenze", "Coordinamento team", "Monitoraggio avanzamento progetto", "Gestione budget", "Risk management"],
+        "soft_skills": ["Comunicazione con stakeholder", "Organizzazione", "Problem solving", "Gestione priorità", "Leadership", "Negoziazione"],
+        "programming_languages": [],
+        "tools": ["Excel avanzato", "Trello", "Jira", "Notion", "Microsoft Project", "Asana", "Monday.com"],
+    },
+    "software engineer": {
+        "hard_skills": ["Sviluppo software", "Design architetturale", "Debugging", "Version control", "Unit testing", "Code review"],
+        "soft_skills": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico"],
+        "programming_languages": ["Python", "JavaScript", "Java", "C++"],
+        "tools": ["Git", "GitHub", "VS Code", "Docker", "AWS", "GitLab"],
+    },
+    "frontend developer": {
+        "hard_skills": ["HTML/CSS", "JavaScript", "User Interface Design", "User Experience", "Responsive Design", "Accessibilita"],
+        "soft_skills": ["Creativita", "Problem solving", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
+        "programming_languages": ["JavaScript", "TypeScript", "React"],
+        "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+    },
 }
 
 
@@ -6479,16 +6517,86 @@ def infer_role_family(role: str, description: str = "", required_skills: str = "
     target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
     if any(term in target_plain for term in ["game design", "game designer", "level design", "unity", "unreal"]):
         return "game design"
+    if any(term in target_plain for term in ["project manager", "project management", "gestione progetti", "pm"]):
+        return "project manager"
     if any(term in target_plain for term in ["backend developer", "back end", "backend", "api", "fastapi", "django", "spring"]):
         return "backend developer"
+    if any(term in target_plain for term in ["data scientist", "data science", "scientist"]):
+        return "data scientist"
     if any(term in target_plain for term in ["data analyst", "analista dati", "analisi dati", "data analysis", "business intelligence"]):
         return "data analyst"
+    if any(term in target_plain for term in ["software engineer", "software developer", "sviluppatore"]):
+        return "software engineer"
+    if any(term in target_plain for term in ["frontend", "ui", "ux", "designer"]):
+        return "frontend developer"
     return ""
+
+
+def infer_skill_library_from_role(role: str, description: str = "") -> Dict[str, List[str]]:
+    """Genera una libreria di skill di fallback basata sul ruolo inserito."""
+    role_plain = normalize_plain_text(role)
+    description_plain = normalize_plain_text(description)
+    
+    if any(term in role_plain for term in ["project manager", "project management"]) or any(term in description_plain for term in ["pianificazione", "progetto", "scadenze"]):
+        return {
+            "hard_skills": ["Pianificazione attività", "Gestione scadenze", "Coordinamento team", "Monitoraggio avanzamento", "Gestione rischi", "Budget management"],
+            "soft_skills": ["Comunicazione", "Organizzazione", "Problem solving", "Gestione priorità", "Leadership", "Negoziazione"],
+            "programming_languages": [],
+            "tools": ["Excel", "Trello", "Jira", "Notion", "Microsoft Project", "Asana"],
+        }
+    
+    if any(term in role_plain for term in ["data scientist", "machine learning"]):
+        return {
+            "hard_skills": ["Python", "Machine Learning", "SQL", "Analisi predittiva", "Modelli statistici", "Data preprocessing", "Feature engineering"],
+            "soft_skills": ["Problem solving", "Pensiero analitico", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
+            "programming_languages": ["Python", "SQL", "R"],
+            "tools": ["pandas", "scikit-learn", "Jupyter", "TensorFlow", "Tableau", "Excel"],
+        }
+    
+    if any(term in role_plain for term in ["data analyst", "analista", "analysis"]):
+        return {
+            "hard_skills": ["SQL", "Python", "Data visualization", "Analisi dati", "Reporting", "KPI", "Business intelligence"],
+            "soft_skills": ["Attenzione ai dettagli", "Pensiero analitico", "Comunicazione", "Problem solving", "Organizzazione"],
+            "programming_languages": ["SQL", "Python"],
+            "tools": ["Excel avanzato", "Power BI", "Tableau", "Google Analytics", "Looker"],
+        }
+    
+    if any(term in role_plain for term in ["software engineer", "developer", "sviluppatore", "programmatore"]):
+        return {
+            "hard_skills": ["Sviluppo software", "Design architetturale", "Debugging", "Version control", "Unit testing", "Code review"],
+            "soft_skills": ["Problem solving", "Collaborazione", "Precisione", "Comunicazione tecnica", "Pensiero logico"],
+            "programming_languages": ["Python", "JavaScript", "Java", "C++"],
+            "tools": ["Git", "GitHub", "VS Code", "Docker", "AWS"],
+        }
+    
+    if any(term in role_plain for term in ["backend", "api", "server"]):
+        return {
+            "hard_skills": ["API development", "Database design", "Autenticazione", "Testing backend", "Architetture REST", "Deploy", "Microservizi"],
+            "soft_skills": ["Problem solving", "Precisione", "Collaborazione", "Documentazione", "Comunicazione tecnica"],
+            "programming_languages": ["Python", "Java", "JavaScript", "Node.js"],
+            "tools": ["FastAPI", "Django", "Spring", "PostgreSQL", "MongoDB", "Docker"],
+        }
+    
+    if any(term in role_plain for term in ["frontend", "ui", "ux", "designer"]):
+        return {
+            "hard_skills": ["HTML/CSS", "JavaScript", "User Interface Design", "User Experience", "Responsive Design", "Accessibilita"],
+            "soft_skills": ["Creativita", "Problem solving", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
+            "programming_languages": ["JavaScript", "TypeScript", "React"],
+            "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+        }
+    
+    # Fallback generico
+    return {
+        "hard_skills": ["Competenza tecnica primaria", "Competenza tecnica secondaria", "Competenza specializzata"],
+        "soft_skills": ["Problem solving", "Comunicazione", "Collaborazione", "Organizzazione", "Pensiero critico"],
+        "programming_languages": [],
+        "tools": ["Strumento principale", "Strumento ausiliario"],
+    }
 
 
 def build_role_skill_suggestions(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, Any]:
     family = infer_role_family(role, description, required_skills)
-    library = ROLE_SKILL_LIBRARY.get(family, {"hard_skills": [], "soft_skills": [], "programming_languages": [], "tools": []})
+    library = ROLE_SKILL_LIBRARY.get(family, {})
     cv_plain = normalize_plain_text(cv_text)
     result = {
         "role_family": family,
@@ -6501,6 +6609,15 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
         "to_confirm": [],
         "confirmation_items": [],
     }
+    
+    # Log iniziale
+    print(f"[build_role_skill_suggestions] family='{family}', role='{role}', library_found={bool(library)}")
+    
+    # Se libreria vuota, usa fallback basato sul ruolo inserito
+    if not library:
+        library = infer_skill_library_from_role(role, description)
+        print(f"[build_role_skill_suggestions] fallback_library_generated, skills_count={sum(len(library.get(k, [])) for k in ['hard_skills', 'soft_skills', 'programming_languages', 'tools'])}")
+    
     for group_name in ["hard_skills", "soft_skills", "programming_languages", "tools"]:
         for skill in library.get(group_name, []):
             present = keyword_group_present(cv_plain, [skill])
@@ -6512,7 +6629,7 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                 "tools": "tool",
             }.get(group_name, "hard_skill")
             result["confirmation_items"].append({
-                "id": f"{family.replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
+                "id": f"{(family or normalize_plain_text(role)).replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
                 "type": "skillConfirmation",
                 "name": skill,
                 "category": category,
@@ -6528,11 +6645,16 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                 result["to_highlight"].append(skill)
             else:
                 result["to_confirm"].append(skill)
-    for keyword in role_keyword_snapshot(cv_text, role, description, required_skills).get("to_confirm", []):
+    
+    snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
+    keywords_to_add = snapshot.get("to_confirm", [])
+    print(f"[build_role_skill_suggestions] keywords_to_confirm={len(keywords_to_add)}")
+    
+    for keyword in keywords_to_add:
         if normalize_plain_text(keyword) in {normalize_plain_text(item["name"]) for item in result["confirmation_items"]}:
             continue
         result["confirmation_items"].append({
-            "id": f"{family.replace(' ', '-')}-keyword-{normalize_plain_text(keyword).replace(' ', '-')}",
+            "id": f"{(family or normalize_plain_text(role)).replace(' ', '-')}-keyword-{normalize_plain_text(keyword).replace(' ', '-')}",
             "type": "keywordConfirmation",
             "name": keyword,
             "category": "keyword",
@@ -6543,6 +6665,8 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
             "user_example": "",
             "target_section": "HARD SKILLS",
         })
+    
+    print(f"[build_role_skill_suggestions] final_confirmation_items={len(result['confirmation_items'])}")
     return result
 
 
@@ -6611,7 +6735,7 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
     missing_keywords = filter_cv_keyword_list(keyword_match["missing"])
     role_fragments = {
         token for token in tokenize_meaningful(role)
-        if len(token) <= 3 or token in {"specialist", "manager", "engineer", "developer", "designer", "analyst"}
+        if len(token) <= 3 or token in {"specialist", "manager", "engineer", "developer", "designer", "analyst", "scientist", "consultant", "researcher", "assistant"}
     }
     missing_keywords = [
         keyword for keyword in missing_keywords
@@ -7137,6 +7261,16 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
     section_plain = normalize_plain_text(section)
     original_plain = normalize_plain_text(original)
     proposed_plain = normalize_plain_text(proposed)
+    # Reject suggestions that are identical when normalized
+    if original and original_plain == proposed_plain:
+        return False
+    # Reject suggestions that are almost identical (too small change)
+    try:
+        similarity = SequenceMatcher(None, original_plain, proposed_plain).ratio() if original_plain and proposed_plain else 0
+        if similarity >= 0.92:
+            return False
+    except Exception:
+        pass
     if section_plain in {"chi sono", "profilo", "profilo professionale"}:
         blocked = ["contatti", "lingue", "hard skills", "soft skills", "formazione", "esperienze professionali"]
         if any(term in original_plain or term in proposed_plain for term in blocked):
