@@ -4446,6 +4446,15 @@ function App() {
                   Apri CV
                 </a>
               </div>
+            ) : cvPreview?.previewFinalCvContent && Object.keys(cvPreview.previewFinalCvContent).length > 0 ? (
+              <div className="cv-preview-structured" style={{ textAlign: 'left' }}>
+                {Object.entries(cvPreview.previewFinalCvContent).map(([section, content]) => (
+                  <div key={section} className="cv-preview-section" style={{ marginBottom: '1rem' }}>
+                    <h3 style={{ textTransform: 'uppercase', fontSize: '1.1em', borderBottom: '1px solid #ddd', paddingBottom: '0.5rem', marginBottom: '0.5rem' }}>{section}</h3>
+                    <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0, fontSize: '0.95em' }}>{content}</pre>
+                  </div>
+                ))}
+              </div>
             ) : cvPreview?.text || profile.cv_text ? (
               <pre className="cv-preview-text">{cvPreview?.text || profile.cv_text}</pre>
             ) : (

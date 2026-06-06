@@ -286,30 +286,23 @@ Schema JSON:
   "instructions": [
     {{
       "section": "nome sezione canonico",
-      "original": "testo esatto o frase del CV da sostituire",
-      "replacement": "nuovo testo naturale",
+      "original": "testo esatto o frase del CV da sostituire. Lascia vuoto '' SOLO se stai aggiungendo una entry del tutto nuova.",
+      "replacement": "nuovo testo naturale o lista",
       "reason": "breve motivo interno"
     }}
   ]
 }}
 
 Regole:
-- Applica sempre una ottimizzazione prudente per il ruolo target, anche quando il CV originale e gia buono.
-- Le modifiche automatiche possono migliorare sintesi, chiarezza, tono professionale e aderenza al target, ma non possono aggiungere fatti.
-- Applica inoltre tutte le modifiche accettate dall'utente e le informazioni confermate.
-- Ogni replacement deve sostituire solo il blocco originale della stessa sezione.
-- Se section e profilo/CHI SONO, replacement deve contenere solo un breve profilo, non contatti, lingue, skills, formazione o esperienze.
-- Non copiare suggerimenti coach nel CV.
-- Non inserire keyword ATS a caso.
-- Non aggiungere COMPETENZE, FORMAZIONE o altri titoli dentro frasi.
-- Non includere punteggi, note, spiegazioni, report o bozze guidate.
-- Non restituire full_cv_text, extracted_text, resume_text o testo completo del CV come replacement.
-- Mantieni sezioni e ordine originali: profilo con profilo, esperienza con esperienza, skills con skills.
-- Imita tono, lunghezza, punteggiatura, forma dei bullet e livello di dettaglio del CV originale.
-- Se informazioni reali richiedono spazio aggiuntivo, puoi proporre nuove sezioni o pagine solo quando migliorano davvero il CV.
-- Le nuove sezioni devono essere coerenti con struttura, stile e gerarchia del documento originale.
-- Se non c'e supporto, non creare nuove skill.
-- Se esiste almeno un blocco migliorabile, restituisci da 1 a 6 istruzioni concrete. Restituisci una lista vuota solo se nessuna riscrittura sarebbe realmente utile.
+- DEVI ASSOLUTAMENTE includere e integrare nel CV TUTTE le modifiche accettate dall'utente e TUTTI i dati confermati (es. confirmed_skills). Se non lo fai, l'utente perderà i dati inseriti!
+- Per AGGIUNGERE nuove competenze/skill (es. confermate dall'utente) usa SEMPRE una istruzione dedicata con `section`: "competenze", `original`: "" e `replacement`: "Nome skill 1, Nome skill 2". NON copiare le vecchie skill nel replacement di questa istruzione, il sistema appenderà quelle nuove automaticamente alla sezione corretta.
+- ATTENZIONE CRITICA: Se invece stai modificando o migliorando un'esperienza, formazione o profilo GIÀ PRESENTE nel CV, DEVI OBBLIGATORIAMENTE inserire in `original` il frammento esatto di testo originale da sostituire.
+- Non duplicare mai sezioni già presenti. Usa `original: ""` SOLO ED ESCLUSIVAMENTE per aggiungere skill, progetti o esperienze completamente nuove non menzionate nel CV.
+- Riscrivi in modo intelligente e naturale.
+- Mantieni separazione tra Hard Skills e Soft Skills se necessario, oppure uniscile logicamente.
+- Ogni replacement con original NON vuoto deve sostituire solo il blocco originale della stessa sezione.
+- Non inventare esperienze o competenze non confermate.
+- Restituisci da 1 a 15 istruzioni concrete.
 """
 
     def apply_to_text(self, cv_text: str, instructions: List[RewriteInstruction]) -> str:
@@ -359,7 +352,7 @@ Regole:
                 )
                 continue
             replacement = self.clean_replacement(raw_replacement)
-            if not original or not replacement or original == replacement:
+            if not replacement or original == replacement:
                 continue
             instructions.append(RewriteInstruction(
                 section=section,
@@ -405,13 +398,6 @@ Regole:
             return False
         section_name = canonical_section(section)
         lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        heading_hits = [
-            line
-            for line in lines
-            if is_section_heading(line)
-        ]
-        if heading_hits:
-            return False
         exact_heading_lines = {
             normalize_text(marker).strip(":")
             for marker in SECTION_LEAK_MARKERS
@@ -420,14 +406,14 @@ Regole:
             return False
         word_count = len(tokenize(replacement))
         max_words = {
-            "profilo": 115,
-            "competenze": 85,
-            "formazione": 95,
-            "esperienze": 145,
-        }.get(section_name, 130)
+            "profilo": 250,
+            "competenze": 300,
+            "formazione": 300,
+            "esperienze": 600,
+        }.get(section_name, 500)
         if word_count > max_words:
             return False
-        if section_name == "profilo" and len(lines) > 6:
+        if section_name == "profilo" and len(lines) > 15:
             return False
         blocked_profile_lines = {"formazione", "esperienze professionali", "esperienza professionale", "contatti", "lingue"}
         if section_name == "competenze" and any(normalize_text(line).strip(":") in blocked_profile_lines for line in lines):
@@ -706,22 +692,21 @@ class DocxPreserver:
         return True
 
     def _should_append(self, instruction: RewriteInstruction) -> bool:
-        section = normalize_text(instruction.section)
+        if instruction.original.strip():
+            return False
+            
+        section_name = canonical_section(instruction.section)
         category = normalize_text(instruction.category)
+        
         return (
-            not instruction.original.strip()
-            and (
-                section in {
-                    "progetti", "pagina aggiuntiva", "esperienze aggiuntive",
-                    "esperienze professionali", "formazione", "certificazioni",
-                    "attivita rilevanti", "competenze tecniche", "hard skills",
-                    "soft skills",
-                }
-                or category in {
-                    "project", "extra_page", "skills", "soft_skills",
-                    "experience", "education", "certification",
-                }
-            )
+            section_name in {
+                "progetti", "esperienze", "formazione", 
+                "certificazioni", "competenze", "lingue"
+            }
+            or category in {
+                "project", "extra_page", "skills", "soft_skills",
+                "experience", "education", "certification", "hard_skill", "soft_skill"
+            }
         )
 
     def _append_section(self, document, instruction: RewriteInstruction) -> None:

@@ -3896,52 +3896,81 @@ def build_resume_rewrite_result(
     user_additional_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     parser = ResumeParser()
-    rewriter = ResumeRewriter(parser)
+    sections = parser.parse_text(cv_text)
+
     coach_engine = CoachSuggestionEngine()
     accepted = coach_engine.accepted_only(accepted_suggestions)
-    sections = parser.parse_text(cv_text)
-    target = {
-        "company": company or "Generica",
-        "role": role or "",
-        "description": goal or "",
+
+    confirmed_skills = (user_additional_data or {}).get("confirmed_skills", [])
+    for skill in confirmed_skills:
+        skill_name = (skill.get("proposed_text") or skill.get("name") or "").strip()
+        if not skill_name:
+            continue
+        accepted.append({
+            "type": "actionableEdit",
+            "section": "COMPETENZE",
+            "category": "skills",
+            "original_text": "",
+            "proposed_text": skill_name,
+            "description": f"Aggiunta competenza: {skill_name}"
+        })
+
+    # Raccogliamo anche user_additional_data in modo organizzato
+    clean_additional_data = {
+        key: value.strip() if isinstance(value, str) else value
+        for key, value in (user_additional_data or {}).items()
+        if value
     }
-    instructions = rewriter.instructions_from_suggestions(accepted)
-    instructions.extend(build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}, role))
-    instructions.extend(build_additional_rewrite_instructions(user_additional_data or {}, role or ""))
-    if not instructions and not accepted:
-        prompt = rewriter.build_prompt(
-            cv_text=cv_text,
-            target=target,
-            accepted_suggestions=accepted,
-            user_data=user_additional_data or {},
-            sections=sections,
-        )
-        try:
-            result = extract_json(call_groq(prompt, temperature=0.15, max_tokens=2200))
-        except Exception as exc:
-            print(f"Riscrittura strutturata CV non riuscita, uso fallback conservativo: {exc}")
-            result = {}
-        instructions = rewriter.instructions_from_result(result)
-    instructions = consolidate_rewrite_instructions(
+
+    target_info = {
+        "company": company or "Non specificata",
+        "role": role or "Non specificato",
+        "goal": goal or "Non specificato"
+    }
+
+    rewriter = ResumeRewriter(parser)
+    prompt = rewriter.build_prompt(
         cv_text=cv_text,
-        instructions=instructions,
-        company=company,
-        role=role,
-        goal=goal,
+        target=target_info,
+        accepted_suggestions=accepted,
+        user_data=clean_additional_data,
+        sections=sections
     )
-    instructions = sort_rewrite_instructions(instructions)
-    grouped_changes = group_rewrite_instructions(instructions)
+
+    try:
+        # Generiamo le istruzioni usando Groq
+        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=3000))
+        instructions = rewriter.instructions_from_result(result)
+
+        # Se LLM ha restituito una lista vuota o qualcosa e' andato storto e avevamo suggerimenti:
+        if not instructions and accepted:
+            print("Nessuna istruzione generata dal LLM, uso fallback basato sui suggerimenti diretti.")
+            instructions = rewriter.instructions_from_suggestions(accepted)
+    except Exception as exc:
+        print(f"Errore nella generazione istruzioni LLM: {exc}")
+        instructions = rewriter.instructions_from_suggestions(accepted)
+
     optimized_text = rewriter.apply_to_text(cv_text, instructions)
+
+    # 5. Genera previewFinalCvContent per il frontend
+    previewFinalCvContent = {}
+    for inst in instructions:
+        section_name = (inst.section or "Altro").capitalize()
+        # Per la preview evitiamo duplicati
+        if section_name not in previewFinalCvContent:
+            previewFinalCvContent[section_name] = inst.replacement
+        else:
+            previewFinalCvContent[section_name] += "\n\n" + inst.replacement
 
     return {
         "optimized_text": optimized_text,
         "instructions": instructions,
-        "grouped_changes": grouped_changes,
+        "grouped_changes": {"sections": [i.section for i in instructions]},
         "accepted_suggestions": accepted,
-        "missing_proposed_text_count": sum(1 for item in accepted if not str(item.get("proposed_text") or "").strip()),
+        "missing_proposed_text_count": 0,
         "sections": sections,
+        "previewFinalCvContent": previewFinalCvContent
     }
-
 
 def extract_docx_text_bytes(file_bytes: bytes) -> str:
     try:
@@ -8260,6 +8289,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             "content_type": content_type,
             "file_base64": file_base64,
             "text": optimized_text,
+            "previewFinalCvContent": rewrite_result.get("previewFinalCvContent", {}),
             "download_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file",
             "docx_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file?format=docx" if docx_file else None,
             "pdf_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file?format=pdf" if pdf_file else None,
