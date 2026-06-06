@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -38,6 +39,12 @@ SECTION_LEAK_MARKERS = {
 GENERIC_KEYWORDS = {
     "data", "analyst", "analysis", "business", "project", "manager", "team", "office",
     "azienda", "ruolo", "junior", "senior", "stage", "internship", "lavoro",
+}
+
+# Tokens that are generic role nouns and should not be proposed alone as keywords
+GENERIC_ROLE_TOKENS = {
+    "scientist", "analyst", "engineer", "developer", "manager", "specialist",
+    "consultant", "designer", "researcher", "assistant",
 }
 SYNONYMS = {
     "analisi dati": {"data analysis", "data analytics", "analisi dati"},
@@ -164,7 +171,11 @@ class JobAnalyzer:
             if item.strip()
         ]
         source = description.strip() or role.strip()
+        # If role looks like a multi-word title (e.g., "Data Scientist"), prefer keeping it whole
         candidates = explicit + self._phrases(source) + tokenize(source)
+        role_title = role.strip()
+        if role_title and " " in role_title and len(role_title) >= 4:
+            candidates = [role_title] + candidates
 
         keywords: List[str] = []
         seen = set()
@@ -172,8 +183,13 @@ class JobAnalyzer:
             clean = self.normalizer(candidate).strip(" .,:;")
             if not clean or clean in seen:
                 continue
+            # Skip generic keywords and very short tokens (except common acronyms like SQL)
             if clean in GENERIC_KEYWORDS or (len(clean) < 4 and clean not in {"sql"}):
                 continue
+            # Avoid proposing single-word generic role tokens (e.g. "scientist", "engineer")
+            if " " not in clean and clean in GENERIC_ROLE_TOKENS:
+                continue
+            # Also avoid single-word fragments that are just "data" or similar generic terms
             if " " not in clean and clean in {"data", "analyst"}:
                 continue
             seen.add(clean)
@@ -188,7 +204,7 @@ class JobAnalyzer:
         for phrase in sorted(SYNONYMS, key=len, reverse=True):
             if phrase in normalized or any(alias in normalized for alias in SYNONYMS[phrase]):
                 phrases.append(phrase)
-        words = [word for word in tokenize(text) if word not in GENERIC_KEYWORDS]
+        words = [word for word in tokenize(text) if word not in GENERIC_KEYWORDS and word not in GENERIC_ROLE_TOKENS]
         for size in (3, 2):
             for index in range(0, max(len(words) - size + 1, 0)):
                 phrase = " ".join(words[index:index + size])
@@ -285,25 +301,52 @@ Schema JSON:
   "instructions": [
     {{
       "section": "nome sezione canonico",
-      "original": "testo esatto o frase del CV da sostituire",
-      "replacement": "nuovo testo naturale",
+      "original": "testo esatto o frase del CV da sostituire. Lascia vuoto '' SOLO se stai aggiungendo una entry del tutto nuova.",
+      "replacement": "nuovo testo naturale o lista",
       "reason": "breve motivo interno"
     }}
   ]
 }}
 
 Regole:
-- Applica solo modifiche accettate dall'utente o informazioni confermate.
-- Ogni replacement deve sostituire solo il blocco originale della stessa sezione.
-- Se section e profilo/CHI SONO, replacement deve contenere solo un breve profilo, non contatti, lingue, skills, formazione o esperienze.
-- Non copiare suggerimenti coach nel CV.
-- Non inserire keyword ATS a caso.
-- Non aggiungere COMPETENZE, FORMAZIONE o altri titoli dentro frasi.
-- Non includere punteggi, note, spiegazioni, report o bozze guidate.
-- Non restituire full_cv_text, extracted_text, resume_text o testo completo del CV come replacement.
-- Mantieni sezioni e ordine originali: profilo con profilo, esperienza con esperienza, skills con skills.
-- Se non c'e supporto, non creare nuove skill.
+- DEVI ASSOLUTAMENTE includere e integrare nel CV TUTTE le modifiche accettate dall'utente e TUTTI i dati confermati (es. confirmed_skills). Se non lo fai, l'utente perderà i dati inseriti!
+- Per AGGIUNGERE nuove competenze/skill (es. confermate dall'utente) usa SEMPRE una istruzione dedicata con `section`: "competenze", `original`: "" e `replacement`: "Nome skill 1, Nome skill 2". NON copiare le vecchie skill nel replacement di questa istruzione, il sistema appenderà quelle nuove automaticamente alla sezione corretta.
+- ATTENZIONE CRITICA: Se invece stai modificando o migliorando un'esperienza, formazione o profilo GIÀ PRESENTE nel CV, DEVI OBBLIGATORIAMENTE inserire in `original` il frammento esatto di testo originale da sostituire.
+- Non duplicare mai sezioni già presenti. Usa `original: ""` SOLO ED ESCLUSIVAMENTE per aggiungere skill, progetti o esperienze completamente nuove non menzionate nel CV.
+- Non aggiungere nuove pagine o sezioni finali artificiali solo per skill, keyword o suggerimenti.
+- Riscrivi in modo intelligente e naturale.
+- Mantieni separazione tra Hard Skills e Soft Skills se necessario, oppure uniscile logicamente.
+- Ogni replacement con original NON vuoto deve sostituire solo il blocco originale della stessa sezione.
+- Non inventare esperienze o competenze non confermate.
+- Restituisci da 1 a 15 istruzioni concrete.
 """
+
+    def apply_to_text(self, cv_text: str, instructions: List[RewriteInstruction]) -> str:
+        updated = cv_text or ""
+        for instruction in instructions:
+            original = (instruction.original or "").strip()
+            replacement = (instruction.replacement or "").strip()
+            if not original or not replacement:
+                continue
+            if original in updated:
+                updated = updated.replace(original, replacement, 1)
+                continue
+            pattern = re.compile(re.escape(original), flags=re.IGNORECASE)
+            updated, count = pattern.subn(replacement, updated, count=1)
+            if count:
+                continue
+            original_words = re.findall(r"\S+", original)
+            if len(original_words) < 4:
+                continue
+            flexible_pattern = r"\s+".join(re.escape(word) for word in original_words)
+            updated = re.sub(
+                flexible_pattern,
+                lambda _match: replacement,
+                updated,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        return self.clean_final_text(updated)
 
     def fallback_text(self, cv_text: str, accepted_suggestions: List[Dict[str, Any]], user_data: Dict[str, Any]) -> str:
         # Fallback intentionally conservative: preserves original CV text and avoids reports.
@@ -324,8 +367,8 @@ Regole:
                     f"section={section}, replacement={raw_replacement[:180]}"
                 )
                 continue
-            replacement = self.clean_line(raw_replacement)
-            if not original or not replacement or original == replacement:
+            replacement = self.clean_replacement(raw_replacement)
+            if not replacement or original == replacement:
                 continue
             instructions.append(RewriteInstruction(
                 section=section,
@@ -353,7 +396,7 @@ Regole:
                     f"proposed_text={raw_proposed[:180]}"
                 )
                 continue
-            proposed = self.clean_line(raw_proposed)
+            proposed = self.clean_replacement(raw_proposed)
             instructions.append(RewriteInstruction(
                 section=section,
                 original=original,
@@ -371,13 +414,6 @@ Regole:
             return False
         section_name = canonical_section(section)
         lines = [line.strip() for line in raw.splitlines() if line.strip()]
-        heading_hits = [
-            line
-            for line in lines
-            if is_section_heading(line)
-        ]
-        if heading_hits:
-            return False
         exact_heading_lines = {
             normalize_text(marker).strip(":")
             for marker in SECTION_LEAK_MARKERS
@@ -386,14 +422,14 @@ Regole:
             return False
         word_count = len(tokenize(replacement))
         max_words = {
-            "profilo": 115,
-            "competenze": 85,
-            "formazione": 95,
-            "esperienze": 145,
-        }.get(section_name, 130)
+            "profilo": 250,
+            "competenze": 300,
+            "formazione": 300,
+            "esperienze": 600,
+        }.get(section_name, 500)
         if word_count > max_words:
             return False
-        if section_name == "profilo" and len(lines) > 6:
+        if section_name == "profilo" and len(lines) > 15:
             return False
         blocked_profile_lines = {"formazione", "esperienze professionali", "esperienza professionale", "contatti", "lingue"}
         if section_name == "competenze" and any(normalize_text(line).strip(":") in blocked_profile_lines for line in lines):
@@ -422,29 +458,54 @@ Regole:
             line = re.sub(rf"(?<!^)\b{re.escape(upper)}\b(?!$)", "", line)
         return re.sub(r"\s{2,}", " ", line).strip()
 
+    def clean_replacement(self, value: str) -> str:
+        lines = [self.clean_line(line) for line in (value or "").splitlines()]
+        return "\n".join(line for line in lines if line).strip()
+
 
 class DocxPreserver:
+    def __init__(self) -> None:
+        self.applied_source_ids: List[str] = []
+        self.skipped_source_ids: List[str] = []
+
     def apply(self, original_file_bytes: bytes, instructions: List[RewriteInstruction]) -> tuple[bytes, int]:
         from docx import Document
 
+        self.applied_source_ids = []
+        self.skipped_source_ids = []
         document = Document(io.BytesIO(original_file_bytes))
-        contexts = self._paragraph_contexts(document)
         applied = 0
         for instruction in instructions:
             if not self._valid_instruction(instruction):
+                self.skipped_source_ids.append(instruction.source_id or instruction.section)
                 continue
+            contexts = self._paragraph_contexts(document)
             if self._should_append(instruction):
                 self._append_section(document, instruction)
                 applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
                 continue
             if instruction.original and self._replace_exact(contexts, instruction):
                 applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
                 continue
             if instruction.original and self._replace_similar(contexts, instruction):
                 applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
+                continue
+            if instruction.original and self._replace_section_block(contexts, instruction):
+                applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
                 continue
             if self._replace_in_section(contexts, instruction):
                 applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
+                continue
+            if self._append_to_target_section(document, instruction):
+                applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
+                continue
+            self.skipped_source_ids.append(instruction.source_id or instruction.section)
 
         output = io.BytesIO()
         document.save(output)
@@ -505,7 +566,7 @@ class DocxPreserver:
                 if not self._section_matches_instruction(section, instruction):
                     self._log_blocked(instruction, f"testo originale trovato fuori sezione: {section or 'sconosciuta'}")
                     continue
-                self._replace_preserving_first_run(paragraph, instruction.replacement)
+                self._replace_and_cleanup(contexts, context, instruction)
                 return True
         return False
 
@@ -527,10 +588,10 @@ class DocxPreserver:
                 continue
             score = len(original_tokens.intersection(paragraph_tokens)) / max(len(original_tokens), 1)
             if score > best_score:
-                best = paragraph
+                best = context
                 best_score = score
         if best is not None and best_score >= 0.74:
-            self._replace_preserving_first_run(best, instruction.replacement)
+            self._replace_and_cleanup(contexts, best, instruction)
             return True
         return False
 
@@ -560,42 +621,230 @@ class DocxPreserver:
                 continue
             if not self._is_editable_paragraph(paragraph):
                 continue
-            self._replace_preserving_first_run(paragraph, instruction.replacement)
+            self._replace_and_cleanup(contexts, context, instruction)
             return True
         self._log_blocked(instruction, "nessun paragrafo sostituibile trovato sotto la sezione")
         return False
 
+    def _replace_section_block(
+        self,
+        contexts: List[ParagraphContext],
+        instruction: RewriteInstruction,
+    ) -> bool:
+        expected = canonical_section(instruction.section or instruction.category or "")
+        if not expected or expected == "contenuto":
+            return False
+
+        candidates = [
+            context
+            for context in contexts
+            if context.section == expected and self._is_editable_paragraph(context.paragraph)
+        ]
+        if not candidates:
+            return False
+
+        original_tokens = set(tokenize(instruction.original))
+        if not original_tokens:
+            return False
+
+        best_contexts: List[ParagraphContext] = []
+        best_score = 0.0
+        for start in range(len(candidates)):
+            block: List[ParagraphContext] = []
+            block_tokens = set()
+            for candidate in candidates[start:start + 8]:
+                block.append(candidate)
+                block_tokens.update(tokenize(candidate.paragraph.text or ""))
+                score = len(original_tokens.intersection(block_tokens)) / max(len(original_tokens), 1)
+                if score > best_score:
+                    best_score = score
+                    best_contexts = list(block)
+                if score >= 0.9:
+                    break
+
+        if not best_contexts or best_score < 0.55:
+            return False
+
+        self._replace_paragraph_block(best_contexts, instruction.replacement)
+        return True
+
+    def _replace_paragraph_block(
+        self,
+        contexts: List[ParagraphContext],
+        replacement: str,
+    ) -> None:
+        lines = [line.strip() for line in (replacement or "").splitlines() if line.strip()]
+        if not lines:
+            lines = [replacement.strip()]
+
+        for index, context in enumerate(contexts):
+            value = lines[index] if index < len(lines) else ""
+            self._replace_preserving_first_run(context.paragraph, value)
+
+        if len(lines) <= len(contexts):
+            return
+
+        anchor = contexts[-1].paragraph
+        format_reference = contexts[-1].paragraph
+        for value in lines[len(contexts):]:
+            parent = anchor._parent
+            new_paragraph = parent.add_paragraph(value)
+            new_paragraph._p.getparent().remove(new_paragraph._p)
+            anchor._p.addnext(new_paragraph._p)
+            self._copy_paragraph_format(format_reference, new_paragraph)
+            anchor = new_paragraph
+
+    def _append_to_target_section(self, document, instruction: RewriteInstruction) -> bool:
+        if not instruction.replacement.strip():
+            return False
+        self._append_section(document, RewriteInstruction(
+            section=instruction.section,
+            original="",
+            replacement=instruction.replacement,
+            reason=instruction.reason,
+            category=instruction.category,
+            source_id=instruction.source_id,
+        ))
+        return True
+
     def _should_append(self, instruction: RewriteInstruction) -> bool:
-        section = normalize_text(instruction.section)
+        if instruction.original.strip():
+            return False
+            
+        section_name = canonical_section(instruction.section)
         category = normalize_text(instruction.category)
+        
         return (
-            not instruction.original.strip()
-            and (
-                section in {"progetti", "pagina aggiuntiva", "esperienze aggiuntive", "certificazioni", "attivita rilevanti", "competenze tecniche", "hard skills", "soft skills"}
-                or category in {"project", "extra_page", "skills", "soft_skills"}
-            )
+            section_name in {
+                "progetti", "esperienze", "formazione", 
+                "certificazioni", "competenze", "lingue"
+            }
+            or category in {
+                "project", "extra_page", "skills", "soft_skills",
+                "experience", "education", "certification", "hard_skill", "soft_skill"
+            }
         )
 
     def _append_section(self, document, instruction: RewriteInstruction) -> None:
         heading = (instruction.section or "PROGETTI").strip().upper()
         if heading == "PAGINA AGGIUNTIVA":
             heading = "PROGETTI"
-        document.add_page_break()
+        section_name = canonical_section(heading)
+        contexts = self._paragraph_contexts(document)
+        matching_heading_index = next(
+            (
+                index
+                for index, context in enumerate(contexts)
+                if is_section_heading(context.paragraph.text or "")
+                and canonical_section(context.paragraph.text or "") == section_name
+            ),
+            None,
+        )
+
+        if matching_heading_index is not None:
+            anchor = contexts[matching_heading_index].paragraph
+            body_reference = None
+            for context in contexts[matching_heading_index + 1:]:
+                paragraph = context.paragraph
+                if is_section_heading(paragraph.text or "") or context.section != section_name:
+                    break
+                anchor = paragraph
+                if (paragraph.text or "").strip():
+                    body_reference = paragraph
+            body_paragraph = document.add_paragraph(instruction.replacement)
+            body_paragraph._p.getparent().remove(body_paragraph._p)
+            anchor._p.addnext(body_paragraph._p)
+            if body_reference is not None:
+                self._copy_paragraph_format(body_reference, body_paragraph)
+            return
+
+        heading_reference = self._last_heading_paragraph(document)
+        body_reference = self._last_styled_paragraph(document)
         heading_paragraph = document.add_paragraph(heading)
         body_paragraph = document.add_paragraph(instruction.replacement)
-        reference = self._last_styled_paragraph(document)
-        if reference is not None:
-            try:
-                body_paragraph.style = reference.style
-            except Exception:
-                pass
+        if heading_reference is not None:
+            self._copy_paragraph_format(heading_reference, heading_paragraph)
+        if body_reference is not None:
+            self._copy_paragraph_format(body_reference, body_paragraph)
+        if body_reference is not None:
+            body_reference._p.addnext(heading_paragraph._p)
+            heading_paragraph._p.addnext(body_paragraph._p)
+        elif heading_reference is not None:
+            heading_reference._p.addnext(heading_paragraph._p)
+            heading_paragraph._p.addnext(body_paragraph._p)
+        # Leave the new section in document flow without forcing a page break.
+
+    def _replace_and_cleanup(
+        self,
+        contexts: List[ParagraphContext],
+        context: ParagraphContext,
+        instruction: RewriteInstruction,
+    ) -> None:
+        self._replace_preserving_first_run(context.paragraph, instruction.replacement)
+        if canonical_section(instruction.section) != "profilo":
+            return
+
+        replacement_norm = normalize_text(instruction.replacement)
+        try:
+            start_index = next(
+                index for index, candidate in enumerate(contexts)
+                if candidate.paragraph is context.paragraph
+            )
+        except StopIteration:
+            return
+
+        replacement_tokens = set(tokenize(instruction.replacement))
+        for candidate in contexts[start_index + 1:]:
+            if candidate.section != context.section:
+                break
+            paragraph = candidate.paragraph
+            text = (paragraph.text or "").strip()
+            if not text:
+                continue
+            if is_section_heading(text):
+                break
+            text_norm = normalize_text(text)
+            text_tokens = set(tokenize(text))
+            overlap = (
+                len(text_tokens.intersection(replacement_tokens)) / max(len(text_tokens), 1)
+                if text_tokens
+                else 0
+            )
+            if text_norm in replacement_norm or overlap >= 0.85:
+                self._replace_preserving_first_run(paragraph, "")
+                continue
+            break
+
+    def _last_heading_paragraph(self, document):
+        for context in reversed(self._paragraph_contexts(document)):
+            if is_section_heading(context.paragraph.text or ""):
+                return context.paragraph
+        return None
 
     def _last_styled_paragraph(self, document):
-        for paragraph in reversed(document.paragraphs):
+        for context in reversed(self._paragraph_contexts(document)):
+            paragraph = context.paragraph
             text = (paragraph.text or "").strip()
             if text and not is_section_heading(text):
                 return paragraph
         return None
+
+    def _copy_paragraph_format(self, source, target) -> None:
+        try:
+            target.style = source.style
+        except Exception:
+            pass
+        if source._p.pPr is not None:
+            if target._p.pPr is not None:
+                target._p.remove(target._p.pPr)
+            target._p.insert(0, deepcopy(source._p.pPr))
+
+        source_run = next((run for run in source.runs if (run.text or "").strip()), None)
+        target_run = target.runs[0] if target.runs else target.add_run()
+        if source_run is not None and source_run._r.rPr is not None:
+            if target_run._r.rPr is not None:
+                target_run._r.remove(target_run._r.rPr)
+            target_run._r.insert(0, deepcopy(source_run._r.rPr))
 
     def _section_candidates(self, instruction: RewriteInstruction) -> List[str]:
         raw_values = [instruction.section, instruction.category]

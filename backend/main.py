@@ -37,6 +37,7 @@ from services.cv_optimizer import (
     ResumeRewriter,
     RewriteInstruction,
 )
+from services.cv_image_safety import validate_cv_images
 
 
 # =========================
@@ -52,6 +53,7 @@ OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
 VISION_PROVIDER = ENV_FILE_VALUES.get("VISION_PROVIDER", "ollama").strip().lower()
 OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_VISION_MODEL = ENV_FILE_VALUES.get("OLLAMA_VISION_MODEL", "moondream")
+OPENAI_VISION_MODEL = ENV_FILE_VALUES.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
@@ -364,6 +366,7 @@ class CvOptimizationAnalysisRequest(BaseModel):
     goal: Optional[str] = None
     job_link: Optional[str] = None
     original_cv_text: Optional[str] = None
+    cv_fingerprint: Optional[str] = None
     job_data: Optional[Dict[str, Any]] = None
     cv_evaluation: Optional[Any] = None
     strategic_analysis: Optional[Any] = None
@@ -899,7 +902,12 @@ def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
 # FUNZIONI AI / WEB SEARCH
 # =========================
 
-def call_groq(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> str:
+def call_groq(
+    prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    timeout: int = 25,
+) -> str:
     try:
         print("Chiamata Groq avviata...")
 
@@ -909,9 +917,10 @@ def call_groq(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> 
                 {
                     "role": "system",
                     "content": (
-                        "Sei un assistente esperto nella preparazione ai colloqui di lavoro. "
-                        "Aiuti candidati junior, studenti e neolaureati a prepararsi "
-                        "in modo realistico, concreto e pratico."
+                        "Sei un career coach e resume editor esperto in CV, candidature, "
+                        "compatibilità ATS stimata e preparazione ai colloqui. "
+                        "Lavori esclusivamente sui dati forniti nella richiesta corrente, "
+                        "senza ricordare o riutilizzare persone, ruoli o contenuti precedenti."
                     )
                 },
                 {
@@ -921,7 +930,7 @@ def call_groq(prompt: str, temperature: float = 0.7, max_tokens: int = 1000) -> 
             ],
             temperature=temperature,
             max_tokens=max_tokens,
-            timeout=25
+            timeout=timeout
         )
 
         print("Chiamata Groq completata.")
@@ -1018,6 +1027,11 @@ def decode_text_bytes(content: bytes) -> str:
 
 def clean_extracted_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def cv_content_fingerprint(text: str) -> str:
+    normalized = clean_extracted_text(text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def normalize_for_cv_detection(text: str) -> str:
@@ -2583,6 +2597,167 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
     }
 
 
+CV_IMAGE_BLOCKED_CATEGORIES = {
+    "animale",
+    "nudita",
+    "contenuto sessuale",
+    "violenza",
+    "sangue o ferite",
+    "armi",
+    "droghe",
+    "immagine non pertinente",
+    "contenuto ambiguo",
+}
+
+
+def normalize_cv_image_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    categories = [
+        str(category).strip().lower()
+        for category in result.get("categories") or []
+        if str(category).strip().lower() in CV_IMAGE_BLOCKED_CATEGORIES
+    ]
+    return {
+        "blocked": bool(result.get("blocked")) or bool(categories),
+        "categories": sorted(set(categories)),
+        "summary": str(result.get("summary") or "").strip(),
+    }
+
+
+def classify_cv_image_description(description: str) -> Dict[str, Any]:
+    normalized = (description or "").lower()
+    category_keywords = {
+        "animale": (
+            "dog", "cat", "puppy", "kitten", "pet", "animal", "cane", "gatto",
+            "cucciolo", "animale", "bird", "horse",
+        ),
+        "nudita": ("nude", "nudity", "naked", "topless", "senza vestiti", "nud"),
+        "contenuto sessuale": ("sexual", "sexually", "lingerie", "underwear", "intimate"),
+        "violenza": ("violence", "violent", "fight", "assault", "violenza"),
+        "sangue o ferite": ("blood", "injury", "wound", "gore", "sangue", "ferita"),
+        "armi": ("weapon", "gun", "rifle", "knife", "firearm", "arma", "pistola"),
+        "droghe": ("drug", "cocaine", "heroin", "marijuana", "syringe", "droga"),
+        "immagine non pertinente": (
+            "landscape", "food", "meal", "car", "motorcycle", "vacation", "scenery",
+            "paesaggio", "cibo", "automobile", "vacanza",
+        ),
+    }
+    categories = [
+        category
+        for category, keywords in category_keywords.items()
+        if any(keyword in normalized for keyword in keywords)
+    ]
+    allowed_markers = (
+        "portrait", "headshot", "professional photo", "person", "man", "woman",
+        "logo", "icon", "graphic", "chart", "diagram", "ritratto", "persona",
+        "uomo", "donna", "grafico", "diagramma",
+    )
+    if not categories and not any(marker in normalized for marker in allowed_markers):
+        categories.append("contenuto ambiguo")
+    return normalize_cv_image_result({
+        "blocked": bool(categories),
+        "categories": categories,
+        "summary": description,
+    })
+
+
+def analyze_cv_image_with_ollama(image_input: Dict[str, Any]) -> Dict[str, Any]:
+    encoded_image = extract_image_base64(image_input)
+    if not encoded_image:
+        raise ValueError("Immagine Base64 non disponibile.")
+
+    uses_lightweight_description = OLLAMA_VISION_MODEL.split(":", 1)[0] == "moondream"
+    prompt = (
+        "Describe only what is visibly present in this image in one short factual sentence."
+        if uses_lightweight_description
+        else (
+            "Analyze this image embedded in a resume. Return JSON only: "
+            '{"blocked": boolean, "categories": string[], "summary": string}. '
+            "Allowed categories: animale, nudita, contenuto sessuale, violenza, "
+            "sangue o ferite, armi, droghe, immagine non pertinente, contenuto ambiguo. "
+            "Block animals including dogs and cats; nudity or sexual content; violence, gore, "
+            "weapons or drugs; unrelated photos such as food, landscapes, vehicles or holidays; "
+            "and anything ambiguous. Allow only a normal professional portrait of the candidate "
+            "or harmless resume graphics such as logos, icons, charts and diagrams."
+        )
+    )
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": [encoded_image],
+        }],
+    }
+    if not uses_lightweight_description:
+        payload["format"] = "json"
+    response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=240)
+    if not response.ok:
+        raise RuntimeError(f"Ollama: {response.text}")
+    content = response.json().get("message", {}).get("content", "").strip()
+    if uses_lightweight_description:
+        return classify_cv_image_description(content)
+    return normalize_cv_image_result(extract_json(content))
+
+
+def analyze_cv_image_with_openai(image_input: Dict[str, Any]) -> Dict[str, Any]:
+    if not openai_moderation_client:
+        raise RuntimeError("OpenAI non configurato.")
+    moderation = openai_moderation_client.moderations.create(
+        model="omni-moderation-latest",
+        input=[{
+            "type": "image_url",
+            "image_url": image_input.get("image_url", {}),
+        }],
+    )
+    flagged_categories = sorted({
+        category
+        for item in moderation.results
+        for category, flagged in item.categories.model_dump().items()
+        if flagged
+    })
+    if flagged_categories:
+        return {
+            "blocked": True,
+            "categories": ["contenuto ambiguo"],
+            "summary": f"Moderazione sensibile: {', '.join(flagged_categories)}",
+        }
+
+    response = openai_moderation_client.chat.completions.create(
+        model=OPENAI_VISION_MODEL,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Analizza questa immagine incorporata in un CV. Rispondi solo con JSON: "
+                        '{"blocked": boolean, "categories": string[], "summary": string}. '
+                        "Categorie consentite: animale, nudita, contenuto sessuale, violenza, "
+                        "sangue o ferite, armi, droghe, immagine non pertinente, contenuto ambiguo. "
+                        "Blocca cani, gatti e altri animali, immagini sensibili, immagini estranee "
+                        "al CV e casi ambigui. Consenti soltanto un normale ritratto professionale "
+                        "del candidato oppure loghi, icone, grafici e diagrammi innocui."
+                    ),
+                },
+                {"type": "image_url", "image_url": image_input.get("image_url", {})},
+            ],
+        }],
+    )
+    content = response.choices[0].message.content or "{}"
+    return normalize_cv_image_result(extract_json(content))
+
+
+def analyze_embedded_cv_image(image_input: Dict[str, Any]) -> Dict[str, Any]:
+    if VISION_PROVIDER == "ollama":
+        return analyze_cv_image_with_ollama(image_input)
+    if VISION_PROVIDER == "openai":
+        return analyze_cv_image_with_openai(image_input)
+    raise RuntimeError("Provider visuale non configurato.")
+
+
 def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_count: int) -> Dict:
     global openai_visual_rate_limited_until
 
@@ -3330,7 +3505,6 @@ Regole:
             "profili multipli",
             "diverse fonti",
             "omonim",
-            "silvia serra",
             "persona diversa",
             "nomi diversi",
         ]
@@ -3722,45 +3896,72 @@ def build_resume_rewrite_result(
     user_additional_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     parser = ResumeParser()
-    rewriter = ResumeRewriter(parser)
+    sections = parser.parse_text(cv_text)
+
     coach_engine = CoachSuggestionEngine()
     accepted = coach_engine.accepted_only(accepted_suggestions)
-    sections = parser.parse_text(cv_text)
-    target = {
-        "company": company or "Generica",
-        "role": role or "",
-        "description": goal or "",
+    confirmed_skill_instructions = build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}, role)
+
+    # Raccogliamo anche user_additional_data in modo organizzato
+    clean_additional_data = {
+        key: value.strip() if isinstance(value, str) else value
+        for key, value in (user_additional_data or {}).items()
+        if value
     }
-    instructions = rewriter.instructions_from_suggestions(accepted)
-    instructions.extend(build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}))
-    instructions.extend(build_additional_rewrite_instructions(user_additional_data or {}, role or ""))
-    if not instructions and not accepted:
-        prompt = rewriter.build_prompt(
-            cv_text=cv_text,
-            target=target,
-            accepted_suggestions=accepted,
-            user_data=user_additional_data or {},
-            sections=sections,
-        )
-        try:
-            result = extract_json(call_groq(prompt, temperature=0.15, max_tokens=2200))
-        except Exception as exc:
-            print(f"Riscrittura strutturata CV non riuscita, uso fallback conservativo: {exc}")
-            result = {}
+
+    target_info = {
+        "company": company or "Non specificata",
+        "role": role or "Non specificato",
+        "goal": goal or "Non specificato"
+    }
+
+    rewriter = ResumeRewriter(parser)
+    prompt = rewriter.build_prompt(
+        cv_text=cv_text,
+        target=target_info,
+        accepted_suggestions=accepted,
+        user_data=clean_additional_data,
+        sections=sections
+    )
+
+    try:
+        # Generiamo le istruzioni usando Groq
+        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=3000))
         instructions = rewriter.instructions_from_result(result)
-    instructions = sort_rewrite_instructions(instructions)
-    grouped_changes = group_rewrite_instructions(instructions)
-    optimized_text = rewriter.fallback_text(cv_text, accepted, user_additional_data or {})
+
+        # Se LLM ha restituito una lista vuota o qualcosa e' andato storto e avevamo suggerimenti:
+        if not instructions and accepted:
+            print("Nessuna istruzione generata dal LLM, uso fallback basato sui suggerimenti diretti.")
+            instructions = rewriter.instructions_from_suggestions(accepted)
+    except Exception as exc:
+        print(f"Errore nella generazione istruzioni LLM: {exc}")
+        instructions = rewriter.instructions_from_suggestions(accepted)
+
+    instructions.extend(confirmed_skill_instructions)
+    if instructions:
+        instructions = consolidate_rewrite_instructions(cv_text, instructions, company, role, goal)
+
+    optimized_text = rewriter.apply_to_text(cv_text, instructions)
+
+    # 5. Genera previewFinalCvContent per il frontend
+    previewFinalCvContent = {}
+    for inst in instructions:
+        section_name = (inst.section or "Altro").capitalize()
+        # Per la preview evitiamo duplicati
+        if section_name not in previewFinalCvContent:
+            previewFinalCvContent[section_name] = inst.replacement
+        else:
+            previewFinalCvContent[section_name] += "\n\n" + inst.replacement
 
     return {
         "optimized_text": optimized_text,
         "instructions": instructions,
-        "grouped_changes": grouped_changes,
+        "grouped_changes": {"sections": [i.section for i in instructions]},
         "accepted_suggestions": accepted,
-        "missing_proposed_text_count": sum(1 for item in accepted if not str(item.get("proposed_text") or "").strip()),
+        "missing_proposed_text_count": 0,
         "sections": sections,
+        "previewFinalCvContent": previewFinalCvContent
     }
-
 
 def extract_docx_text_bytes(file_bytes: bytes) -> str:
     try:
@@ -3815,6 +4016,180 @@ def validate_optimized_docx_structure(final_text: str) -> List[str]:
     return warnings
 
 
+def review_generated_cv_quality(
+    final_text: str,
+    original_cv_text: str,
+    role: str,
+    company: str,
+    accepted_instructions: List[RewriteInstruction],
+) -> Dict[str, Any]:
+    accepted_payload = [
+        {
+            "id": instruction.source_id,
+            "section": instruction.section,
+            "replacement": instruction.replacement,
+        }
+        for instruction in accepted_instructions
+    ]
+    prompt = f"""
+Agisci come revisore finale senior di curriculum. Restituisci SOLO JSON valido.
+
+Devi decidere se il CV seguente è pulito, professionale e pronto per essere inviato a una candidatura reale.
+
+Ruolo target: {role or "Non specificato"}
+Azienda target: {company or "Non specificata"}
+
+CV originale, usato solo per verificare che non siano stati inventati fatti:
+{original_cv_text[:10000]}
+
+Modifiche accettate che devono essere tutte conservate:
+{json.dumps(accepted_payload, ensure_ascii=False)}
+
+CV finale da revisionare:
+{final_text[:14000]}
+
+Schema:
+{{
+  "ready_to_send": true,
+  "score": 0,
+  "issues": [
+    {{
+      "severity": "critical | major | minor",
+      "section": "nome sezione",
+      "description": "problema concreto"
+    }}
+  ],
+  "revisions": [
+    {{
+      "section": "titolo della sezione",
+      "original_text": "testo esatto del CV finale da sostituire",
+      "replacement": "testo corretto pronto per il CV",
+      "reason": "motivo"
+    }}
+  ]
+}}
+
+Criteri obbligatori:
+- Il CV deve essere pronto da inviare, non una bozza o un report.
+- Controlla duplicazioni, frasi spezzate, elenchi illeggibili, tono debole, incoerenze e ripetizioni.
+- Controlla che ogni sezione sia chiara, sintetica e coerente con il ruolo target.
+- Controlla che tutte le modifiche accettate siano ancora rappresentate.
+- Non proporre fatti, skill, risultati, strumenti, ruoli, date o aziende non supportati.
+- Le revisioni devono correggere solo problemi reali e conservare tutti i fatti validi.
+- original_text deve essere copiato esattamente dal CV finale.
+- Se non ci sono problemi critical o major, ready_to_send deve essere true.
+- score deve essere un intero da 0 a 100.
+"""
+    try:
+        result = extract_json(
+            call_groq(prompt, temperature=0.05, max_tokens=3000, timeout=60)
+        )
+    except Exception as exc:
+        print(f"Revisione finale CV non disponibile: {exc}")
+        return review_generated_cv_quality_locally(
+            final_text=final_text,
+            accepted_instructions=accepted_instructions,
+            llm_error=str(exc),
+        )
+
+    issues = result.get("issues") if isinstance(result.get("issues"), list) else []
+    revisions = result.get("revisions") if isinstance(result.get("revisions"), list) else []
+    return {
+        "ready_to_send": bool(result.get("ready_to_send")),
+        "score": clamp_score(result.get("score", 0)),
+        "issues": [item for item in issues if isinstance(item, dict)][:12],
+        "revisions": [item for item in revisions if isinstance(item, dict)][:8],
+        "review_unavailable": False,
+        "review_provider": "llm",
+        "local_checks_completed": True,
+    }
+
+
+def review_generated_cv_quality_locally(
+    final_text: str,
+    accepted_instructions: List[RewriteInstruction],
+    llm_error: str = "",
+) -> Dict[str, Any]:
+    issues = [
+        {
+            "severity": "major",
+            "section": "struttura",
+            "description": warning,
+        }
+        for warning in validate_optimized_docx_structure(final_text)
+    ]
+    normalized_final = normalize_plain_text(final_text)
+    missing_changes = [
+        instruction.source_id or instruction.section or "modifica"
+        for instruction in accepted_instructions
+        if instruction.replacement
+        and normalize_plain_text(instruction.replacement) not in normalized_final
+    ]
+    if missing_changes:
+        issues.append({
+            "severity": "major",
+            "section": "modifiche",
+            "description": (
+                "Non risultano presenti tutte le modifiche richieste: "
+                + ", ".join(missing_changes[:8])
+            ),
+        })
+    forbidden_markers = [
+        marker
+        for marker in ResumeRewriter.FORBIDDEN_OUTPUT_MARKERS
+        if normalize_plain_text(marker) in normalized_final
+    ]
+    if forbidden_markers:
+        issues.append({
+            "severity": "major",
+            "section": "contenuto",
+            "description": "Il documento contiene testo operativo o di report non destinato al CV.",
+        })
+    ready = not any(issue["severity"] in {"critical", "major"} for issue in issues)
+    return {
+        "ready_to_send": ready,
+        "score": 85 if ready else 55,
+        "issues": issues,
+        "revisions": [],
+        "review_unavailable": False,
+        "review_provider": "local",
+        "local_checks_completed": True,
+        "llm_review_unavailable": True,
+        "technical_detail": llm_error[:300],
+    }
+
+
+def quality_rewrite_instructions(review: Dict[str, Any], final_text: str) -> List[RewriteInstruction]:
+    instructions: List[RewriteInstruction] = []
+    for index, item in enumerate(review.get("revisions") or []):
+        section = str(item.get("section") or "").strip()
+        original = str(item.get("original_text") or "").strip()
+        replacement = str(item.get("replacement") or "").strip()
+        suggestion = {
+            "type": "actionableEdit",
+            "section": section,
+            "original_text": original,
+            "proposed_text": replacement,
+        }
+        if (
+            not section
+            or not original
+            or not replacement
+            or not is_valid_actionable_suggestion(suggestion)
+            or not suggestion_targets_current_cv(suggestion, final_text)
+        ):
+            continue
+        instructions.append(RewriteInstruction(
+            section=section,
+            original=original,
+            replacement=replacement,
+            reason=str(item.get("reason") or "Correzione della revisione finale.").strip(),
+            category="quality_review",
+            source_id=f"quality_review_{index}",
+        ))
+    return instructions
+
+
 def get_optimized_cv_filename(filename: Optional[str] = None, extension: str = "pdf") -> str:
     base = "cv-ottimizzato"
     if filename:
@@ -3834,87 +4209,251 @@ def build_professional_extra_text(user_additional_data: Dict[str, Any], role: st
     support = flatten_cv_support_data(user_additional_data)
     if not support:
         return ""
-    support_plain = normalize_plain_text(support)
-    role_family = infer_role_family(role)
-    if role_family == "data analyst":
-        details = []
-        if "excel" in support_plain:
-            details.append("utilizzo di Excel per analisi dati")
-        if "dataset" in support_plain:
-            details.append("lavoro su dataset in progetti universitari")
-        if any(term in support_plain for term in ["dashboard", "power bi", "tableau", "report", "kpi"]):
-            details.append("realizzazione o lettura di report, dashboard e indicatori")
-        if not details:
-            details.append("attivita progettuali legate all'analisi dei dati")
-        return "Progetto universitario orientato a " + ", ".join(dict.fromkeys(details)) + "."
-    if role_family == "game design":
-        details = []
-        if any(term in support_plain for term in ["prototipo", "prototype", "gioco", "game"]):
-            details.append("realizzazione di un prototipo di gioco universitario")
-        if any(term in support_plain for term in ["unity", "unreal", "blender", "c#"]):
-            details.append("uso di strumenti tecnici per prototipazione e sviluppo")
-        if any(term in support_plain for term in ["level", "meccaniche", "storytelling", "testing"]):
-            details.append("attenzione a meccaniche, livelli, esperienza utente e testing")
-        if not details:
-            details.append("attivita progettuali coerenti con il game design")
-        return "Progetto universitario di game design con " + ", ".join(dict.fromkeys(details)) + "."
-    first_sentence = re.split(r"(?<=[.!?])\s+", support.strip())[0][:240].strip()
-    return f"Attivita rilevante: {first_sentence}"
+    prompt = f"""
+Sei un resume editor. Restituisci SOLO JSON valido.
+
+Ruolo target:
+{role or "Non specificato"}
+
+Informazioni vere inserite dall'utente:
+{support[:3500]}
+
+Schema:
+{{
+  "text": "testo breve direttamente utilizzabile in un CV"
+}}
+
+Regole:
+- Usa esclusivamente i fatti presenti nelle informazioni dell'utente.
+- Non dedurre che si tratti di universita, lavoro, tirocinio o progetto se non e scritto.
+- Non inventare strumenti, risultati, contesti, aziende, date o responsabilita.
+- Migliora solo grammatica, chiarezza e tono professionale.
+- Mantieni la prima persona implicita e non aggiungere etichette o spiegazioni.
+"""
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=400))
+        text = clean_extracted_text(str(result.get("text") or ""))
+        if text:
+            return text[:700]
+    except Exception as exc:
+        print(f"Riformulazione informazioni extra non riuscita, uso testo conservativo: {exc}")
+
+    return re.split(r"(?<=[.!?])\s+", support.strip())[0][:500].strip()
+
+
+def infer_extra_content_section(value: str) -> tuple[str, str]:
+    plain = normalize_plain_text(value)
+    if any(term in plain for term in ["certificazione", "certificato", "attestato", "licenza"]):
+        return "CERTIFICAZIONI", "certification"
+    if any(term in plain for term in ["laurea", "universita", "corso", "formazione", "studio", "esame"]):
+        return "FORMAZIONE", "education"
+    if any(term in plain for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]):
+        return "ESPERIENZE PROFESSIONALI", "experience"
+    if any(term in plain for term in ["progetto", "portfolio", "prototipo", "realizzato", "sviluppato"]):
+        return "PROGETTI", "project"
+    return "ATTIVITA RILEVANTI", "extra_page"
+
+
+def is_role_like_confirmation(name: str, role: str) -> bool:
+    normalized_name = normalize_plain_text(name)
+    normalized_role = normalize_plain_text(role)
+    if not normalized_name:
+        return False
+    if normalized_name == normalized_role:
+        return True
+    if normalized_role and normalized_role in normalized_name:
+        return True
+    generic_role_terms = {
+        "project manager", "project manager stage", "data scientist", "data analyst",
+        "software engineer", "manager", "developper", "developer", "engineer", "analyst",
+        "specialist", "consultant", "researcher", "assistant", "intern", "stage"
+    }
+    if normalized_name in generic_role_terms:
+        return True
+    return False
 
 
 def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], role: str) -> List[RewriteInstruction]:
-    extra_text = build_professional_extra_text(user_additional_data, role)
+    general_additional_data = {
+        key: value
+        for key, value in (user_additional_data or {}).items()
+        if key != "confirmed_skills"
+    }
+    extra_text = build_professional_extra_text(general_additional_data, role)
     if not extra_text:
         return []
-    section = "PROGETTI" if infer_role_family(role) in {"data analyst", "game design"} else "ATTIVITA RILEVANTI"
+    section, category = infer_extra_content_section(flatten_cv_support_data(general_additional_data))
     return [RewriteInstruction(
         section=section,
         original="",
         replacement=extra_text,
         reason="Informazioni extra confermate dall'utente trasformate in testo CV professionale.",
-        category="project",
+        category=category,
         source_id="user_additional_info",
     )]
 
 
-def build_confirmed_skill_rewrite_instructions(cv_text: str, user_additional_data: Dict[str, Any]) -> List[RewriteInstruction]:
-    confirmed = user_additional_data.get("confirmed_skills", [])
-    if not isinstance(confirmed, list) or not confirmed:
-        return []
-    skill_names = []
-    for item in confirmed:
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-        else:
-            name = str(item or "").strip()
-        if name and normalize_plain_text(name) not in {normalize_plain_text(existing) for existing in skill_names}:
-            skill_names.append(name)
-    if not skill_names:
-        return []
-    sections = extract_resume_sections(cv_text)
-    original = sections.get("hard_skills", "")
-    existing_parts = [
-        part.strip()
-        for part in re.split(r"[·,\n;|]+", original)
-        if part.strip()
-    ]
-    merged = list(dict.fromkeys([*existing_parts, *skill_names]))
-    return [RewriteInstruction(
-        section="HARD SKILLS" if original else "COMPETENZE TECNICHE",
-        original=original,
-        replacement=" · ".join(merged),
-        reason="Skill confermate dall'utente integrate nella sezione competenze.",
-        category="skills",
-        source_id="confirmed_skills",
-    )]
+def consolidate_rewrite_instructions(
+    cv_text: str,
+    instructions: List[RewriteInstruction],
+    company: str,
+    role: str,
+    goal: str,
+) -> List[RewriteInstruction]:
+    if len(instructions) <= 1:
+        return instructions
+
+    grouped: Dict[str, List[RewriteInstruction]] = {}
+    for instruction in instructions:
+        section = canonical_edit_section_name(instruction.section) or instruction.section.strip().upper()
+        grouped.setdefault(section, []).append(instruction)
+
+    section_map = extract_resume_sections(cv_text)
+    consolidated: List[RewriteInstruction] = []
+    for section, section_instructions in grouped.items():
+        if len(section_instructions) == 1:
+            consolidated.append(section_instructions[0])
+            continue
+
+        section_key = _resume_section_key(section)
+        original_section = section_map.get(section_key, "").strip()
+        source_ids = [
+            instruction.source_id or f"{section_key}_{index}"
+            for index, instruction in enumerate(section_instructions)
+        ]
+        changes = [
+            {
+                "id": source_ids[index],
+                "original": instruction.original,
+                "replacement": instruction.replacement,
+                "reason": instruction.reason,
+                "category": instruction.category,
+            }
+            for index, instruction in enumerate(section_instructions)
+        ]
+        prompt = f"""
+Sei un senior resume editor. Restituisci SOLO JSON valido.
+
+Devi creare la versione finale di UNA SOLA sezione del CV incorporando TUTTE le modifiche accettate.
+
+Candidatura corrente:
+- Azienda: {company or "Non specificata"}
+- Ruolo: {role or "Non specificato"}
+- Obiettivo/annuncio: {goal or "Non specificato"}
+
+Sezione:
+{section}
+
+Testo originale completo della sezione:
+{original_section or "Sezione non presente"}
+
+Modifiche accettate da integrare tutte:
+{json.dumps(changes, ensure_ascii=False)}
+
+Schema:
+{{
+  "replacement": "testo finale completo della sezione",
+  "applied_ids": {json.dumps(source_ids, ensure_ascii=False)}
+}}
+
+Regole obbligatorie:
+- Integra tutte le modifiche elencate in un unico testo finale coerente.
+- Non perdere nessuna skill, informazione o riscrittura accettata.
+- Non duplicare concetti sovrapposti: fondili mantenendo tutto il contenuto utile.
+- Usa esclusivamente fatti presenti nel testo originale o nelle modifiche accettate.
+- Non inventare aziende, date, strumenti, risultati, esperienze o titoli.
+- Mantieni lingua, tono, sintesi, punteggiatura e forma del CV originale.
+- Se la sezione contiene skill, conserva tutte le skill originali e tutte quelle confermate, organizzandole in modo leggibile.
+- Non inserire il titolo della sezione nel replacement.
+- applied_ids deve contenere esattamente tutti gli ID ricevuti.
+"""
+        replacement = ""
+        applied_ids: List[str] = []
+        try:
+            result = extract_json(
+                call_groq(prompt, temperature=0.05, max_tokens=2200, timeout=60)
+            )
+            replacement = str(result.get("replacement") or "").strip()
+            applied_ids = [
+                str(value).strip()
+                for value in result.get("applied_ids", [])
+                if str(value).strip()
+            ] if isinstance(result.get("applied_ids"), list) else []
+        except Exception as exc:
+            print(f"Consolidamento sezione {section} non riuscito: {exc}")
+
+        if (
+            not replacement
+            or set(applied_ids) != set(source_ids)
+            or not ResumeRewriter().is_safe_replacement(section, replacement)
+        ):
+            replacement = deterministic_section_consolidation(
+                original_section,
+                section_instructions,
+            )
+
+        if not replacement:
+            consolidated.extend(section_instructions)
+            continue
+
+        consolidated.append(RewriteInstruction(
+            section=section,
+            original=original_section or section_instructions[0].original,
+            replacement=replacement,
+            reason="Tutte le modifiche accettate per la sezione sono state consolidate.",
+            category=section_instructions[0].category,
+            source_id="consolidated:" + "|".join(source_ids),
+        ))
+
+    return consolidated
 
 
-def build_confirmed_skill_rewrite_instructions(cv_text: str, user_additional_data: Dict[str, Any]) -> List[RewriteInstruction]:
+def deterministic_section_consolidation(
+    original_section: str,
+    instructions: List[RewriteInstruction],
+) -> str:
+    section = canonical_edit_section_name(instructions[0].section) if instructions else ""
+    if section in {"HARD SKILLS", "SOFT SKILLS", "COMPETENZE TECNICHE"}:
+        values: List[str] = []
+        for source in [original_section, *[item.replacement for item in instructions]]:
+            for value in re.split(r"[,;|•·\n]+", source or ""):
+                clean = value.strip(" -\t")
+                if clean and normalize_plain_text(clean) not in {
+                    normalize_plain_text(existing) for existing in values
+                }:
+                    values.append(clean)
+        return format_skill_list_like_original(original_section, values)
+
+    replacement_instructions = [item for item in instructions if item.original.strip()]
+    additions = [item.replacement.strip() for item in instructions if not item.original.strip()]
+    base = (
+        replacement_instructions[-1].replacement.strip()
+        if replacement_instructions
+        else original_section.strip()
+    )
+    parts = [base, *additions]
+    unique_parts: List[str] = []
+    for part in parts:
+        if not part:
+            continue
+        normalized = normalize_plain_text(part)
+        if normalized and normalized not in {
+            normalize_plain_text(existing) for existing in unique_parts
+        }:
+            unique_parts.append(part)
+    return "\n".join(unique_parts).strip()
+
+
+def build_confirmed_skill_rewrite_instructions(
+    cv_text: str,
+    user_additional_data: Dict[str, Any],
+    role: str = "",
+) -> List[RewriteInstruction]:
     confirmed = user_additional_data.get("confirmed_skills", [])
     if not isinstance(confirmed, list) or not confirmed:
         return []
     skill_names_by_section: Dict[str, List[str]] = {}
-    example_lines: List[str] = []
+    detailed_skills: List[Dict[str, str]] = []
     for item in confirmed:
         if isinstance(item, dict):
             name = str(item.get("name") or "").strip()
@@ -3926,15 +4465,21 @@ def build_confirmed_skill_rewrite_instructions(cv_text: str, user_additional_dat
             detail = ""
             category = "hard_skill"
             target_section = ""
-        if not name:
+        if not name or is_role_like_confirmation(name, role):
             continue
         section = target_section or ("SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS")
+        if category == "keyword" and not target_section:
+            section = "COMPETENZE TECNICHE"
         existing_normalized = {normalize_plain_text(existing) for existing in skill_names_by_section.get(section, [])}
         if normalize_plain_text(name) not in existing_normalized:
             skill_names_by_section.setdefault(section, []).append(name)
         if detail:
-            example_lines.append(format_confirmed_skill_example(name, detail))
-    if not skill_names_by_section and not example_lines:
+            detailed_skills.append({
+                "name": name,
+                "detail": detail,
+                "category": category,
+            })
+    if not skill_names_by_section and not detailed_skills:
         return []
 
     sections = extract_resume_sections(cv_text)
@@ -3951,21 +4496,144 @@ def build_confirmed_skill_rewrite_instructions(cv_text: str, user_additional_dat
         instructions.append(RewriteInstruction(
             section=section if original else ("SOFT SKILLS" if is_soft else "COMPETENZE TECNICHE"),
             original=original,
-            replacement=" · ".join(merged),
+            replacement=format_skill_list_like_original(original, merged),
             reason="Skill e keyword confermate dall'utente integrate nella sezione corretta.",
             category="soft_skills" if is_soft else "skills",
             source_id=f"confirmed_{normalize_plain_text(section).replace(' ', '_')}",
         ))
-    if example_lines:
-        instructions.append(RewriteInstruction(
-            section="PROGETTI",
-            original="",
-            replacement="\n".join(example_lines[:4]),
-            reason="Esempi forniti dall'utente trasformati in testo professionale senza inventare esperienze.",
-            category="project",
-            source_id="confirmed_skill_examples",
-        ))
+    instructions.extend(build_skill_detail_rewrite_instructions(cv_text, detailed_skills, role))
     return instructions
+
+
+def format_skill_list_like_original(original: str, skills: List[str]) -> str:
+    clean_skills = [str(skill).strip() for skill in skills if str(skill).strip()]
+    if not clean_skills:
+        return ""
+
+    original = original or ""
+    if "\n" in original:
+        return "\n".join(clean_skills)
+
+    for separator in (" · ", " • ", " | ", "; ", ", "):
+        if separator.strip() in original:
+            return separator.join(clean_skills)
+
+    # A space-only skill list becomes unreadable as it grows. Keep the existing
+    # content intact and place each newly confirmed skill on its own line.
+    return "\n".join(clean_skills)
+
+
+def build_skill_detail_rewrite_instructions(
+    cv_text: str,
+    detailed_skills: List[Dict[str, str]],
+    role: str,
+) -> List[RewriteInstruction]:
+    if not detailed_skills:
+        return []
+
+    sections = ResumeParser().parse_text(cv_text)
+    section_payload = [
+        {
+            "name": section.name,
+            "heading": section.heading,
+            "text": section.text[:1800],
+        }
+        for section in sections
+    ]
+    prompt = f"""
+Sei un resume editor. Restituisci SOLO JSON valido.
+
+Devi trasformare esempi reali forniti dall'utente in brevi contenuti professionali da aggiungere al CV.
+
+Ruolo target:
+{role or "Non specificato"}
+
+Sezioni e stile testuale del CV originale:
+{json.dumps(section_payload, ensure_ascii=False)}
+
+Skill confermate con dettagli reali:
+{json.dumps(detailed_skills, ensure_ascii=False)}
+
+Schema:
+{{
+  "items": [
+    {{
+      "skill": "nome skill",
+      "section": "PROGETTI | ESPERIENZE PROFESSIONALI | FORMAZIONE | CERTIFICAZIONI | ATTIVITA RILEVANTI",
+      "text": "testo professionale breve da inserire"
+    }}
+  ]
+}}
+
+Regole:
+- Usa esclusivamente i fatti scritti dall'utente; non inventare aziende, ruoli, date, risultati, strumenti o responsabilita.
+- Scegli per ogni dettaglio la sezione semanticamente piu utile. Non mettere tutto automaticamente in PROGETTI.
+- Se il dettaglio riguarda lavoro o tirocinio usa ESPERIENZE PROFESSIONALI; studi o corsi usa FORMAZIONE; progetti usa PROGETTI; attestati usa CERTIFICAZIONI.
+- Mantieni lingua, tono, lunghezza, forma dei bullet e livello di sintesi osservati nel CV originale.
+- Puoi migliorare grammatica e chiarezza senza cambiare il significato.
+- Ogni testo deve essere breve e direttamente utilizzabile nel CV, senza note, spiegazioni o titoli interni.
+"""
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1000))
+        raw_items = result.get("items") if isinstance(result, dict) else []
+    except Exception as exc:
+        print(f"Collocazione dettagli skill non riuscita, uso fallback: {exc}")
+        raw_items = []
+
+    allowed_sections = {
+        "PROGETTI": "project",
+        "ESPERIENZE PROFESSIONALI": "experience",
+        "FORMAZIONE": "education",
+        "CERTIFICAZIONI": "certification",
+        "ATTIVITA RILEVANTI": "extra_page",
+    }
+    instructions = []
+    for index, item in enumerate(raw_items if isinstance(raw_items, list) else []):
+        if not isinstance(item, dict):
+            continue
+        section = str(item.get("section") or "").strip().upper()
+        replacement = clean_extracted_text(str(item.get("text") or ""))
+        if section not in allowed_sections or not replacement:
+            continue
+        instructions.append(RewriteInstruction(
+            section=section,
+            original="",
+            replacement=replacement[:500],
+            reason="Dettaglio reale fornito dall'utente, riformulato e collocato nella sezione più coerente.",
+            category=allowed_sections[section],
+            source_id=f"confirmed_skill_detail_{index}",
+        ))
+
+    if instructions:
+        return instructions[:6]
+
+    return [
+        fallback_skill_detail_instruction(item, index)
+        for index, item in enumerate(detailed_skills[:6])
+    ]
+
+
+def fallback_skill_detail_instruction(item: Dict[str, str], index: int) -> RewriteInstruction:
+    detail = str(item.get("detail") or "").strip()
+    plain = normalize_plain_text(detail)
+    if any(term in plain for term in ["lavoro", "azienda", "tirocinio", "stage", "cliente"]):
+        section, category = "ESPERIENZE PROFESSIONALI", "experience"
+    elif any(term in plain for term in ["laurea", "universita", "corso", "esame", "formazione"]):
+        section, category = "FORMAZIONE", "education"
+    elif any(term in plain for term in ["certificazione", "attestato", "certificato"]):
+        section, category = "CERTIFICAZIONI", "certification"
+    elif any(term in plain for term in ["progetto", "dashboard", "prototipo", "dataset", "portfolio"]):
+        section, category = "PROGETTI", "project"
+    else:
+        section, category = "ATTIVITA RILEVANTI", "extra_page"
+    return RewriteInstruction(
+        section=section,
+        original="",
+        replacement=format_confirmed_skill_example(str(item.get("name") or ""), detail),
+        reason="Dettaglio reale fornito dall'utente collocato con fallback conservativo.",
+        category=category,
+        source_id=f"confirmed_skill_detail_fallback_{index}",
+    )
 
 
 def format_confirmed_skill_example(skill_name: str, detail: str) -> str:
@@ -5693,7 +6361,9 @@ def extract_requested_keywords(role: str, description: str, required_skills: str
 
 
 def filter_cv_keyword_list(values: List[Any]) -> List[str]:
-    blocked = {"data", "analyst", "analysis", "business", "project", "manager", "team", "office"}
+    # Block generic single-word role nouns and weak tokens from appearing as ATS keywords
+    blocked = {"data", "analyst", "analysis", "business", "project", "manager", "team", "office",
+               "scientist", "engineer", "developer", "specialist", "consultant", "designer", "researcher"}
     cleaned = []
     seen = set()
     for value in values or []:
@@ -5782,6 +6452,30 @@ ROLE_SKILL_LIBRARY = {
         "programming_languages": ["Python", "Java", "JavaScript", "Node.js"],
         "tools": ["FastAPI", "Django", "Spring", "PostgreSQL", "MongoDB", "Docker", "Cloud"],
     },
+    "data scientist": {
+        "hard_skills": ["Python", "Machine Learning", "SQL", "Analisi predittiva", "Modelli statistici", "Data preprocessing", "Feature engineering", "Data visualization"],
+        "soft_skills": ["Problem solving", "Pensiero analitico", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+        "programming_languages": ["Python", "SQL", "R"],
+        "tools": ["pandas", "scikit-learn", "Jupyter Notebook", "TensorFlow", "Tableau", "Excel avanzato"],
+    },
+    "project manager": {
+        "hard_skills": ["Pianificazione attività", "Gestione scadenze", "Coordinamento team", "Monitoraggio avanzamento progetto", "Gestione budget", "Risk management"],
+        "soft_skills": ["Comunicazione con stakeholder", "Organizzazione", "Problem solving", "Gestione priorità", "Leadership", "Negoziazione"],
+        "programming_languages": [],
+        "tools": ["Excel avanzato", "Trello", "Jira", "Notion", "Microsoft Project", "Asana", "Monday.com"],
+    },
+    "software engineer": {
+        "hard_skills": ["Sviluppo software", "Design architetturale", "Debugging", "Version control", "Unit testing", "Code review"],
+        "soft_skills": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico"],
+        "programming_languages": ["Python", "JavaScript", "Java", "C++"],
+        "tools": ["Git", "GitHub", "VS Code", "Docker", "AWS", "GitLab"],
+    },
+    "frontend developer": {
+        "hard_skills": ["HTML/CSS", "JavaScript", "User Interface Design", "User Experience", "Responsive Design", "Accessibilita"],
+        "soft_skills": ["Creativita", "Problem solving", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
+        "programming_languages": ["JavaScript", "TypeScript", "React"],
+        "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+    },
 }
 
 
@@ -5823,16 +6517,86 @@ def infer_role_family(role: str, description: str = "", required_skills: str = "
     target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
     if any(term in target_plain for term in ["game design", "game designer", "level design", "unity", "unreal"]):
         return "game design"
+    if any(term in target_plain for term in ["project manager", "project management", "gestione progetti", "pm"]):
+        return "project manager"
     if any(term in target_plain for term in ["backend developer", "back end", "backend", "api", "fastapi", "django", "spring"]):
         return "backend developer"
+    if any(term in target_plain for term in ["data scientist", "data science", "scientist"]):
+        return "data scientist"
     if any(term in target_plain for term in ["data analyst", "analista dati", "analisi dati", "data analysis", "business intelligence"]):
         return "data analyst"
+    if any(term in target_plain for term in ["software engineer", "software developer", "sviluppatore"]):
+        return "software engineer"
+    if any(term in target_plain for term in ["frontend", "ui", "ux", "designer"]):
+        return "frontend developer"
     return ""
+
+
+def infer_skill_library_from_role(role: str, description: str = "") -> Dict[str, List[str]]:
+    """Genera una libreria di skill di fallback basata sul ruolo inserito."""
+    role_plain = normalize_plain_text(role)
+    description_plain = normalize_plain_text(description)
+    
+    if any(term in role_plain for term in ["project manager", "project management"]) or any(term in description_plain for term in ["pianificazione", "progetto", "scadenze"]):
+        return {
+            "hard_skills": ["Pianificazione attività", "Gestione scadenze", "Coordinamento team", "Monitoraggio avanzamento", "Gestione rischi", "Budget management"],
+            "soft_skills": ["Comunicazione", "Organizzazione", "Problem solving", "Gestione priorità", "Leadership", "Negoziazione"],
+            "programming_languages": [],
+            "tools": ["Excel", "Trello", "Jira", "Notion", "Microsoft Project", "Asana"],
+        }
+    
+    if any(term in role_plain for term in ["data scientist", "machine learning"]):
+        return {
+            "hard_skills": ["Python", "Machine Learning", "SQL", "Analisi predittiva", "Modelli statistici", "Data preprocessing", "Feature engineering"],
+            "soft_skills": ["Problem solving", "Pensiero analitico", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
+            "programming_languages": ["Python", "SQL", "R"],
+            "tools": ["pandas", "scikit-learn", "Jupyter", "TensorFlow", "Tableau", "Excel"],
+        }
+    
+    if any(term in role_plain for term in ["data analyst", "analista", "analysis"]):
+        return {
+            "hard_skills": ["SQL", "Python", "Data visualization", "Analisi dati", "Reporting", "KPI", "Business intelligence"],
+            "soft_skills": ["Attenzione ai dettagli", "Pensiero analitico", "Comunicazione", "Problem solving", "Organizzazione"],
+            "programming_languages": ["SQL", "Python"],
+            "tools": ["Excel avanzato", "Power BI", "Tableau", "Google Analytics", "Looker"],
+        }
+    
+    if any(term in role_plain for term in ["software engineer", "developer", "sviluppatore", "programmatore"]):
+        return {
+            "hard_skills": ["Sviluppo software", "Design architetturale", "Debugging", "Version control", "Unit testing", "Code review"],
+            "soft_skills": ["Problem solving", "Collaborazione", "Precisione", "Comunicazione tecnica", "Pensiero logico"],
+            "programming_languages": ["Python", "JavaScript", "Java", "C++"],
+            "tools": ["Git", "GitHub", "VS Code", "Docker", "AWS"],
+        }
+    
+    if any(term in role_plain for term in ["backend", "api", "server"]):
+        return {
+            "hard_skills": ["API development", "Database design", "Autenticazione", "Testing backend", "Architetture REST", "Deploy", "Microservizi"],
+            "soft_skills": ["Problem solving", "Precisione", "Collaborazione", "Documentazione", "Comunicazione tecnica"],
+            "programming_languages": ["Python", "Java", "JavaScript", "Node.js"],
+            "tools": ["FastAPI", "Django", "Spring", "PostgreSQL", "MongoDB", "Docker"],
+        }
+    
+    if any(term in role_plain for term in ["frontend", "ui", "ux", "designer"]):
+        return {
+            "hard_skills": ["HTML/CSS", "JavaScript", "User Interface Design", "User Experience", "Responsive Design", "Accessibilita"],
+            "soft_skills": ["Creativita", "Problem solving", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
+            "programming_languages": ["JavaScript", "TypeScript", "React"],
+            "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+        }
+    
+    # Fallback generico
+    return {
+        "hard_skills": ["Competenza tecnica primaria", "Competenza tecnica secondaria", "Competenza specializzata"],
+        "soft_skills": ["Problem solving", "Comunicazione", "Collaborazione", "Organizzazione", "Pensiero critico"],
+        "programming_languages": [],
+        "tools": ["Strumento principale", "Strumento ausiliario"],
+    }
 
 
 def build_role_skill_suggestions(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, Any]:
     family = infer_role_family(role, description, required_skills)
-    library = ROLE_SKILL_LIBRARY.get(family, {"hard_skills": [], "soft_skills": [], "programming_languages": [], "tools": []})
+    library = ROLE_SKILL_LIBRARY.get(family, {})
     cv_plain = normalize_plain_text(cv_text)
     result = {
         "role_family": family,
@@ -5845,6 +6609,15 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
         "to_confirm": [],
         "confirmation_items": [],
     }
+    
+    # Log iniziale
+    print(f"[build_role_skill_suggestions] family='{family}', role='{role}', library_found={bool(library)}")
+    
+    # Se libreria vuota, usa fallback basato sul ruolo inserito
+    if not library:
+        library = infer_skill_library_from_role(role, description)
+        print(f"[build_role_skill_suggestions] fallback_library_generated, skills_count={sum(len(library.get(k, [])) for k in ['hard_skills', 'soft_skills', 'programming_languages', 'tools'])}")
+    
     for group_name in ["hard_skills", "soft_skills", "programming_languages", "tools"]:
         for skill in library.get(group_name, []):
             present = keyword_group_present(cv_plain, [skill])
@@ -5856,7 +6629,7 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                 "tools": "tool",
             }.get(group_name, "hard_skill")
             result["confirmation_items"].append({
-                "id": f"{family.replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
+                "id": f"{(family or normalize_plain_text(role)).replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
                 "type": "skillConfirmation",
                 "name": skill,
                 "category": category,
@@ -5872,11 +6645,16 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                 result["to_highlight"].append(skill)
             else:
                 result["to_confirm"].append(skill)
-    for keyword in role_keyword_snapshot(cv_text, role, description, required_skills).get("to_confirm", []):
+    
+    snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
+    keywords_to_add = snapshot.get("to_confirm", [])
+    print(f"[build_role_skill_suggestions] keywords_to_confirm={len(keywords_to_add)}")
+    
+    for keyword in keywords_to_add:
         if normalize_plain_text(keyword) in {normalize_plain_text(item["name"]) for item in result["confirmation_items"]}:
             continue
         result["confirmation_items"].append({
-            "id": f"{family.replace(' ', '-')}-keyword-{normalize_plain_text(keyword).replace(' ', '-')}",
+            "id": f"{(family or normalize_plain_text(role)).replace(' ', '-')}-keyword-{normalize_plain_text(keyword).replace(' ', '-')}",
             "type": "keywordConfirmation",
             "name": keyword,
             "category": "keyword",
@@ -5887,6 +6665,8 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
             "user_example": "",
             "target_section": "HARD SKILLS",
         })
+    
+    print(f"[build_role_skill_suggestions] final_confirmation_items={len(result['confirmation_items'])}")
     return result
 
 
@@ -5934,12 +6714,12 @@ def compute_cv_completeness_score(cv_text: str, role: str = "", description: str
 
 
 def compute_role_match_score(cv_text: str, role: str, description: str = "", required_skills: str = "") -> int:
-    cv_plain = normalize_plain_text(cv_text)
     snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
     keyword_score = min(len(snapshot["present"]) * 7, 45)
-    education_score = 15 if any(term in cv_plain for term in ["ingegneria informatica", "computer engineering", "informatica"]) else 0
-    experience_score = 18 if any(term in cv_plain for term in ["tirocinio", "tesi", "progetto", "esperienza"]) else 0
-    profile_score = 12 if extract_resume_sections(cv_text).get("profile") else 0
+    sections = extract_resume_sections(cv_text)
+    education_score = 15 if sections.get("education") else 0
+    experience_score = 18 if sections.get("experience") else 0
+    profile_score = 12 if sections.get("profile") else 0
     baseline = 28 if role.strip() else 18
     return clamp_score(baseline + keyword_score + education_score + experience_score + profile_score)
 
@@ -5953,11 +6733,13 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
     role_snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
     present_keywords = filter_cv_keyword_list([*keyword_match["present"], *role_snapshot["present"]])
     missing_keywords = filter_cv_keyword_list(keyword_match["missing"])
+    role_fragments = {
+        token for token in tokenize_meaningful(role)
+        if len(token) <= 3 or token in {"specialist", "manager", "engineer", "developer", "designer", "analyst", "scientist", "consultant", "researcher", "assistant"}
+    }
     missing_keywords = [
         keyword for keyword in missing_keywords
-        if normalize_plain_text(keyword) not in {
-            "data", "analyst", "data analyst", "machine learning / ai", "nlp / llm", "analisi dei dati"
-        }
+        if normalize_plain_text(keyword) not in role_fragments
     ]
 
     required_sections = {
@@ -6366,51 +7148,43 @@ def extract_resume_sections(cv_text: str) -> Dict[str, str]:
 
 
 def find_profile_fallback(cv_text: str) -> str:
-    text = cv_text or ""
-    match = re.search(r"(Sono una studentessa magistrale[\s\S]{0,500}?\.)", text, flags=re.I)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"(Sono una studentessa[\s\S]{0,500}?\.)", text, flags=re.I)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"(Studentessa magistrale[\s\S]{0,500}?\.)", text, flags=re.I)
-    if match:
-        return match.group(1).strip()
+    lines = [line.strip() for line in (cv_text or "").splitlines() if line.strip()]
+    for line in lines[:20]:
+        plain = normalize_plain_text(line)
+        if (
+            45 <= len(line) <= 900
+            and not re.search(r"@|https?://|\+?\d[\d\s().-]{7,}", line)
+            and not canonical_edit_section_name(line) in EDIT_SECTION_ALIASES
+            and len(plain.split()) >= 8
+        ):
+            return line
     return ""
 
 
 def find_hard_skills_fallback(cv_text: str) -> str:
-    match = re.search(
-        r"(Python[\w\s,&.+#-]{0,200}SQL[\w\s,&.+#-]{0,200}(?:C\+\+|Java|Machine Learning|ML|AI|NLP)?)",
-        cv_text or "",
-        flags=re.I,
-    )
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"(Python\s*[·,-]?[\w\s]*SQL[\w\s]*)(?:[\n\r]|$)", cv_text or "", flags=re.I)
-    if match:
-        return match.group(1).strip()
+    lines = [line.strip() for line in (cv_text or "").splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if canonical_edit_section_name(line) != "HARD SKILLS":
+            continue
+        return lines[index + 1] if index + 1 < len(lines) else ""
     return ""
 
 
 def find_experience_fallback(cv_text: str) -> str:
-    text = cv_text or ""
-    match = re.search(r"(Progetto di tirocinio e tesi triennale[\s\S]{0,500}?analisi dei dati\.)", text, flags=re.I)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"(Tirocinio[\s\S]{0,500}?)", text, flags=re.I)
-    if match:
-        return match.group(1).strip()
+    sections = split_cv_edit_sections(cv_text)
+    for heading in ("ESPERIENZE PROFESSIONALI", "ESPERIENZA PROFESSIONALE", "ESPERIENZE"):
+        text = sections.get(heading, "").strip()
+        if text:
+            return first_section_paragraph(text)
     return ""
 
 
 def find_education_fallback(cv_text: str) -> str:
-    match = re.search(r"(Laurea[\w\s,.;:-]{0,500})", cv_text or "", flags=re.I)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"(Master[\w\s,.;:-]{0,500})", cv_text or "", flags=re.I)
-    if match:
-        return match.group(1).strip()
+    sections = split_cv_edit_sections(cv_text)
+    for heading in ("FORMAZIONE", "ISTRUZIONE"):
+        text = sections.get(heading, "").strip()
+        if text:
+            return first_section_paragraph(text)
     return ""
 
 
@@ -6487,6 +7261,16 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
     section_plain = normalize_plain_text(section)
     original_plain = normalize_plain_text(original)
     proposed_plain = normalize_plain_text(proposed)
+    # Reject suggestions that are identical when normalized
+    if original and original_plain == proposed_plain:
+        return False
+    # Reject suggestions that are almost identical (too small change)
+    try:
+        similarity = SequenceMatcher(None, original_plain, proposed_plain).ratio() if original_plain and proposed_plain else 0
+        if similarity >= 0.92:
+            return False
+    except Exception:
+        pass
     if section_plain in {"chi sono", "profilo", "profilo professionale"}:
         blocked = ["contatti", "lingue", "hard skills", "soft skills", "formazione", "esperienze professionali"]
         if any(term in original_plain or term in proposed_plain for term in blocked):
@@ -6500,10 +7284,30 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
     return ResumeRewriter().is_safe_replacement(section, proposed)
 
 
+def suggestion_targets_current_cv(suggestion: Dict, cv_text: str) -> bool:
+    original = str(suggestion.get("original_text") or "").strip()
+    section = str(suggestion.get("section") or "").strip()
+    if not original or not section or not cv_text.strip():
+        return False
+
+    original_plain = normalize_plain_text(original)
+    cv_plain = normalize_plain_text(cv_text)
+    if original_plain and original_plain in cv_plain:
+        return True
+
+    section_key = _resume_section_key(canonical_edit_section_name(section) or section)
+    section_text = extract_resume_sections(cv_text).get(section_key, "")
+    original_tokens = tokenize_meaningful(original)
+    section_tokens = tokenize_meaningful(section_text)
+    if not original_tokens or not section_tokens:
+        return False
+    coverage = len(original_tokens.intersection(section_tokens)) / len(original_tokens)
+    return coverage >= 0.85
+
+
 def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
     suggestions: List[Dict] = []
     cv_text = str(evaluation.get("cv_text") or "")
-    cv_plain = normalize_plain_text(cv_text)
     section_map = extract_resume_sections(cv_text)
 
     def section_key(section_name: str) -> str:
@@ -6520,22 +7324,6 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
             "lingue": "languages",
         }.get(normalize_plain_text(section_name), section_name.strip().lower().replace(" ", "_"))
 
-    def section_sample(section_name: str) -> tuple[str, str]:
-        key = section_key(section_name)
-        text = section_map.get(key, "").strip()
-        if text:
-            compact = re.sub(r"\s+", " ", text).strip()
-            if key in {"profile", "hard_skills"} and len(compact) <= 900 and count_section_markers(compact) <= 1:
-                return key, compact
-            snippet = first_section_paragraph(text)
-            return key, snippet or compact[:900]
-        return "", ""
-
-    def first_supported_line(section_name: str, keywords: List[str]) -> str:
-        key = section_key(section_name)
-        text = section_map.get(key, "")
-        return first_section_paragraph(text, keywords, max_chars=950)
-
     def safe_add(suggestion: Dict) -> None:
         proposed = str(suggestion.get("proposed_text") or "")
         section = str(suggestion.get("section") or "")
@@ -6544,94 +7332,90 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
         if not is_valid_actionable_suggestion(suggestion):
             print(f"Suggerimento applicabile scartato per replacement non sicuro: {suggestion.get('id')} | {proposed[:180]}")
             return
+        if not suggestion_targets_current_cv(suggestion, cv_text):
+            print(f"Suggerimento scartato perché non appartiene al CV corrente: {suggestion.get('id')}")
+            return
         suggestions.append(suggestion)
 
-    supported_skills = []
-    for label, variants in [
-        ("Python", ["python"]),
-        ("SQL", ["sql"]),
-        ("Machine Learning", ["machine learning", " ml "]),
-        ("AI", [" ai ", "intelligenza artificiale"]),
-        ("NLP", ["nlp", "natural language processing"]),
-        ("LLM", ["llm", "large language"]),
-        ("Analisi dei dati", ["analisi dati", "analisi dei dati", "data analysis"]),
-        ("C++", ["c++"]),
-        ("Java", ["java"]),
+    target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+    role = str(target.get("role") or "").strip()
+    section_payload = []
+    for canonical, key in [
+        ("CHI SONO", "profile"),
+        ("HARD SKILLS", "hard_skills"),
+        ("ESPERIENZE PROFESSIONALI", "experience"),
+        ("FORMAZIONE", "education"),
+        ("PROGETTI", "progetti"),
     ]:
-        if any(variant.strip() in cv_plain for variant in variants):
-            supported_skills.append(label)
+        text = section_map.get(key, "").strip()
+        if text:
+            section_payload.append({"section": canonical, "text": text[:1800]})
 
-    profile_section, profile_original = section_sample("profilo")
-    target_text = normalize_plain_text(json.dumps(evaluation.get("target") or {}, ensure_ascii=False))
-    data_role = any(term in f"{target_text} {cv_plain}" for term in ["data analyst", "analisi dati", "analisi dei dati", "data analysis"])
-    if profile_original and data_role:
-        skill_phrase = ", ".join(supported_skills[:6]) or "analisi dei dati"
-        project_phrase = (
-            "con esperienza progettuale nell'utilizzo di modelli LLM, NLP e valutazione delle prestazioni. "
-            if any(term in cv_plain for term in ["llm", "large language", "nlp", "natural language"])
-            else "con esperienza progettuale nell'analisi e nello sviluppo di soluzioni digitali. "
-        )
+    prompt = f"""
+Sei un resume editor. Restituisci SOLO JSON valido.
+
+Ruolo target:
+{role or "Non specificato"}
+
+Sezioni reali del CV corrente:
+{json.dumps(section_payload, ensure_ascii=False)}
+
+Parole chiave realmente rilevate nel CV:
+{json.dumps(evaluation.get("relevant_skills_found") or [], ensure_ascii=False)}
+
+Schema:
+{{
+  "suggestions": [
+    {{
+      "category": "profile | experience | skills | education | project",
+      "title": "titolo breve",
+      "description": "vantaggio della modifica",
+      "section": "titolo esatto della sezione",
+      "original_text": "testo esatto presente nella sezione",
+      "proposed_text": "riscrittura pronta per il CV",
+      "keywords_added": []
+    }}
+  ]
+}}
+
+Regole:
+- Crea al massimo quattro modifiche puntuali.
+- Usa esclusivamente fatti e competenze presenti nelle sezioni fornite.
+- Non usare esempi, persone, ruoli, aziende o tecnologie provenienti da altre richieste.
+- Non inventare risultati, strumenti, esperienze, titoli di studio o contesti.
+- Mantieni lingua, tono, lunghezza e struttura del CV corrente.
+- original_text deve essere copiato esattamente da una singola sezione.
+- proposed_text deve sostituire solo original_text e non deve contenere titoli di altre sezioni.
+- Per le skill conserva tutte quelle presenti e migliora solo leggibilita e separatori.
+- Se non puoi migliorare un blocco senza aggiungere fatti, non proporre la modifica.
+"""
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=2600, timeout=60))
+        generated = result.get("suggestions") if isinstance(result, dict) else []
+    except Exception as exc:
+        print(f"Suggerimenti coach generici non disponibili: {exc}")
+        generated = []
+
+    for item in generated if isinstance(generated, list) else []:
+        if not isinstance(item, dict):
+            continue
+        section = str(item.get("section") or "").strip()
+        original = str(item.get("original_text") or "").strip()
+        proposed = str(item.get("proposed_text") or "").strip()
+        if not section or not original or not proposed:
+            continue
         safe_add(make_coach_suggestion(
-            "profile",
-            "Riscrivi il profilo professionale per Data Analyst",
-            "Rende il profilo più vicino al ruolo Data Analyst usando solo informazioni già presenti nel CV.",
-            section="CHI SONO",
-            original_text=profile_original,
-            proposed_text=(
-                "Studentessa magistrale in Ingegneria Informatica, con interesse per analisi dei dati, machine learning "
-                f"e sviluppo di soluzioni digitali. Possiede competenze in {skill_phrase} e tecniche di analisi applicate "
-                f"a dati testuali, {project_phrase}"
-                "Motivata a crescere in contesti data-driven, applicando competenze tecniche e approccio analitico "
-                "alla risoluzione di problemi complessi."
-            ),
-            keywords_added=supported_skills,
+            str(item.get("category") or "phrases"),
+            str(item.get("title") or "Migliora questa sezione"),
+            str(item.get("description") or "Rende il contenuto più chiaro mantenendo i fatti del CV."),
+            section=section,
+            original_text=original,
+            proposed_text=proposed,
+            keywords_added=item.get("keywords_added") if isinstance(item.get("keywords_added"), list) else [],
         ))
 
-    experience_original = first_supported_line("esperienze", ["llm", "large language", "nlp", "tirocinio", "tesi", "legislativi"])
-    if experience_original:
-        safe_add(make_coach_suggestion(
-            "experience",
-            "Valorizza il tirocinio come esperienza di analisi dati/NLP",
-            "Rende più chiari attività, strumenti e risultati del tirocinio senza aggiungere esperienze nuove.",
-            section="ESPERIENZE PROFESSIONALI",
-            original_text=experience_original,
-            proposed_text=(
-                "Progetto di tirocinio e tesi triennale focalizzato sull'utilizzo di Large Language Models per "
-                "l'analisi semantica di testi legislativi. Attività orientata alla preparazione dei dati, all'utilizzo "
-                "di modelli LLM tramite API, alla definizione di strategie di prompting e al confronto delle prestazioni. "
-                "Analisi dei risultati in termini di accuratezza e tempi di risposta, applicando tecniche di NLP, "
-                "clustering testuale e analisi dei dati."
-            ),
-            keywords_added=["LLM", "NLP", "clustering testuale", "accuratezza", "tempi di risposta"],
-        ))
-
-    skills_section, skills_original = section_sample("competenze")
-    if skills_original and supported_skills:
-        safe_add(make_coach_suggestion(
-            "skills",
-            "Riorganizza le hard skills in modo più ATS-friendly",
-            "Rende le competenze tecniche più leggibili dagli ATS senza aggiungere skill non supportate.",
-            section="HARD SKILLS",
-            original_text=skills_original,
-            proposed_text=" · ".join(dict.fromkeys(supported_skills)),
-            keywords_added=supported_skills,
-        ))
-
-    education_original = first_supported_line("formazione", ["ingegneria", "informatica", "machine learning", "ai", "artificiale"])
-    if education_original and data_role and any(term in cv_plain for term in ["ingegneria", "informatica", "machine learning", "intelligenza artificiale", " ai "]):
-        safe_add(make_coach_suggestion(
-            "education",
-            "Valorizza il percorso formativo in AI e Machine Learning",
-            "Collega meglio la formazione al ruolo target senza inserire certificazioni o strumenti non confermati.",
-            section="FORMAZIONE",
-            original_text=education_original,
-            proposed_text=(
-                "Percorso universitario in Ingegneria Informatica orientato allo sviluppo di competenze informatiche, "
-                "analitiche e quantitative applicabili all'analisi dei dati, all'Intelligenza Artificiale e alla "
-                "progettazione di soluzioni digitali."
-            ),
-            keywords_added=["Ingegneria Informatica", "AI", "Machine Learning", "analisi dei dati"],
-        ))
+    if not suggestions:
+        suggestions.extend(build_generic_rewrite_fallbacks(section_map, role))
 
     unique = []
     seen = set()
@@ -6642,6 +7426,63 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
         seen.add(key)
         unique.append(suggestion)
     return unique[:30]
+
+
+def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> List[Dict]:
+    suggestions: List[Dict] = []
+    clean_role = re.sub(r"\s+", " ", role or "").strip()
+
+    profile = re.sub(r"\s+", " ", section_map.get("profile", "")).strip()
+    if profile and clean_role and normalize_plain_text(clean_role) not in normalize_plain_text(profile):
+        proposed = f"{profile.rstrip('.')}. Obiettivo professionale: {clean_role}."
+        suggestion = make_coach_suggestion(
+            "profile",
+            f"Allinea il profilo al ruolo {clean_role}",
+            "Rende esplicito il ruolo target senza aggiungere esperienze o competenze.",
+            section="CHI SONO",
+            original_text=profile,
+            proposed_text=proposed,
+            keywords_added=[],
+        )
+        if is_valid_actionable_suggestion(suggestion):
+            suggestions.append(suggestion)
+
+    for section, key, category, title in [
+        ("ESPERIENZE PROFESSIONALI", "experience", "experience", "Rendi più leggibile l'esperienza professionale"),
+        ("FORMAZIONE", "education", "education", "Rendi più leggibile il percorso formativo"),
+        ("PROGETTI", "progetti", "project", "Rendi più leggibile la descrizione dei progetti"),
+    ]:
+        original = section_map.get(key, "").strip()
+        proposed = format_section_as_readable_blocks(original)
+        if not original or not proposed or original.strip() == proposed.strip():
+            continue
+        suggestion = make_coach_suggestion(
+            category,
+            title,
+            "Migliora ordine e leggibilità mantenendo invariati tutti i fatti presenti.",
+            section=section,
+            original_text=original,
+            proposed_text=proposed,
+            keywords_added=[],
+        )
+        if is_valid_actionable_suggestion(suggestion):
+            suggestions.append(suggestion)
+
+    return suggestions[:4]
+
+
+def format_section_as_readable_blocks(value: str) -> str:
+    clean = re.sub(r"[ \t]+", " ", value or "").strip()
+    if not clean:
+        return ""
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", clean)
+        if sentence.strip()
+    ]
+    if len(sentences) < 2:
+        return ""
+    return "\n".join(f"- {sentence}" for sentence in sentences)
 
 
 def normalize_accepted_coach_suggestions(value: Any) -> List[Dict]:
@@ -6732,9 +7573,9 @@ def build_fallback_cv_job_evaluation(
         "Sono presenti alcune informazioni confrontabili con ruolo e descrizione inseriti.",
     ]
     weaknesses = [
-        "Rendi più evidente l'orientamento all'analisi dei dati.",
-        "Valorizza Python, SQL, ML/AI, NLP e LLM solo dove sono già supportati dal CV.",
-        "Rendi più chiari i risultati del tirocinio: accuratezza, tempi di risposta, confronto modelli.",
+        f"Rendi più evidente la coerenza con il ruolo {role}." if role else "Rendi più chiaro l'obiettivo professionale.",
+        "Valorizza soltanto competenze e parole chiave già presenti nel CV o confermate dall'utente.",
+        "Rendi più specifiche le attività descritte, senza aggiungere risultati o responsabilità non documentati.",
     ]
 
     evaluation = {
@@ -6871,7 +7712,7 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
             "section": section,
             "original_text": original_text,
             "proposed_text": proposed_text,
-        }):
+        }) and suggestion_targets_current_cv(item, fallback.get("cv_text", "")):
             actionable_from_model.append(item)
         else:
             print(f"coach_suggestion AI ignorato perche non applicabile: {item.get('id') or item.get('title')}")
@@ -6991,6 +7832,9 @@ Regole:
 - Rispondi sempre e solo in italiano. Tutti i campi mostrati all'utente devono essere scritti in italiano.
 - Tutti i punteggi devono essere interi da 0 a 100.
 - Non essere generico: collega ogni giudizio a ruolo, azienda, descrizione e fonti.
+- Considera ogni richiesta indipendente: usa esclusivamente il CV, la candidatura e le fonti contenute in questo prompt.
+- Non usare nomi, aziende, ruoli, competenze o esperienze ricordati, dedotti o provenienti da altre richieste.
+- Ogni affermazione sul candidato deve essere direttamente supportata dal testo del CV corrente.
 - Distingui competenze presenti da competenze mancanti.
 - Non inventare esperienze non presenti nel CV.
 - Valuta compatibilita ATS stimata: sezioni leggibili, keyword, struttura, completezza, testo estraibile.
@@ -7003,7 +7847,7 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1800))
+        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=3000, timeout=60))
         normalized = normalize_cv_job_evaluation(result, fallback)
         questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
         normalized["optimization_questions"] = questions
@@ -7080,6 +7924,7 @@ async def analyze_cv_for_job_endpoint(
         "identity_check": identity_check,
         "job_validation": job_validation,
         "cv_evaluation": cv_evaluation,
+        "cv_fingerprint": cv_content_fingerprint(cv_text),
         "warnings": job_validation.get("warnings", []),
     }
 
@@ -7142,6 +7987,7 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
         "identity_check": identity_check,
         "job_validation": job_validation,
         "cv_evaluation": cv_evaluation,
+        "cv_fingerprint": cv_content_fingerprint(cv_text),
         "warnings": job_validation.get("warnings", []),
     }
 
@@ -7162,6 +8008,21 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     if not existing_user[10] or not cv_text:
         conn.close()
         raise HTTPException(status_code=400, detail="Carica un CV valido prima di ottimizzarlo.")
+
+    current_cv_fingerprint = cv_content_fingerprint(cv_text)
+    request_cv_fingerprint = (data.cv_fingerprint or "").strip().lower()
+    if not request_cv_fingerprint:
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="L'analisi non è associata al CV corrente. Avvia una nuova analisi prima di ottimizzare.",
+        )
+    if not hmac.compare_digest(request_cv_fingerprint, current_cv_fingerprint):
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail="Il CV è cambiato dopo l'analisi. Avvia una nuova analisi per evitare di usare dati o suggerimenti del CV precedente.",
+        )
 
     public_user = user_to_response(existing_user)
     public_user["cv_text"] = cv_text
@@ -7282,10 +8143,20 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     alternatives = []
     format_warnings = []
     applied_changes_count = 0
+    quality_review: Dict[str, Any] = {
+        "ready_to_send": False,
+        "score": 0,
+        "issues": [],
+        "revisions": [],
+    }
 
     if original_filename.endswith(".docx") and original_file_bytes:
         try:
-            file_bytes, applied_changes_count = DocxPreserver().apply(original_file_bytes, rewrite_result["instructions"])
+            docx_preserver = DocxPreserver()
+            file_bytes, applied_changes_count = docx_preserver.apply(
+                original_file_bytes,
+                rewrite_result["instructions"],
+            )
             if rewrite_result.get("instructions") and applied_changes_count == 0:
                 print(
                     "CV DOCX generato senza sostituzioni automatiche: "
@@ -7300,6 +8171,19 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                         "error": "Nessuna modifica selezionata e stata applicata. Controlla i suggerimenti o riprova.",
                         "applied_changes_count": applied_changes_count,
                         "selected_suggestions_count": len(accepted_suggestions),
+                    },
+                )
+            if docx_preserver.skipped_source_ids:
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": (
+                            "Una o più modifiche accettate non sono state applicate al template originale. "
+                            "La generazione è stata interrotta prima di produrre un CV incompleto."
+                        ),
+                        "missing_changes": docx_preserver.skipped_source_ids,
                     },
                 )
             final_docx_text = extract_docx_text_bytes(file_bytes)
@@ -7323,6 +8207,78 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                         "applied_changes_count": applied_changes_count,
                     },
                 )
+            quality_review = review_generated_cv_quality(
+                final_text=final_docx_text,
+                original_cv_text=cv_text,
+                role=role_context,
+                company=company,
+                accepted_instructions=rewrite_result["instructions"],
+            )
+            if not quality_review.get("ready_to_send"):
+                revision_instructions = quality_rewrite_instructions(
+                    quality_review,
+                    final_docx_text,
+                )
+                if revision_instructions:
+                    quality_preserver = DocxPreserver()
+                    revised_bytes, revised_count = quality_preserver.apply(
+                        file_bytes,
+                        revision_instructions,
+                    )
+                    if not quality_preserver.skipped_source_ids and revised_count == len(revision_instructions):
+                        file_bytes = revised_bytes
+                        applied_changes_count += revised_count
+                        final_docx_text = extract_docx_text_bytes(file_bytes)
+                        second_structure_warnings = validate_optimized_docx_structure(final_docx_text)
+                        if second_structure_warnings:
+                            conn.close()
+                            raise HTTPException(
+                                status_code=422,
+                                detail={
+                                    "success": False,
+                                    "error": "La revisione automatica ha prodotto una struttura DOCX non valida.",
+                                    "structure_warnings": second_structure_warnings,
+                                },
+                            )
+                        quality_review = review_generated_cv_quality(
+                            final_text=final_docx_text,
+                            original_cv_text=cv_text,
+                            role=role_context,
+                            company=company,
+                            accepted_instructions=rewrite_result["instructions"],
+                        )
+
+                blocking_issues = [
+                    issue
+                    for issue in quality_review.get("issues", [])
+                    if str(issue.get("severity") or "").lower() in {"critical", "major"}
+                ]
+                if (
+                    not quality_review.get("review_unavailable")
+                    and not quality_review.get("ready_to_send")
+                    and blocking_issues
+                ):
+                    conn.close()
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "success": False,
+                            "error": (
+                                "Il controllo qualità finale non considera ancora il CV pronto per l'invio. "
+                                "La generazione è stata interrotta invece di consegnare un documento debole."
+                            ),
+                            "quality_score": quality_review.get("score", 0),
+                            "quality_issues": blocking_issues,
+                        },
+                    )
+            hallucination_warnings = detect_unsupported_optimized_claims(
+                final_docx_text,
+                cv_text,
+                user_additional_data,
+                company,
+                role_context,
+                goal,
+            )
             similarity = SequenceMatcher(
                 None,
                 normalize_plain_text(original_docx_text),
@@ -7347,10 +8303,6 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                     )
                 format_warnings.append(
                     "Il DOCX finale risulta molto simile all'originale: alcune modifiche selezionate potrebbero richiedere revisione manuale."
-                )
-            if rewrite_result.get("instructions") and applied_changes_count < len(rewrite_result["instructions"]):
-                format_warnings.append(
-                    "Alcune modifiche non sono state applicate perché non era possibile inserirle in modo sicuro mantenendo il layout."
                 )
             content_type = ExportService.DOCX_CONTENT_TYPE
             extension = "docx"
@@ -7396,7 +8348,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 status_code=422,
                 detail={
                     "success": False,
-                    "error": "Per applicare davvero le modifiche o le informazioni extra mantenendo il layout, carica il CV originale in formato DOCX.",
+                    "error": "Per applicare davvero le modifiche mantenendo il layout, carica il CV originale in formato DOCX.",
                     "applied_changes_count": applied_changes_count,
                     "selected_suggestions_count": len(accepted_suggestions),
                 },
@@ -7430,14 +8382,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     confirmed_score_bonus = min((applied_changes_count * 3) + (len(confirmed_skills) * 2), 14)
     analysis_score = clamp_score(analysis_score + confirmed_score_bonus) if applied_changes_count else analysis_score
     grouped_changes = rewrite_result.get("grouped_changes", {})
-    requested_changes_count = len(rewrite_result.get("instructions", []))
     skipped_change_details = []
-    if requested_changes_count and applied_changes_count < requested_changes_count:
-        skipped_change_details.append({
-            "reason": "Alcune modifiche confermate non sono state applicate automaticamente per preservare layout e sezioni del DOCX.",
-            "requested_changes_count": requested_changes_count,
-            "applied_changes_count": applied_changes_count,
-        })
     skipped_change_details.extend({"reason": warning} for warning in format_warnings)
 
     cursor.execute("""
@@ -7478,6 +8423,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             "content_type": content_type,
             "file_base64": file_base64,
             "text": optimized_text,
+            "previewFinalCvContent": rewrite_result.get("previewFinalCvContent", {}),
             "download_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file",
             "docx_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file?format=docx" if docx_file else None,
             "pdf_url": f"/users/{user_id}/optimized-cvs/{optimized_cv_id}/file?format=pdf" if pdf_file else None,
@@ -7495,6 +8441,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             "has_docx": bool(docx_file),
             "has_pdf": bool(pdf_file),
             "generation_status": "completed",
+            "quality_review": quality_review,
         }
     return {
         "success": True,
@@ -7504,6 +8451,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         "analysis": analysis,
         "hallucination_warnings": hallucination_warnings,
         "format_warnings": format_warnings,
+        "quality_review": quality_review,
         "accepted_suggestions": accepted_suggestions,
         "rejected_suggestion_ids": rejected_suggestion_ids,
         "skipped_changes": skipped_change_details,
@@ -7728,6 +8676,44 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
             "debug": debug,
         }
 
+    try:
+        visual_validation = validate_cv_images(
+            filename,
+            file_bytes,
+            analyze_embedded_cv_image,
+        )
+    except Exception as exc:
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": (
+                "Il CV contiene immagini che non e stato possibile verificare in modo sicuro. "
+                f"Riprova quando il servizio visuale e disponibile. Dettaglio: {exc}"
+            ),
+            "detected_sections": [],
+            "visual_validation": {
+                "status": "analysis_failed",
+                "blocked": True,
+                "message": str(exc),
+            },
+            "debug": debug,
+        }
+
+    if visual_validation.get("blocked"):
+        categories = ", ".join(visual_validation.get("blocked_categories") or [])
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": (
+                "Il CV contiene un'immagine non ammessa"
+                + (f": {categories}." if categories else ".")
+                + " Sono consentiti solo un normale ritratto professionale e grafica innocua del CV."
+            ),
+            "detected_sections": [],
+            "visual_validation": visual_validation,
+            "debug": debug,
+        }
+
     extracted_text, extraction_method = extract_text_from_file_bytes(file_bytes, filename)
     normalized_text = clean_extracted_text(extracted_text)
     debug["text_length"] = len(normalized_text)
@@ -7775,6 +8761,7 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
         "confidence": clamp_score(confidence),
         "reason": reason,
         "detected_sections": heuristic["detected_sections"],
+        "visual_validation": visual_validation,
         "debug": debug,
     }
 
