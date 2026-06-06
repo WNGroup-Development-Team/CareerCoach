@@ -294,7 +294,9 @@ Schema JSON:
 }}
 
 Regole:
-- Applica solo modifiche accettate dall'utente o informazioni confermate.
+- Applica sempre una ottimizzazione prudente per il ruolo target, anche quando il CV originale e gia buono.
+- Le modifiche automatiche possono migliorare sintesi, chiarezza, tono professionale e aderenza al target, ma non possono aggiungere fatti.
+- Applica inoltre tutte le modifiche accettate dall'utente e le informazioni confermate.
 - Ogni replacement deve sostituire solo il blocco originale della stessa sezione.
 - Se section e profilo/CHI SONO, replacement deve contenere solo un breve profilo, non contatti, lingue, skills, formazione o esperienze.
 - Non copiare suggerimenti coach nel CV.
@@ -307,7 +309,35 @@ Regole:
 - Se informazioni reali richiedono spazio aggiuntivo, puoi proporre nuove sezioni o pagine solo quando migliorano davvero il CV.
 - Le nuove sezioni devono essere coerenti con struttura, stile e gerarchia del documento originale.
 - Se non c'e supporto, non creare nuove skill.
+- Se esiste almeno un blocco migliorabile, restituisci da 1 a 6 istruzioni concrete. Restituisci una lista vuota solo se nessuna riscrittura sarebbe realmente utile.
 """
+
+    def apply_to_text(self, cv_text: str, instructions: List[RewriteInstruction]) -> str:
+        updated = cv_text or ""
+        for instruction in instructions:
+            original = (instruction.original or "").strip()
+            replacement = (instruction.replacement or "").strip()
+            if not original or not replacement:
+                continue
+            if original in updated:
+                updated = updated.replace(original, replacement, 1)
+                continue
+            pattern = re.compile(re.escape(original), flags=re.IGNORECASE)
+            updated, count = pattern.subn(replacement, updated, count=1)
+            if count:
+                continue
+            original_words = re.findall(r"\S+", original)
+            if len(original_words) < 4:
+                continue
+            flexible_pattern = r"\s+".join(re.escape(word) for word in original_words)
+            updated = re.sub(
+                flexible_pattern,
+                lambda _match: replacement,
+                updated,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        return self.clean_final_text(updated)
 
     def fallback_text(self, cv_text: str, accepted_suggestions: List[Dict[str, Any]], user_data: Dict[str, Any]) -> str:
         # Fallback intentionally conservative: preserves original CV text and avoids reports.

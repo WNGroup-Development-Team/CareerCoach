@@ -1986,14 +1986,23 @@ function App() {
           acceptedSkillConfirmations: confirmedSkillPayload,
           rejectedSkillConfirmations: rejectedSkillPayload,
         })
-      }, 90000);
+      }, 210000);
 
-      const data = await response.json();
+      const responseText = await response.text();
+      let data = {};
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        data = {};
+      }
 
       if (!response.ok) {
         const detail = typeof data.detail === "string"
           ? data.detail
-          : data.detail?.message || data.detail?.error || "Non è stato possibile generare il CV. Controlla che il file originale sia ancora disponibile e riprova.";
+          : data.detail?.message
+            || data.detail?.error
+            || responseText
+            || "Non è stato possibile generare il CV. Controlla che il file originale sia ancora disponibile e riprova.";
         const rejectedFields = Array.isArray(data.detail?.rejected_fields)
           ? data.detail.rejected_fields
           : [];
@@ -2037,7 +2046,11 @@ function App() {
       }
     } catch (err) {
       console.error(err);
-      setError("Non è stato possibile generare il CV. Controlla che il file originale sia ancora disponibile e riprova.");
+      setError(
+        err?.name === "AbortError"
+          ? "La generazione del CV sta impiegando troppo tempo. Riprova: la richiesta è stata interrotta dopo 3 minuti e 30 secondi."
+          : "Connessione al backend interrotta durante la generazione del CV. Controlla che FastAPI sia ancora avviato e riprova."
+      );
     } finally {
       setLoading(false);
       setLoadingMessage("");

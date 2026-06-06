@@ -3,7 +3,12 @@ import unittest
 
 from docx import Document
 
-from services.cv_optimizer.pipeline import DocxPreserver, ResumeParser, RewriteInstruction
+from services.cv_optimizer.pipeline import (
+    DocxPreserver,
+    ResumeParser,
+    ResumeRewriter,
+    RewriteInstruction,
+)
 
 
 class ResumeParserLayoutTests(unittest.TestCase):
@@ -21,6 +26,34 @@ class ResumeParserLayoutTests(unittest.TestCase):
         self.assertIn("formazione", sections)
         self.assertIn("esperienze", sections)
         self.assertEqual(sections["competenze"], "Python SQL Power BI")
+
+
+class ResumeRewriterTests(unittest.TestCase):
+    def test_applies_generated_instructions_to_optimized_text(self):
+        original = (
+            "PROFILO\n"
+            "Analista con esperienza in reportistica.\n\n"
+            "COMPETENZE\n"
+            "Excel e SQL"
+        )
+
+        optimized = ResumeRewriter().apply_to_text(
+            original,
+            [
+                RewriteInstruction(
+                    section="profilo",
+                    original="Analista con esperienza in reportistica.",
+                    replacement="Analista orientato ai dati con esperienza in reportistica.",
+                    source_id="generated-profile",
+                )
+            ],
+        )
+
+        self.assertIn(
+            "Analista orientato ai dati con esperienza in reportistica.",
+            optimized,
+        )
+        self.assertNotEqual(optimized, original)
 
 
 class DocxPreserverLayoutTests(unittest.TestCase):

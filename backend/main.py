@@ -37,6 +37,7 @@ from services.cv_optimizer import (
     ResumeRewriter,
     RewriteInstruction,
 )
+from services.cv_image_safety import validate_cv_images
 
 
 # =========================
@@ -52,6 +53,7 @@ OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
 VISION_PROVIDER = ENV_FILE_VALUES.get("VISION_PROVIDER", "ollama").strip().lower()
 OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_VISION_MODEL = ENV_FILE_VALUES.get("OLLAMA_VISION_MODEL", "moondream")
+OPENAI_VISION_MODEL = ENV_FILE_VALUES.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
@@ -2595,6 +2597,167 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
     }
 
 
+CV_IMAGE_BLOCKED_CATEGORIES = {
+    "animale",
+    "nudita",
+    "contenuto sessuale",
+    "violenza",
+    "sangue o ferite",
+    "armi",
+    "droghe",
+    "immagine non pertinente",
+    "contenuto ambiguo",
+}
+
+
+def normalize_cv_image_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    categories = [
+        str(category).strip().lower()
+        for category in result.get("categories") or []
+        if str(category).strip().lower() in CV_IMAGE_BLOCKED_CATEGORIES
+    ]
+    return {
+        "blocked": bool(result.get("blocked")) or bool(categories),
+        "categories": sorted(set(categories)),
+        "summary": str(result.get("summary") or "").strip(),
+    }
+
+
+def classify_cv_image_description(description: str) -> Dict[str, Any]:
+    normalized = (description or "").lower()
+    category_keywords = {
+        "animale": (
+            "dog", "cat", "puppy", "kitten", "pet", "animal", "cane", "gatto",
+            "cucciolo", "animale", "bird", "horse",
+        ),
+        "nudita": ("nude", "nudity", "naked", "topless", "senza vestiti", "nud"),
+        "contenuto sessuale": ("sexual", "sexually", "lingerie", "underwear", "intimate"),
+        "violenza": ("violence", "violent", "fight", "assault", "violenza"),
+        "sangue o ferite": ("blood", "injury", "wound", "gore", "sangue", "ferita"),
+        "armi": ("weapon", "gun", "rifle", "knife", "firearm", "arma", "pistola"),
+        "droghe": ("drug", "cocaine", "heroin", "marijuana", "syringe", "droga"),
+        "immagine non pertinente": (
+            "landscape", "food", "meal", "car", "motorcycle", "vacation", "scenery",
+            "paesaggio", "cibo", "automobile", "vacanza",
+        ),
+    }
+    categories = [
+        category
+        for category, keywords in category_keywords.items()
+        if any(keyword in normalized for keyword in keywords)
+    ]
+    allowed_markers = (
+        "portrait", "headshot", "professional photo", "person", "man", "woman",
+        "logo", "icon", "graphic", "chart", "diagram", "ritratto", "persona",
+        "uomo", "donna", "grafico", "diagramma",
+    )
+    if not categories and not any(marker in normalized for marker in allowed_markers):
+        categories.append("contenuto ambiguo")
+    return normalize_cv_image_result({
+        "blocked": bool(categories),
+        "categories": categories,
+        "summary": description,
+    })
+
+
+def analyze_cv_image_with_ollama(image_input: Dict[str, Any]) -> Dict[str, Any]:
+    encoded_image = extract_image_base64(image_input)
+    if not encoded_image:
+        raise ValueError("Immagine Base64 non disponibile.")
+
+    uses_lightweight_description = OLLAMA_VISION_MODEL.split(":", 1)[0] == "moondream"
+    prompt = (
+        "Describe only what is visibly present in this image in one short factual sentence."
+        if uses_lightweight_description
+        else (
+            "Analyze this image embedded in a resume. Return JSON only: "
+            '{"blocked": boolean, "categories": string[], "summary": string}. '
+            "Allowed categories: animale, nudita, contenuto sessuale, violenza, "
+            "sangue o ferite, armi, droghe, immagine non pertinente, contenuto ambiguo. "
+            "Block animals including dogs and cats; nudity or sexual content; violence, gore, "
+            "weapons or drugs; unrelated photos such as food, landscapes, vehicles or holidays; "
+            "and anything ambiguous. Allow only a normal professional portrait of the candidate "
+            "or harmless resume graphics such as logos, icons, charts and diagrams."
+        )
+    )
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": [encoded_image],
+        }],
+    }
+    if not uses_lightweight_description:
+        payload["format"] = "json"
+    response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=240)
+    if not response.ok:
+        raise RuntimeError(f"Ollama: {response.text}")
+    content = response.json().get("message", {}).get("content", "").strip()
+    if uses_lightweight_description:
+        return classify_cv_image_description(content)
+    return normalize_cv_image_result(extract_json(content))
+
+
+def analyze_cv_image_with_openai(image_input: Dict[str, Any]) -> Dict[str, Any]:
+    if not openai_moderation_client:
+        raise RuntimeError("OpenAI non configurato.")
+    moderation = openai_moderation_client.moderations.create(
+        model="omni-moderation-latest",
+        input=[{
+            "type": "image_url",
+            "image_url": image_input.get("image_url", {}),
+        }],
+    )
+    flagged_categories = sorted({
+        category
+        for item in moderation.results
+        for category, flagged in item.categories.model_dump().items()
+        if flagged
+    })
+    if flagged_categories:
+        return {
+            "blocked": True,
+            "categories": ["contenuto ambiguo"],
+            "summary": f"Moderazione sensibile: {', '.join(flagged_categories)}",
+        }
+
+    response = openai_moderation_client.chat.completions.create(
+        model=OPENAI_VISION_MODEL,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Analizza questa immagine incorporata in un CV. Rispondi solo con JSON: "
+                        '{"blocked": boolean, "categories": string[], "summary": string}. '
+                        "Categorie consentite: animale, nudita, contenuto sessuale, violenza, "
+                        "sangue o ferite, armi, droghe, immagine non pertinente, contenuto ambiguo. "
+                        "Blocca cani, gatti e altri animali, immagini sensibili, immagini estranee "
+                        "al CV e casi ambigui. Consenti soltanto un normale ritratto professionale "
+                        "del candidato oppure loghi, icone, grafici e diagrammi innocui."
+                    ),
+                },
+                {"type": "image_url", "image_url": image_input.get("image_url", {})},
+            ],
+        }],
+    )
+    content = response.choices[0].message.content or "{}"
+    return normalize_cv_image_result(extract_json(content))
+
+
+def analyze_embedded_cv_image(image_input: Dict[str, Any]) -> Dict[str, Any]:
+    if VISION_PROVIDER == "ollama":
+        return analyze_cv_image_with_ollama(image_input)
+    if VISION_PROVIDER == "openai":
+        return analyze_cv_image_with_openai(image_input)
+    raise RuntimeError("Provider visuale non configurato.")
+
+
 def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_count: int) -> Dict:
     global openai_visual_rate_limited_until
 
@@ -3768,7 +3931,7 @@ def build_resume_rewrite_result(
     )
     instructions = sort_rewrite_instructions(instructions)
     grouped_changes = group_rewrite_instructions(instructions)
-    optimized_text = rewriter.fallback_text(cv_text, accepted, user_additional_data or {})
+    optimized_text = rewriter.apply_to_text(cv_text, instructions)
 
     return {
         "optimized_text": optimized_text,
@@ -4023,6 +4186,18 @@ def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], 
         for key, value in (user_additional_data or {}).items()
         if key != "confirmed_skills"
     }
+    extra_text = build_professional_extra_text(general_additional_data, role)
+    if not extra_text:
+        return []
+    section, category = infer_extra_content_section(flatten_cv_support_data(general_additional_data))
+    return [RewriteInstruction(
+        section=section,
+        original="",
+        replacement=extra_text,
+        reason="Informazioni extra confermate dall'utente trasformate in testo CV professionale.",
+        category=category,
+        source_id="user_additional_info",
+    )]
 
 
 def consolidate_rewrite_instructions(
@@ -4174,18 +4349,6 @@ def deterministic_section_consolidation(
         }:
             unique_parts.append(part)
     return "\n".join(unique_parts).strip()
-    extra_text = build_professional_extra_text(general_additional_data, role)
-    if not extra_text:
-        return []
-    section, category = infer_extra_content_section(flatten_cv_support_data(general_additional_data))
-    return [RewriteInstruction(
-        section=section,
-        original="",
-        replacement=extra_text,
-        reason="Informazioni extra confermate dall'utente trasformate in testo CV professionale.",
-        category=category,
-        source_id="user_additional_info",
-    )]
 
 
 def build_confirmed_skill_rewrite_instructions(
@@ -7972,7 +8135,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 status_code=422,
                 detail={
                     "success": False,
-                    "error": "Per applicare davvero le modifiche o le informazioni extra mantenendo il layout, carica il CV originale in formato DOCX.",
+                    "error": "Per applicare davvero le modifiche mantenendo il layout, carica il CV originale in formato DOCX.",
                     "applied_changes_count": applied_changes_count,
                     "selected_suggestions_count": len(accepted_suggestions),
                 },
@@ -8299,6 +8462,44 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
             "debug": debug,
         }
 
+    try:
+        visual_validation = validate_cv_images(
+            filename,
+            file_bytes,
+            analyze_embedded_cv_image,
+        )
+    except Exception as exc:
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": (
+                "Il CV contiene immagini che non e stato possibile verificare in modo sicuro. "
+                f"Riprova quando il servizio visuale e disponibile. Dettaglio: {exc}"
+            ),
+            "detected_sections": [],
+            "visual_validation": {
+                "status": "analysis_failed",
+                "blocked": True,
+                "message": str(exc),
+            },
+            "debug": debug,
+        }
+
+    if visual_validation.get("blocked"):
+        categories = ", ".join(visual_validation.get("blocked_categories") or [])
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": (
+                "Il CV contiene un'immagine non ammessa"
+                + (f": {categories}." if categories else ".")
+                + " Sono consentiti solo un normale ritratto professionale e grafica innocua del CV."
+            ),
+            "detected_sections": [],
+            "visual_validation": visual_validation,
+            "debug": debug,
+        }
+
     extracted_text, extraction_method = extract_text_from_file_bytes(file_bytes, filename)
     normalized_text = clean_extracted_text(extracted_text)
     debug["text_length"] = len(normalized_text)
@@ -8346,6 +8547,7 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
         "confidence": clamp_score(confidence),
         "reason": reason,
         "detected_sections": heuristic["detected_sections"],
+        "visual_validation": visual_validation,
         "debug": debug,
     }
 
