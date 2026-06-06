@@ -993,8 +993,19 @@ textarea {
 .cv-next-button {
   width: 100%;
   margin-top: auto;
-  padding: 18px 24px;
-  background: #3d735e;
+  min-height: 50px;
+  padding: 14px 22px;
+  border-radius: 14px;
+  background: linear-gradient(90deg, #149eea 0%, #1683c3 100%);
+  font-size: 16px;
+  line-height: 1.2;
+  box-shadow: 0 8px 18px rgba(20, 137, 202, 0.2);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.cv-next-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px rgba(20, 137, 202, 0.28);
 }
 
 .cv-next-button:disabled {
@@ -1356,6 +1367,43 @@ textarea {
   line-height: 1.35;
 }
 
+.cv-stage-progress {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 18px;
+}
+
+.cv-stage-progress span {
+  padding: 7px 5px;
+  border-radius: 999px;
+  background: #e8eef5;
+  color: #718096;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.cv-stage-progress span.active {
+  background: #0f76a8;
+  color: #ffffff;
+}
+
+.cv-present-skills-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cv-present-skills-list span {
+  padding: 8px 11px;
+  border: 1px solid #b8ded6;
+  border-radius: 999px;
+  background: #e7f5f2;
+  color: #176d57;
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .cv-strategy-score-card,
 .cv-strategy-section {
   width: 100%;
@@ -1626,6 +1674,12 @@ textarea {
   transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 
+.suggestion-choice-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+}
+
 .suggestion-choice-button:not(.active):hover {
   border-color: #8fb2d4;
   background: #f3f8fc;
@@ -1658,6 +1712,97 @@ textarea {
 .suggestion-choice-button.reject:not(.active):hover {
   border-color: #b42318;
   color: #912018;
+}
+
+.reviewed-choice-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.reviewed-choice {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  gap: 9px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid #d7e2ec;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.reviewed-choice > span {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  color: #ffffff;
+  font-weight: 900;
+}
+
+.reviewed-choice strong {
+  color: #263548;
+  font-size: 13px;
+}
+
+.reviewed-choice small {
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.reviewed-choice.accepted {
+  border-color: #a9d7b8;
+  background: #f2fbf5;
+}
+
+.reviewed-choice.accepted > span {
+  background: #2e7d32;
+}
+
+.reviewed-choice.accepted small {
+  color: #246328;
+}
+
+.reviewed-choice.rejected {
+  border-color: #efb1ac;
+  background: #fff7f7;
+}
+
+.reviewed-choice.rejected > span {
+  background: #b42318;
+}
+
+.reviewed-choice.rejected small {
+  color: #912018;
+}
+
+.reviewed-choice-edit {
+  border: 1px solid #9cb4ca;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #ffffff;
+  color: #0f6797;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.reviewed-choice-edit:hover {
+  border-color: #0f76a8;
+  background: #edf8fe;
+}
+
+@media (max-width: 600px) {
+  .reviewed-choice {
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+  }
+
+  .reviewed-choice-edit {
+    grid-column: 2 / -1;
+    justify-self: start;
+  }
 }
 
 .skill-confirmation-card {
@@ -1748,6 +1893,11 @@ textarea {
 }
 
 .optimized-cv-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.cv-stage-actions {
   display: grid;
   gap: 12px;
 }
@@ -1889,6 +2039,52 @@ textarea {
   font-size: 13px;
   font-weight: 900;
   line-height: 1.25;
+}
+
+.optimized-cv-summary-grid {
+  width: 100%;
+  min-width: 0;
+}
+
+.optimized-cv-summary-grid > div {
+  min-width: 0;
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.optimized-cv-summary-grid .file-item {
+  grid-column: 1 / -1;
+  min-height: 82px;
+}
+
+.optimized-cv-summary-grid .file-item strong {
+  max-width: 100%;
+  font-size: 17px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.optimized-cv-summary-grid .date-item strong {
+  font-size: 18px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.optimized-cv-summary-grid .metric-item strong {
+  font-size: 28px;
+}
+
+@media (max-width: 480px) {
+  .optimized-cv-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .optimized-cv-summary-grid .file-item {
+    grid-column: auto;
+  }
 }
 
 .scores-grid.cv-job-scores {
