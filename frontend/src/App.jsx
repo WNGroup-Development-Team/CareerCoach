@@ -57,17 +57,6 @@ const getSuggestionText = (item) => {
   return item.description || item.suggestion || item.coach_tip || item.title || "";
 };
 
-const GENERIC_CV_CONFIRMATION_KEYWORDS = new Set([
-  "data",
-  "analyst",
-  "data analyst",
-  "analysis",
-  "business",
-  "project",
-  "manager",
-  "team",
-]);
-
 const CV_SECTION_MARKERS = [
   "CONTATTI",
   "LINGUE",
@@ -136,7 +125,7 @@ const normalizeConfirmationName = (value) => {
 
 const normalizeSkillConfirmationItem = (value, index, fallback = {}) => {
   const name = normalizeConfirmationName(value).trim();
-  if (!name || GENERIC_CV_CONFIRMATION_KEYWORDS.has(name.toLowerCase())) {
+  if (!name) {
     return null;
   }
   const isKeyword = fallback.type === "keywordConfirmation";
@@ -4018,7 +4007,9 @@ function App() {
                         </small>
                         {!item.already_present && (
                           <small>
-                            Puoi accettare subito la skill. Se aggiungi un esempio reale, verrà riformulato e inserito nella sezione più coerente del CV.
+                            {item.type === "keywordConfirmation"
+                              ? "Puoi accettare questa keyword. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."
+                              : "Puoi accettare subito la skill. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."}
                           </small>
                         )}
                         <label className="cv-additional-field">
@@ -4026,7 +4017,13 @@ function App() {
                           <textarea
                             value={item.user_example}
                             onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
-                            placeholder={`Facoltativo: descrivi un uso reale di ${item.name} in un progetto, studio o lavoro...`}
+                            placeholder={
+                              item.type === "keywordConfirmation"
+                                ? "Facoltativo: descrivi un uso reale di questa keyword in un progetto, studio o lavoro..."
+                                : item.category === "soft_skill"
+                                ? "Facoltativo: descrivi una situazione reale in cui hai dimostrato questa competenza..."
+                                : "Facoltativo: descrivi dove hai usato questa competenza tecnica..."
+                            }
                             rows={2}
                           />
                         </label>
