@@ -747,6 +747,46 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // Stati per l'effetto typewriter e la voce AI
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [displayedText, setDisplayedText] = useState("");
+
+  useEffect(() => {
+    // Ogni volta che compare una nuova domanda o entriamo nello step "question"
+    if (step === "question" && question && !showTransition) {
+      window.speechSynthesis.cancel(); // Interrompi voci precedenti
+      setDisplayedText("");
+      setIsSpeaking(true);
+
+      // Effetto Typewriter: rivela un carattere alla volta
+      let i = 0;
+      const typewriter = setInterval(() => {
+        setDisplayedText(question.substring(0, i + 1));
+        i++;
+        if (i >= question.length) clearInterval(typewriter);
+      }, 60); // Velocità di comparsa del testo
+
+      // Sintesi Vocale (TTS)
+      try {
+        const utter = new SpeechSynthesisUtterance(question);
+        utter.lang = "it-IT";
+        utter.rate = 0.95; // Velocità naturale
+        utter.onend = () => setIsSpeaking(false);
+        window.speechSynthesis.speak(utter);
+      } catch (e) {
+        setIsSpeaking(false);
+      }
+
+      return () => {
+        clearInterval(typewriter);
+        window.speechSynthesis.cancel();
+      };
+    } else if (step === "question" && showTransition) {
+      setDisplayedText("");
+      setIsSpeaking(false);
+    }
+  }, [question, step, showTransition]);
+
   useEffect(() => {
     const splashTimer = setTimeout(() => {
       setShowSplash(false);
@@ -4944,7 +4984,26 @@ function App() {
             Domanda {currentQuestionIndex + 1} di {questions.length || 10}
           </div>
 
-          <div className="question-box">{question}</div>
+          <div className="interviewer-container">
+            <div className="avatar-wrapper">
+              <div className={`interviewer-avatar ${isSpeaking ? 'speaking' : ''}`}>
+                  <img src={logoCareerCoach} alt="Logo" className="avatar-logo" />
+                {isSpeaking && (
+                  <div className="audio-visualizer">
+                    <span className="bar"></span>
+                    <span className="bar"></span>
+                    <span className="bar"></span>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="interviewer-content">
+              <div className="question-bubble" aria-live="polite">
+                {displayedText}
+                {displayedText.length < (question?.length || 0) && <span className="cursor">|</span>}
+              </div>
+            </div>
+          </div>
 
           <div className="response-field">
             <label htmlFor="answer">La tua risposta</label>
