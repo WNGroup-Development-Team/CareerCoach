@@ -175,6 +175,11 @@ def init_db():
     )
     """)
 
+    cursor.execute("PRAGMA table_info(interview_sessions)")
+    existing_columns = [row[1] for row in cursor.fetchall()]
+    if "role" not in existing_columns:
+        cursor.execute("ALTER TABLE interview_sessions ADD COLUMN role TEXT")
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS answers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9454,19 +9459,20 @@ La struttura deve essere ESATTAMENTE questa:
         interview_type,
         difficulty,
         company,
+        role,
         question_mode
     )
-    VALUES (?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?)
     """, (
         user_id,
         data.interview_type,
         data.difficulty,
         company,
+        role_for_questions,
         question_mode
     ))
 
     session_id = cursor.lastrowid
-
     saved_questions = []
 
     for question_text in questions_list:
@@ -9593,13 +9599,14 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         )
 
         cursor.execute("""
-        UPDATE interview_sessions
-        SET total_score = ?
-        WHERE id = ?
-        """, (
-            zero_result["total_score"],
-            session_id
-        ))
+            UPDATE interview_sessions
+            SET total_score = (
+                SELECT CAST(ROUND(AVG(total_score)) AS INTEGER)
+                FROM answers
+                WHERE question_id IN (SELECT id FROM questions WHERE session_id = ?)
+            )
+            WHERE id = ?
+        """, (session_id, session_id))
 
         conn.commit()
         conn.close()
@@ -9875,13 +9882,14 @@ Regole di valutazione:
     )
 
     cursor.execute("""
-    UPDATE interview_sessions
-    SET total_score = ?
-    WHERE id = ?
-    """, (
-        total_score,
-        session_id
-    ))
+        UPDATE interview_sessions
+        SET total_score = (
+            SELECT CAST(ROUND(AVG(total_score)) AS INTEGER)
+            FROM answers
+            WHERE question_id IN (SELECT id FROM questions WHERE session_id = ?)
+        )
+        WHERE id = ?
+    """, (session_id, session_id))
 
     conn.commit()
     conn.close()
@@ -9906,6 +9914,7 @@ def get_history(user_id: int):
         s.interview_type,
         s.difficulty,
         s.company,
+        s.role,
         s.question_mode,
         s.total_score,
         s.created_at,
@@ -9939,21 +9948,22 @@ def get_history(user_id: int):
             "interview_type": row[1],
             "difficulty": row[2],
             "company": row[3],
-            "question_mode": row[4],
-            "total_score": row[5],
-            "created_at": row[6],
-            "question": row[7],
-            "user_answer": row[8],
-            "clarity_score": row[9],
-            "completeness_score": row[10],
-            "relevance_score": row[11],
-            "professionalism_score": row[12],
-            "synthesis_score": row[13],
-            "speaking_score": row[14],
-            "feedback": row[15],
-            "improved_answer": row[16],
-            "speaking_feedback": row[17],
-            "solution_explanation": row[18]
+            "role": row[4],
+            "question_mode": row[5],
+            "total_score": row[6],
+            "created_at": row[7],
+            "question": row[8],
+            "user_answer": row[9],
+            "clarity_score": row[10],
+            "completeness_score": row[11],
+            "relevance_score": row[12],
+            "professionalism_score": row[13],
+            "synthesis_score": row[14],
+            "speaking_score": row[15],
+            "feedback": row[16],
+            "improved_answer": row[17],
+            "speaking_feedback": row[18],
+            "solution_explanation": row[19]
         })
 
     return history

@@ -3690,16 +3690,104 @@ textarea {
 
 .history-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
+  gap: 16px;
+  margin-bottom: 10px;
 }
 
 .history-header h3 {
   margin: 0;
   color: var(--primary);
   text-transform: capitalize;
+}
+
+.history-session-subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.history-toggle-button {
+  border: 1px solid rgba(15, 76, 129, 0.16);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--primary);
+  padding: 10px 16px;
+  font-size: 0.95rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 150ms ease, transform 150ms ease, border-color 150ms ease;
+}
+
+.history-toggle-button:hover {
+  background: rgba(15, 76, 129, 0.06);
+  border-color: rgba(15, 76, 129, 0.24);
+  transform: translateY(-1px);
+}
+
+.history-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.history-session-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-question-list {
+  display: grid;
+  gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e8eff7;
+}
+
+.history-question-item {
+  padding: 16px;
+  border-radius: 16px;
+  background: #f4f8ff;
+  border: 1px solid rgba(15, 76, 129, 0.08);
+}
+
+.history-question-item p {
+  margin: 0 0 10px;
+}
+
+.history-question-item p:last-child {
+  margin-bottom: 0;
+}
+
+.history-question-toggle {
+  border: 1px solid rgba(15, 76, 129, 0.16);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--primary);
+  padding: 10px 14px;
+  font-size: 0.92rem;
+  font-weight: 800;
+  cursor: pointer;
+  margin-bottom: 14px;
+  transition: background 150ms ease, transform 150ms ease, border-color 150ms ease;
+}
+
+.history-question-toggle:hover {
+  background: rgba(15, 76, 129, 0.06);
+  border-color: rgba(15, 76, 129, 0.24);
+  transform: translateY(-1px);
+}
+
+.history-question-details {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(15, 76, 129, 0.1);
 }
 
 .history-header span {

@@ -740,6 +740,8 @@ function App() {
 
   const [feedback, setFeedback] = useState(null);
   const [history, setHistory] = useState([]);
+  const [expandedHistorySessions, setExpandedHistorySessions] = useState([]);
+  const [expandedHistoryQuestions, setExpandedHistoryQuestions] = useState([]);
   const [progress, setProgress] = useState(null);
 
   const [loading, setLoading] = useState(false);
@@ -2376,7 +2378,22 @@ function App() {
         }
       ]);
 
-      setStep("feedback");
+      // Se ci sono altre domande, passa alla prossima, altrimenti vai al riepilogo finale
+      if (currentQuestionIndex < questions.length - 1) {
+        const nextIndex = currentQuestionIndex + 1;
+        const nextQuestion = questions[nextIndex];
+
+        setCurrentQuestionIndex(nextIndex);
+        setQuestionId(nextQuestion.question_id);
+        setQuestion(nextQuestion.question);
+        setAnswer("");
+        setFeedback(null);
+        setSpeechMetrics(null);
+        setAnswerMode("text");
+        // Restiamo nello step "question"
+      } else {
+        transitionToStep("interview-summary");
+      }
     } catch (err) {
       console.error(err);
 
@@ -2390,7 +2407,7 @@ function App() {
     }
   };
 
-  const loadHistory = async () => {
+  const loadHistory = async (navigateToHistory = true) => {
     resetError();
     setLoading(true);
 
@@ -2405,7 +2422,9 @@ function App() {
       }
 
       setHistory(data);
-      setStep("history");
+      if (navigateToHistory) {
+        setStep("history");
+      }
     } catch (err) {
       console.error(err);
 
@@ -2418,6 +2437,14 @@ function App() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (step !== "gym" || !userId || history.length > 0) {
+      return;
+    }
+
+    loadHistory(false);
+  }, [step, userId]);
 
   const loadProgress = async () => {
     resetError();
@@ -2824,7 +2851,28 @@ function App() {
   const acceptedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "confirmed" || item.status === "accepted");
   const rejectedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "rejected");
   const latestOptimizedCv = optimizedCvsList[0] || null;
-  const previousInterviewTargets = optimizedCvsList
+
+  // Calcolo delle medie per il riepilogo finale della sessione
+  const sessionSummary = {
+    totalScore: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.total_score, 0) / allFeedbacks.length) : 0,
+    clarity: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.clarity_score, 0) / allFeedbacks.length) : 0,
+    completeness: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.completeness_score, 0) / allFeedbacks.length) : 0,
+    relevance: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.relevance_score, 0) / allFeedbacks.length) : 0,
+    professionalism: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.professionalism_score, 0) / allFeedbacks.length) : 0,
+    synthesis: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.synthesis_score, 0) / allFeedbacks.length) : 0,
+    speaking: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.speaking_score, 0) / allFeedbacks.length) : 0,
+  };
+
+  const previousInterviewTargetsFromHistory = history
+    .filter((item) => item.company || item.role)
+    .map((item) => ({
+      company: item.company || "Generica",
+      role: item.role || "Ruolo da definire",
+      id: `${(item.company || "Generica").trim().toLowerCase()}::${(item.role || "").trim().toLowerCase()}`,
+    }))
+    .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+
+  const previousInterviewTargetsFromOptimizedCv = optimizedCvsList
     .filter((item) => item.target_company || item.target_role)
     .map((item) => ({
       company: item.target_company || "Generica",
@@ -2832,6 +2880,12 @@ function App() {
       id: `${(item.target_company || "Generica").trim().toLowerCase()}::${(item.target_role || "").trim().toLowerCase()}`,
     }))
     .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+
+  const previousInterviewTargets = [
+    ...previousInterviewTargetsFromHistory,
+    ...previousInterviewTargetsFromOptimizedCv,
+  ].filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+
   const difficultyOptions = [
     { value: "base", label: "Base", description: "Domande dirette, perfette per iniziare con ritmo tranquillo." },
     { value: "intermedio", label: "Intermedio", description: "Domande realistiche e professionali su competenze e motivazione." },
@@ -2862,6 +2916,95 @@ function App() {
       reason: item.description || item.coach_tip || "",
       category: "approfondimento",
     }));
+  const formatHistoryDate = (value) => {
+    if (!value) return "";
+    const normalized = String(value).trim().replace(" ", "T");
+    const date = new Date(normalized);
+    if (!Number.isNaN(date.getTime())) {
+      return new Intl.DateTimeFormat("it-IT", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      }).format(date);
+    }
+    return String(value);
+  };
+
+  const displayInterviewType = (type) => {
+    if (!type) return "Generale";
+    const labels = {
+      conoscitive_motivazionali: "Conoscitive motivazionali",
+      tecniche: "Tecniche",
+      logica: "Logica",
+    };
+    const key = String(type).toLowerCase();
+    if (labels[key]) return labels[key];
+    const label = type.replace(/_/g, " ");
+    return label.charAt(0).toUpperCase() + label.slice(1).toLowerCase();
+  };
+
+  const displayDifficulty = (difficulty) => {
+    if (!difficulty) return "—";
+    return difficulty.charAt(0).toUpperCase() + difficulty.slice(1).toLowerCase();
+  };
+
+  const groupedHistory = Object.values(history.reduce((groups, item) => {
+    const sessionId = item.session_id;
+    if (!groups[sessionId]) {
+      groups[sessionId] = {
+        session_id: sessionId,
+        company: item.company || "Azienda generica",
+        role: item.role || "Ruolo non specificato",
+        interview_type: item.interview_type || "",
+        difficulty: item.difficulty || "",
+        created_at: item.created_at,
+        total_score: item.total_score,
+        questions: [],
+      };
+    }
+
+    groups[sessionId].questions.push({
+      question_id: `${sessionId}-${groups[sessionId].questions.length}`,
+      question: item.question,
+      user_answer: item.user_answer,
+      feedback: item.feedback,
+      speaking_feedback: item.speaking_feedback,
+      improved_answer: item.improved_answer,
+      solution_explanation: item.solution_explanation,
+      clarity_score: item.clarity_score,
+      completeness_score: item.completeness_score,
+      relevance_score: item.relevance_score,
+      professionalism_score: item.professionalism_score,
+      synthesis_score: item.synthesis_score,
+      speaking_score: item.speaking_score,
+      question_mode: item.question_mode,
+    });
+
+    return groups;
+  }, {})).sort((a, b) => {
+    const aDate = new Date(String(a.created_at).trim().replace(" ", "T"));
+    const bDate = new Date(String(b.created_at).trim().replace(" ", "T"));
+    return bDate - aDate;
+  });
+
+  const toggleHistorySession = (sessionId) => {
+    setExpandedHistorySessions((current) => {
+      if (current.includes(sessionId)) {
+        return current.filter((id) => id !== sessionId);
+      }
+      return [...current, sessionId];
+    });
+  };
+
+  const toggleHistoryQuestion = (questionId) => {
+    setExpandedHistoryQuestions((current) => {
+      if (current.includes(questionId)) {
+        return current.filter((id) => id !== questionId);
+      }
+      return [...current, questionId];
+    });
+  };
+
   const confirmedChangesSummary = {
     profile: selectedCoachSuggestionItems.filter((item) => ["profile", "profilo"].includes(item.category) || normalizeSuggestionText(item.section).includes("profilo")),
     skills: [
@@ -4933,6 +5076,120 @@ function App() {
         </section>
       )}
 
+      {step === "interview-summary" && (
+        <section className="card">
+          <h2>Riepilogo Simulazione</h2>
+          <p className="section-description">
+            Ottimo lavoro! Hai completato tutte le domande per il ruolo di <strong>{profile.target_role}</strong> in <strong>{company}</strong>.
+          </p>
+
+          <div className="score-main">
+            <span>{sessionSummary.totalScore}</span>
+            <p>Punteggio Medio Sessione</p>
+          </div>
+
+          <div className="scores-grid">
+            <div>
+              <strong>{sessionSummary.clarity}</strong>
+              <p>Chiarezza</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.completeness}</strong>
+              <p>Completezza</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.relevance}</strong>
+              <p>Pertinenza</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.professionalism}</strong>
+              <p>Professionalità</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.synthesis}</strong>
+              <p>Sintesi</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.speaking}</strong>
+              <p>Parlato</p>
+            </div>
+          </div>
+
+          <h3 className="sub-title">Dettaglio Domande</h3>
+          <div className="history-question-list" style={{ borderTop: 'none' }}>
+            {allFeedbacks.map((item, index) => {
+              const isQuestionExpanded = expandedHistoryQuestions.includes(`summary-${index}`);
+              return (
+                <div className="history-item" key={`summary-${index}`} style={{ background: '#fff' }}>
+                  <div className="history-header">
+                    <div style={{ flex: 1 }}>
+                      <p style={{ margin: 0, fontWeight: 'bold', color: 'var(--primary)' }}>
+                        Domanda {index + 1}
+                      </p>
+                      <p style={{ margin: '4px 0', fontSize: '1.1rem' }}>{item.question}</p>
+                    </div>
+                    <div className="score-pill" style={{ 
+                      background: 'var(--primary-light)', 
+                      padding: '8px 12px', 
+                      borderRadius: '12px',
+                      fontWeight: 'bold',
+                      color: 'var(--primary)'
+                    }}>
+                      {item.feedback.total_score}/100
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="history-question-toggle"
+                    onClick={() => toggleHistoryQuestion(`summary-${index}`)}
+                  >
+                    {isQuestionExpanded ? "Nascondi analisi" : "Vedi analisi e consigli"}
+                  </button>
+
+                  {isQuestionExpanded && (
+                    <div className="history-question-details">
+                      <div className="feedback-block" style={{ marginTop: 0 }}>
+                        <h3>Feedback</h3>
+                        <p>{item.feedback.feedback}</p>
+                      </div>
+
+                      {item.feedback.speaking_feedback && (
+                        <div className="feedback-block">
+                          <h3>Parlato</h3>
+                          <p>{item.feedback.speaking_feedback}</p>
+                        </div>
+                      )}
+
+                      <div className="improved-answer">
+                        <h3>Risposta Modello</h3>
+                        <p>{item.feedback.improved_answer}</p>
+                      </div>
+
+                      {item.feedback.solution_explanation && (
+                        <div className="solution-block">
+                          <h3>Logica / Soluzione</h3>
+                          <p>{item.feedback.solution_explanation}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="actions">
+            <button className="primary-button" onClick={startNewTraining}>
+              Nuovo Allenamento
+            </button>
+            <button className="secondary-button" onClick={() => transitionToStep("home")}>
+              Torna alla Home
+            </button>
+          </div>
+        </section>
+      )}
+
       {step === "history" && (
         <section className="card">
           <h2>Storico allenamenti</h2>
@@ -4941,61 +5198,99 @@ function App() {
             <p className="empty-message">Non ci sono ancora allenamenti salvati.</p>
           )}
 
-          {history.map((item) => (
-            <div className="history-item" key={`${item.session_id}-${item.question}`}>
-              <div className="history-header">
-                <h3>{item.company || "Azienda generica"}</h3>
-                <span>{item.interview_type}</span>
+          {groupedHistory.map((session) => {
+            const isExpanded = expandedHistorySessions.includes(session.session_id);
+            return (
+              <div className="history-item" key={session.session_id}>
+                <div className="history-header">
+                  <div>
+                    <h3>{session.company}</h3>
+                    <p className="history-session-subtitle">
+                      {session.role}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="history-toggle-button"
+                    onClick={() => toggleHistorySession(session.session_id)}
+                  >
+                    {isExpanded ? "Chiudi" : "Apri"}
+                  </button>
+                </div>
+
+                <div className="history-session-meta">
+                  <span>{formatHistoryDate(session.created_at)}</span>
+                  <span>{displayInterviewType(session.interview_type)}</span>
+                  <span>Difficoltà: {displayDifficulty(session.difficulty)}</span>
+                  <span>Punteggio: {session.total_score !== null ? `${session.total_score}/100` : "Non valutato"}</span>
+                </div>
+
+                {isExpanded && (
+                  <div className="history-question-list">
+                    {session.questions.map((item, index) => {
+                      const questionKey = `${session.session_id}-${index}`;
+                      const hasDetails = item.user_answer || item.feedback || item.speaking_feedback || item.improved_answer || item.solution_explanation;
+                      const isQuestionExpanded = expandedHistoryQuestions.includes(questionKey);
+
+                      return (
+                        <div className="history-question-item" key={questionKey}>
+                          <p>
+                            <strong>Domanda {index + 1}:</strong> {item.question}
+                          </p>
+
+                          {hasDetails && (
+                            <button
+                              type="button"
+                              className="history-question-toggle"
+                              onClick={() => toggleHistoryQuestion(questionKey)}
+                            >
+                              {isQuestionExpanded ? "Nascondi dettagli" : "Mostra dettagli"}
+                            </button>
+                          )}
+
+                          {isQuestionExpanded && (
+                            <div className="history-question-details">
+                              {item.user_answer && (
+                                <p>
+                                  <strong>Risposta:</strong> {item.user_answer}
+                                </p>
+                              )}
+
+                              {item.feedback && (
+                                <p>
+                                  <strong>Feedback:</strong> {item.feedback}
+                                </p>
+                              )}
+
+                              {item.speaking_feedback && (
+                                <p>
+                                  <strong>Feedback parlato:</strong> {item.speaking_feedback}
+                                </p>
+                              )}
+
+                              {item.improved_answer && (
+                                <div className="mini-improved">
+                                  <strong>Risposta modello / migliorata:</strong>
+                                  <p>{item.improved_answer}</p>
+                                </div>
+                              )}
+
+                              {item.solution_explanation && (
+                                <div className="mini-solution">
+                                  <strong>Soluzione:</strong>
+                                  <p>{item.solution_explanation}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-
-              <p className="date">{item.created_at}</p>
-
-              <p>
-                <strong>Difficoltà:</strong> {item.difficulty}
-              </p>
-
-              <p>
-                <strong>Punteggio:</strong>{" "}
-                {item.total_score !== null ? `${item.total_score}/100` : "Non valutato"}
-              </p>
-
-              <p>
-                <strong>Domanda:</strong> {item.question}
-              </p>
-
-              {item.user_answer && (
-                <p>
-                  <strong>Risposta:</strong> {item.user_answer}
-                </p>
-              )}
-
-              {item.feedback && (
-                <p>
-                  <strong>Feedback:</strong> {item.feedback}
-                </p>
-              )}
-
-              {item.speaking_feedback && (
-                <p>
-                  <strong>Feedback parlato:</strong> {item.speaking_feedback}
-                </p>
-              )}
-
-              {item.improved_answer && (
-                <div className="mini-improved">
-                  <strong>Risposta modello / migliorata:</strong>
-                  <p>{item.improved_answer}</p>
-                </div>
-              )}
-
-              {item.solution_explanation && (
-                <div className="mini-solution">
-                  <strong>Soluzione:</strong>
-                  <p>{item.solution_explanation}</p>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
 
           <button className="primary-button" onClick={() => transitionToStep("gym")}>
             Torna alla palestra
