@@ -915,12 +915,13 @@ def call_groq(
     temperature: float = 0.7,
     max_tokens: int = 1000,
     timeout: int = 25,
-    json_mode: bool = False,
 ) -> str:
-    def _completion_kwargs(include_json_mode: bool) -> Dict[str, Any]:
-        kwargs: Dict[str, Any] = {
-            "model": GROQ_MODEL,
-            "messages": [
+    try:
+        print("Chiamata Groq avviata...")
+
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
                 {
                     "role": "system",
                     "content": (
@@ -935,32 +936,13 @@ def call_groq(
                     "content": prompt
                 }
             ],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "timeout": timeout,
-        }
-        if include_json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        return kwargs
-
-    try:
-        print("Chiamata Groq avviata...")
-        try:
-            response = groq_client.chat.completions.create(**_completion_kwargs(json_mode))
-        except Exception as first_exc:
-            first_error = str(first_exc).lower()
-            unsupported_json_mode = (
-                json_mode
-                and "response_format" in first_error
-                and any(marker in first_error for marker in ["unsupported", "not supported", "invalid", "unknown"])
-            )
-            if not unsupported_json_mode:
-                raise
-            print("Groq non supporta response_format json_object per questo modello: ritento senza json_mode.")
-            response = groq_client.chat.completions.create(**_completion_kwargs(False))
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout
+        )
 
         print("Chiamata Groq completata.")
-        return (response.choices[0].message.content or "").strip()
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
         error_text = str(e)
@@ -984,59 +966,24 @@ def call_groq(
         )
 
 
-def extract_json(text: str, context: str = ""):
-    raw_text = text or ""
-    if not raw_text.strip():
-        raise ValueError(f"JSON vuoto restituito dal modello{f' in {context}' if context else ''}.")
+def extract_json(text: str):
+    text = text.strip()
 
-    text = raw_text.strip().replace("﻿", "").replace(" ", " ")
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-
-    def _cleanup(candidate: str) -> str:
-        candidate = candidate.strip()
-        candidate = candidate.replace("“", '"').replace("”", '"').replace("’", "'")
-        candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
-        return candidate
-
-    def _loads(candidate: str):
-        return json.loads(_cleanup(candidate))
+    if text.startswith("```json"):
+        text = text.replace("```json", "").replace("```", "").strip()
+    elif text.startswith("```"):
+        text = text.replace("```", "").strip()
 
     try:
-        return _loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
-        pass
+        start = text.find("{")
+        end = text.rfind("}") + 1
 
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char not in "[{":
-            continue
-        try:
-            value, _end = decoder.raw_decode(_cleanup(text[index:]))
-            return value
-        except json.JSONDecodeError:
-            continue
+        if start != -1 and end != -1:
+            return json.loads(text[start:end])
 
-    candidates = []
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        end = text.rfind(closer)
-        if start != -1 and end != -1 and end > start:
-            candidates.append(text[start:end + 1])
-    for candidate in candidates:
-        try:
-            return _loads(candidate)
-        except json.JSONDecodeError:
-            continue
-
-    preview = re.sub(r"\s+", " ", raw_text)[:500]
-    print(
-        "JSON non valido restituito dal modello"
-        + (f" in {context}" if context else "")
-        + f": len={len(raw_text)}, preview={preview!r}"
-    )
-    raise ValueError(f"JSON non valido restituito dal modello{f' in {context}' if context else ''}: {preview}")
+        raise ValueError(f"JSON non valido restituito dal modello: {text}")
 
 
 CV_SECTION_KEYWORDS = {
@@ -3998,7 +3945,7 @@ Regole obbligatorie:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, json_mode=True), context="optimize_cv_text")
+        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500))
         optimized_text = clean_extracted_text(result.get("optimized_cv_text", ""))
         if len(optimized_text) < 200:
             return fallback
@@ -4047,7 +3994,7 @@ def build_resume_rewrite_result(
 
     try:
         # Generiamo le istruzioni usando Groq
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500, json_mode=True), context="resume_rewrite_instructions")
+        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500))
         instructions = rewriter.instructions_from_result(result)
 
         # Se LLM ha restituito una lista vuota o qualcosa e' andato storto e avevamo suggerimenti:
@@ -4206,8 +4153,7 @@ Criteri obbligatori:
 """
     try:
         result = extract_json(
-            call_groq(prompt, temperature=0.05, max_tokens=1500, timeout=60, json_mode=True),
-            context="final_cv_quality_review",
+            call_groq(prompt, temperature=0.05, max_tokens=1500, timeout=60)
         )
     except Exception as exc:
         print(f"Revisione finale CV non disponibile: {exc}")
@@ -4356,7 +4302,7 @@ Regole:
 - Mantieni la prima persona implicita e non aggiungere etichette o spiegazioni.
 """
     try:
-        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=400, json_mode=True), context="professional_extra_text")
+        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=400))
         text = clean_extracted_text(str(result.get("text") or ""))
         if text:
             return text[:700]
@@ -4496,8 +4442,7 @@ Regole obbligatorie:
         applied_ids: List[str] = []
         try:
             result = extract_json(
-                call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=60, json_mode=True),
-                context="consolidate_rewrite_instructions",
+                call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=60)
             )
             replacement = str(result.get("replacement") or "").strip()
             applied_ids = [
@@ -4700,7 +4645,7 @@ Regole:
 - Ogni testo deve essere breve e direttamente utilizzabile nel CV, senza note, spiegazioni o titoli interni.
 """
     try:
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1000, json_mode=True), context="skill_detail_rewrite")
+        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1000))
         raw_items = result.get("items") if isinstance(result, dict) else []
     except Exception as exc:
         print(f"Collocazione dettagli skill non riuscita, uso fallback: {exc}")
@@ -7968,7 +7913,7 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, timeout=60, json_mode=True), context="cv_job_evaluation")
+        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, timeout=60))
         normalized = normalize_cv_job_evaluation(result, fallback)
         questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
         normalized["optimization_questions"] = questions
@@ -8284,44 +8229,50 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                     f"suggerimenti selezionati={len(accepted_suggestions)}, "
                     f"proposed_text mancanti={rewrite_result.get('missing_proposed_text_count', 0)}"
                 )
-                format_warnings.append(
-                    "Il template DOCX originale non ha permesso sostituzioni sicure; è stato generato un documento pulito con le modifiche applicabili."
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": "Nessuna modifica selezionata e stata applicata. Controlla i suggerimenti o riprova.",
+                        "applied_changes_count": applied_changes_count,
+                        "selected_suggestions_count": len(accepted_suggestions),
+                    },
                 )
-                safe_bytes, safe_content_type, safe_extension = create_optimized_docx_file(optimized_text)
-                if safe_bytes:
-                    file_bytes = safe_bytes
-                    content_type = safe_content_type
-                    extension = safe_extension
-                    applied_changes_count = max(applied_changes_count, len(rewrite_result.get("instructions", [])))
-                else:
-                    conn.close()
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Non è stato possibile creare un file CV ottimizzato leggibile.",
-                    )
             if docx_preserver.skipped_source_ids:
-                format_warnings.append(
-                    "Alcune modifiche accettate non sono state applicate automaticamente al template originale: "
-                    + ", ".join(docx_preserver.skipped_source_ids[:8])
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": (
+                            "Una o più modifiche accettate non sono state applicate al template originale. "
+                            "La generazione è stata interrotta prima di produrre un CV incompleto."
+                        ),
+                        "missing_changes": docx_preserver.skipped_source_ids,
+                    },
                 )
             final_docx_text = extract_docx_text_bytes(file_bytes)
             original_docx_text = extract_docx_text_bytes(original_file_bytes)
             structure_warnings = validate_optimized_docx_structure(final_docx_text)
             if structure_warnings:
                 print(
-                    "Validazione finale DOCX con avvertenze. "
+                    "Validazione finale DOCX fallita. "
                     f"applied_changes_count={applied_changes_count}, "
                     f"instructions_count={len(rewrite_result.get('instructions', []))}"
                 )
                 for warning in structure_warnings:
-                    print(f"Dettaglio struttura DOCX: {warning}")
-                format_warnings.extend(structure_warnings)
-                safe_bytes, safe_content_type, safe_extension = create_optimized_docx_file(optimized_text)
-                if safe_bytes:
-                    file_bytes = safe_bytes
-                    content_type = safe_content_type
-                    extension = safe_extension
-                    final_docx_text = optimized_text
+                    print(f"Dettaglio duplicazione/sezione DOCX: {warning}")
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": "Il CV finale contiene testo duplicato o sezioni inserite nel punto sbagliato.",
+                        "structure_warnings": structure_warnings,
+                        "applied_changes_count": applied_changes_count,
+                    },
+                )
             quality_review = review_generated_cv_quality(
                 final_text=final_docx_text,
                 original_cv_text=cv_text,
@@ -8346,8 +8297,15 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                         final_docx_text = extract_docx_text_bytes(file_bytes)
                         second_structure_warnings = validate_optimized_docx_structure(final_docx_text)
                         if second_structure_warnings:
-                            format_warnings.extend(second_structure_warnings)
-                            print("Revisione automatica con avvertenze struttura:", second_structure_warnings)
+                            conn.close()
+                            raise HTTPException(
+                                status_code=422,
+                                detail={
+                                    "success": False,
+                                    "error": "La revisione automatica ha prodotto una struttura DOCX non valida.",
+                                    "structure_warnings": second_structure_warnings,
+                                },
+                            )
                         quality_review = review_generated_cv_quality(
                             final_text=final_docx_text,
                             original_cv_text=cv_text,
@@ -8366,8 +8324,18 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                     and not quality_review.get("ready_to_send")
                     and blocking_issues
                 ):
-                    format_warnings.append(
-                        "Il controllo qualità finale ha rilevato avvertenze da verificare manualmente prima dell'invio."
+                    conn.close()
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "success": False,
+                            "error": (
+                                "Il controllo qualità finale non considera ancora il CV pronto per l'invio. "
+                                "La generazione è stata interrotta invece di consegnare un documento debole."
+                            ),
+                            "quality_score": quality_review.get("score", 0),
+                            "quality_issues": blocking_issues,
+                        },
                     )
             hallucination_warnings = detect_unsupported_optimized_claims(
                 final_docx_text,
@@ -8415,12 +8383,18 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             raise
         except Exception as exc:
             print(f"Preservazione DOCX non riuscita, uso export di sicurezza: {exc}")
-            format_warnings.append(
-                "Non è stato possibile preservare perfettamente il template originale; è stato generato un documento pulito con le modifiche disponibili."
-            )
-            file_bytes, content_type, extension = create_optimized_docx_file(optimized_text)
-            if rewrite_result.get("instructions") and file_bytes:
-                applied_changes_count = max(applied_changes_count, len(rewrite_result.get("instructions", [])))
+            if rewrite_result.get("instructions"):
+                conn.close()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "success": False,
+                        "error": "Nessuna modifica selezionata e stata applicata. Controlla i suggerimenti o riprova.",
+                        "applied_changes_count": applied_changes_count,
+                        "selected_suggestions_count": len(accepted_suggestions),
+                    },
+                )
+            file_bytes, content_type, extension = create_optimized_docx_file(optimized_text, original_file_bytes)
             if not file_bytes:
                 file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
             if accepted_suggestions and applied_changes_count == 0:
@@ -8435,15 +8409,19 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 )
     elif original_filename.endswith(".pdf") and original_file_bytes:
         if rewrite_result.get("instructions"):
-            format_warnings.append(
-                "Il CV originale è un PDF: è stato generato un PDF pulito con le modifiche applicabili invece di modificare il layout originale."
+            conn.close()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "success": False,
+                    "error": "Per applicare davvero le modifiche mantenendo il layout, carica il CV originale in formato DOCX.",
+                    "applied_changes_count": applied_changes_count,
+                    "selected_suggestions_count": len(accepted_suggestions),
+                },
             )
-            file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
-            applied_changes_count = max(applied_changes_count, len(rewrite_result.get("instructions", [])))
-        else:
-            file_bytes = original_file_bytes
-            content_type = "application/pdf"
-            extension = "pdf"
+        file_bytes = original_file_bytes
+        content_type = "application/pdf"
+        extension = "pdf"
     else:
         file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
 
@@ -8555,7 +8533,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         },
         "applied_changes_count": applied_changes_count,
         "warnings": [*hallucination_warnings, *skipped_change_details],
-        "message": "CV ottimizzato generato con alcune avvertenze." if format_warnings else "CV ottimizzato generato correttamente.",
+        "message": "CV ottimizzato generato correttamente.",
     }
 
 
