@@ -1430,10 +1430,10 @@ function App() {
     }
 
     const extension = file.name.split(".").pop()?.toLowerCase();
-    const allowedExtensions = ["pdf", "docx", "txt"];
+    const allowedExtensions = ["pdf", "docx"];
 
     if (!allowedExtensions.includes(extension)) {
-      setError("Carica un file PDF, DOCX o TXT.");
+      setError("Carica un file PDF o DOCX.");
       if (cvFileInputRef.current) {
         cvFileInputRef.current.value = "";
       }
@@ -1482,7 +1482,7 @@ function App() {
       }
 
       if (!data.is_cv) {
-        const detail = data.reason || "Carica un CV valido in formato PDF, DOCX o TXT.";
+        const detail = data.reason || "Carica un CV valido in formato PDF o DOCX.";
         setCvValidation({
           status: "invalid",
           message: `Il file caricato non sembra leggibile o non sembra essere un CV. Dettaglio: ${detail}`,
@@ -1514,7 +1514,7 @@ function App() {
       console.error(err);
       setCvValidation({
         status: "invalid",
-        message: "Non siamo riusciti a verificare il contenuto del file. Riprova con un CV valido in formato PDF, DOCX o TXT.",
+        message: "Non siamo riusciti a verificare il contenuto del file. Riprova con un CV valido in formato PDF o DOCX.",
         confidence: 0,
         detectedSections: [],
       });
@@ -1606,8 +1606,8 @@ function App() {
     }
 
     const extension = file.name.split(".").pop()?.toLowerCase();
-    if (!["pdf", "docx", "txt"].includes(extension)) {
-      setError("Carica l'esportazione LinkedIn in formato PDF, DOCX o TXT.");
+    if (!["pdf", "docx"].includes(extension)) {
+      setError("Carica l'esportazione LinkedIn in formato PDF o DOCX.");
       return;
     }
 
@@ -3404,13 +3404,13 @@ function App() {
           >
             <div className="cv-upload-icon">CV</div>
             <h3>Trascina qui il tuo CV</h3>
-            <p>PDF, DOCX o TXT fino a 5 MB</p>
+            <p>PDF o DOCX fino a 5 MB</p>
             <div className="cv-divider"><span>oppure</span></div>
             <input
               id="cv-file-input"
               ref={cvFileInputRef}
               type="file"
-              accept=".pdf,.docx,.txt"
+              accept=".pdf,.docx"
               onChange={(event) => selectCvFile(event.target.files?.[0])}
             />
             <label className="browse-file-btn" htmlFor="cv-file-input">
@@ -3522,7 +3522,7 @@ function App() {
                 id="linkedin-profile-file"
                 ref={linkedinFileInputRef}
                 type="file"
-                accept=".pdf,.docx,.txt"
+                accept=".pdf,.docx"
                 onChange={(event) => uploadLinkedinProfile(event.target.files?.[0])}
               />
 

@@ -997,12 +997,12 @@ CV_SECTION_KEYWORDS = {
         "career objective"
     ],
     "esperienze professionali": [
-        "esperienze professionali", "esperienza professionale", "esperienza",
+        "esperienze professionali", "esperienza professionale", "esperienza lavorativa", "esperienza",
         "esperienze", "experience", "work experience", "employment", "lavoro",
         "azienda", "tirocinio", "stage", "internship", "ruolo", "position"
     ],
     "formazione": [
-        "formazione", "formazione accademica", "istruzione", "education",
+        "formazione", "formazione accademica", "istruzione", "studi", "percorso di studi", "education",
         "universita", "università", "university", "laurea", "laurea magistrale",
         "laurea triennale", "diploma", "liceo", "master", "degree"
     ],
@@ -1132,16 +1132,17 @@ def extract_text_from_file_bytes(file_bytes: bytes, filename: str) -> tuple[str,
 
             docx_text = "\n".join(text_parts).strip()
             xml_text = _extract_docx_text_from_xml(file_bytes)
-            if len(xml_text) > len(docx_text):
+            
+            docx_alnum = len(re.sub(r'\s+', '', docx_text))
+            xml_alnum = len(re.sub(r'\s+', '', xml_text))
+            
+            if xml_alnum > docx_alnum:
                 return xml_text, "docx_xml"
             return docx_text or xml_text, "docx"
         except Exception as exc:
             print("Errore DOCX:", exc)
             xml_text = _extract_docx_text_from_xml(file_bytes)
             return xml_text, "docx_xml"
-
-    if lower_filename.endswith(".txt"):
-        return decode_text_bytes(file_bytes).strip(), "txt"
 
     return "", "failed"
 
@@ -3617,7 +3618,7 @@ def build_fallback_cv_strategy(
                     if has_cv_text
                     else "Il file risulta caricato, ma il testo estraibile e scarso o assente. L'analisi resta preliminare."
                 ),
-                "coach_tip": "Se hai caricato PDF o DOCX, verifica che il testo sia selezionabile o carica una versione TXT per un'analisi piu accurata."
+                "coach_tip": "Se hai caricato PDF, verifica che il testo sia selezionabile o carica una versione DOCX per un'analisi piu accurata."
             }
         ],
         "improvements": [
@@ -4815,7 +4816,7 @@ def create_plain_optimized_pdf(optimized_text: str) -> tuple[bytes, str, str]:
         return pdf_bytes, "application/pdf", "pdf"
     except Exception as exc:
         print(f"Errore generazione PDF ottimizzato: {exc}")
-        return optimized_text.encode("utf-8"), "text/plain; charset=utf-8", "txt"
+        return optimized_text.encode("utf-8"), "text/plain; charset=utf-8",
 
 
 def create_optimized_pdf_from_template(optimized_text: str, original_file_bytes: bytes) -> Optional[tuple[bytes, str, str]]:
@@ -8759,10 +8760,10 @@ def detect_disallowed_cv_content(text: str) -> Dict[str, Any]:
 def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:
     filename = filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    allowed_extensions = {"pdf", "docx", "txt"}
+    allowed_extensions = {"pdf", "docx"}
 
     if not filename or extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail="Carica un file PDF, DOCX o TXT.")
+        raise HTTPException(status_code=400, detail="Carica un file PDF o DOCX.")
 
     if len(file_bytes) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Il CV non puo superare 5MB.")
@@ -8940,10 +8941,10 @@ async def validate_cv_file(file: UploadFile = File(...)):
 def upload_user_cv(user_id: int, data: UserCvUpload):
     filename = data.filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    allowed_extensions = {"pdf", "docx", "txt"}
+    allowed_extensions = {"pdf", "docx"}
 
     if not filename or extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail="Carica un file PDF, DOCX o TXT.")
+        raise HTTPException(status_code=400, detail="Carica un file PDF o DOCX.")
 
     if data.size > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Il CV non puo superare 5MB.")
@@ -9047,10 +9048,10 @@ def get_user_cv_file(user_id: int):
 async def upload_linkedin_profile(user_id: int, file: UploadFile = File(...)):
     filename = (file.filename or "").strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    allowed_extensions = {"pdf", "docx", "txt"}
+    allowed_extensions = {"pdf", "docx"}
 
     if not filename or extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail="Carica l'esportazione LinkedIn in formato PDF, DOCX o TXT.")
+        raise HTTPException(status_code=400, detail="Carica l'esportazione LinkedIn in formato PDF o DOCX.")
 
     file_bytes = await file.read()
     if not file_bytes:
@@ -9064,7 +9065,7 @@ async def upload_linkedin_profile(user_id: int, file: UploadFile = File(...)):
     if len(normalized_text) < 80:
         raise HTTPException(
             status_code=400,
-            detail="Non riesco a leggere abbastanza testo dal file LinkedIn. Esporta il profilo come PDF oppure usa un file TXT.",
+            detail="Non riesco a leggere abbastanza testo dal file LinkedIn. Esporta il profilo come PDF oppure usa un file DOCX.",
         )
 
     conn = get_connection()
