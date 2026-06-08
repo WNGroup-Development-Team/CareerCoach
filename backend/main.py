@@ -8747,6 +8747,7 @@ def detect_disallowed_cv_content(text: str) -> Dict[str, Any]:
         r"\b(?:sangue|gore|ferit[oa]?|omicid[io]|assass|arma|pistola|coltello|bomba|terror(?:ismo|ista)?)\b",
         r"\b(?:drugs?|droga|cocaina|eroina|hashish|marijuana|spaccio)\b",
         r"\b(?:razz(?:is(?:ta|mo)|ismo)|odio|hate|genocidio)\b",
+        r"\b(?:cazzo|merda|stronzo|stronza|troia|puttana|coglione|vaffanculo|figa|fottiti|frocio|negro|bastardo)\b",
     ]
     for pattern in disallowed_patterns:
         if re.search(pattern, normalized):
@@ -8756,6 +8757,45 @@ def detect_disallowed_cv_content(text: str) -> Dict[str, Any]:
             }
     return {"blocked": False}
 
+
+def is_gibberish_cv_text(text: str) -> bool:
+    words = text.split()
+    if not words:
+        return True
+    
+    vowels = "aeiouyAEIOUY"
+    weird_words = 0
+    total_words = 0
+    
+    for word in words:
+        clean_word = "".join(ch for ch in word if ch.isalpha())
+        if not clean_word:
+            continue
+            
+        total_words += 1
+        
+        if len(clean_word) >= 5 and not any(v in clean_word for v in vowels):
+            weird_words += 1
+            continue
+            
+        consecutive_consonants = 0
+        max_consecutive_consonants = 0
+        for ch in clean_word:
+            if ch.isalpha() and ch not in vowels:
+                consecutive_consonants += 1
+                max_consecutive_consonants = max(max_consecutive_consonants, consecutive_consonants)
+            else:
+                consecutive_consonants = 0
+                
+        if max_consecutive_consonants >= 5:
+            weird_words += 1
+            continue
+
+    if total_words == 0:
+        return True
+        
+    weird_ratio = weird_words / total_words
+    return weird_ratio >= 0.4
 
 def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:
     filename = filename.strip()
@@ -8826,6 +8866,19 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
             "detected_sections": [],
             "visual_validation": {
                 "status": "disallowed_content",
+                "blocked": False,
+            },
+            "debug": debug,
+        }
+
+    if is_gibberish_cv_text(normalized_text):
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": "Il testo sembra contenere parole casuali o non ha senso logico.",
+            "detected_sections": [],
+            "visual_validation": {
+                "status": "gibberish_text",
                 "blocked": False,
             },
             "debug": debug,

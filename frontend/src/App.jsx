@@ -4665,12 +4665,16 @@ function App() {
           </div>
 
           <div className="favorite-company-grid">
-            {[company || "TechCorp", "GlobalNet", "EcoInnovate"].map((item) => (
-              <div key={item}>
-                <span>{item.charAt(0).toUpperCase()}</span>
-                <strong>{item}</strong>
-              </div>
-            ))}
+            {[company].filter(c => c && c !== "Generica").length > 0 ? (
+              [company].filter(c => c && c !== "Generica").map((item) => (
+                <div key={item}>
+                  <span>{item.charAt(0).toUpperCase()}</span>
+                  <strong>{item}</strong>
+                </div>
+              ))
+            ) : (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", gridColumn: "1 / -1" }}>Nessuna azienda aggiunta.</p>
+            )}
           </div>
 
           <div className="profile-section-title">
