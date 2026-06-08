@@ -2983,6 +2983,17 @@ textarea {
   box-shadow: none;
 }
 
+.personalize-field.input-error,
+textarea.input-error {
+  border: 1px solid #ff3333 !important;
+  box-shadow: 0 0 8px rgba(255, 51, 51, 0.4) !important;
+  background-color: #fffafa !important;
+}
+
+.personalize-field.input-error svg {
+  color: #ff3333 !important;
+}
+
 .field-error,
 .field-warning,
 .job-validation-message {

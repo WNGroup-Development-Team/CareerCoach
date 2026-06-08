@@ -3727,7 +3727,7 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1800))
+        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1000))
         return normalize_cv_strategy_result(result, fallback, sources, target)
     except Exception as exc:
         print(f"Analisi strategica CV AI non riuscita, uso fallback: {exc}")
@@ -3945,7 +3945,7 @@ Regole obbligatorie:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=3500))
+        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500))
         optimized_text = clean_extracted_text(result.get("optimized_cv_text", ""))
         if len(optimized_text) < 200:
             return fallback
@@ -3972,15 +3972,15 @@ def build_resume_rewrite_result(
 
     # Raccogliamo anche user_additional_data in modo organizzato
     clean_additional_data = {
-        key: value.strip() if isinstance(value, str) else value
+        key: str(value).strip()[:300] if isinstance(value, str) else value
         for key, value in (user_additional_data or {}).items()
         if value
     }
 
     target_info = {
-        "company": company or "Non specificata",
-        "role": role or "Non specificato",
-        "goal": goal or "Non specificato"
+        "company": company[:50] if company else "Non specificata",
+        "role": role[:100] if role else "Non specificato",
+        "goal": goal[:300] if goal else "Non specificato"
     }
 
     rewriter = ResumeRewriter(parser)
@@ -3994,7 +3994,7 @@ def build_resume_rewrite_result(
 
     try:
         # Generiamo le istruzioni usando Groq
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=3000))
+        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500))
         instructions = rewriter.instructions_from_result(result)
 
         # Se LLM ha restituito una lista vuota o qualcosa e' andato storto e avevamo suggerimenti:
@@ -4037,10 +4037,13 @@ def extract_docx_text_bytes(file_bytes: bytes) -> str:
 
         document = Document(io.BytesIO(file_bytes))
         parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+        seen_cells = set()
         for table in document.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    parts.extend(paragraph.text for paragraph in cell.paragraphs if paragraph.text)
+                    if id(cell._tc) not in seen_cells:
+                        seen_cells.add(id(cell._tc))
+                        parts.extend(paragraph.text for paragraph in cell.paragraphs if paragraph.text)
         return "\n".join(parts)
     except Exception:
         return ""
@@ -4108,13 +4111,13 @@ Ruolo target: {role or "Non specificato"}
 Azienda target: {company or "Non specificata"}
 
 CV originale, usato solo per verificare che non siano stati inventati fatti:
-{original_cv_text[:10000]}
+{original_cv_text[:3500]}
 
 Modifiche accettate che devono essere tutte conservate:
 {json.dumps(accepted_payload, ensure_ascii=False)}
 
 CV finale da revisionare:
-{final_text[:14000]}
+{final_text[:4000]}
 
 Schema:
 {{
@@ -4150,7 +4153,7 @@ Criteri obbligatori:
 """
     try:
         result = extract_json(
-            call_groq(prompt, temperature=0.05, max_tokens=3000, timeout=60)
+            call_groq(prompt, temperature=0.05, max_tokens=1500, timeout=60)
         )
     except Exception as exc:
         print(f"Revisione finale CV non disponibile: {exc}")
@@ -4439,7 +4442,7 @@ Regole obbligatorie:
         applied_ids: List[str] = []
         try:
             result = extract_json(
-                call_groq(prompt, temperature=0.05, max_tokens=2200, timeout=60)
+                call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=60)
             )
             replacement = str(result.get("replacement") or "").strip()
             applied_ids = [
@@ -6233,21 +6236,6 @@ def validate_job_link(link: Optional[str], company: str, role: str) -> Dict:
             "normalized_link": "",
         }
 
-    host_and_path = normalize_plain_text(f"{parsed.netloc} {parsed.path}")
-    company_tokens = tokenize_meaningful(company)
-    role_tokens = tokenize_meaningful(role)
-    trusted_job_hosts = ["linkedin", "indeed", "glassdoor", "greenhouse", "lever", "workday", "successfactors", "careers", "jobs"]
-    linked_to_company = bool(company_tokens and any(token in host_and_path for token in company_tokens))
-    linked_to_role = bool(role_tokens and any(token in host_and_path for token in role_tokens))
-    is_job_platform = any(host in host_and_path for host in trusted_job_hosts)
-
-    if company_tokens and not (linked_to_company or linked_to_role or is_job_platform):
-        return {
-            "is_valid": False,
-            "message": "Il link non sembra collegato all'azienda o alla posizione indicata.",
-            "normalized_link": normalized_link,
-        }
-
     return {
         "is_valid": True,
         "message": "Link valido.",
@@ -6371,9 +6359,12 @@ def validate_job_input(
         not is_low_quality_text(company, min_chars=3, min_words=1)
         and validate_role_plausibility(role)["is_valid"]
     )
+    
+    link_validation = validate_job_link(link, company, role)
+    has_valid_link = link_validation["is_valid"] and bool(link.strip())
 
-    if not has_description and not has_specific_details:
-        errors["description"] = "Compila il metodo rapido oppure inserisci azienda e ruolo nei dettagli specifici."
+    if not has_description and not has_specific_details and not has_valid_link:
+        errors["description"] = "Compila il metodo rapido, inserisci l'azienda e il ruolo, oppure fornisci un link valido."
 
     if company and is_low_quality_text(company, min_chars=3, min_words=1):
         errors["company"] = "Il nome azienda non sembra valido."
@@ -6382,7 +6373,6 @@ def validate_job_input(
     if role and not role_validation["is_valid"]:
         errors["role"] = role_validation["message"]
 
-    link_validation = validate_job_link(link, company, role)
     if not link_validation["is_valid"]:
         errors["link"] = link_validation["message"]
 
@@ -6406,7 +6396,7 @@ def validate_job_input(
         "message": "Azienda non inserita o non verificata.",
     }
     if company and not company_check["exists"]:
-        errors["company"] = company_check["message"]
+        warnings.append(company_check["message"])
 
     is_valid = not errors
     return {
@@ -7466,7 +7456,7 @@ Regole:
 - Se non puoi migliorare un blocco senza aggiungere fatti, non proporre la modifica.
 """
     try:
-        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=2600, timeout=60))
+        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=60))
         generated = result.get("suggestions") if isinstance(result, dict) else []
     except Exception as exc:
         print(f"Suggerimenti coach generici non disponibili: {exc}")
@@ -7843,7 +7833,7 @@ Analisi ATS preliminare:
 {json.dumps(ats_analysis, ensure_ascii=False)}
 
 Testo CV:
-{cv_text[:9000]}
+{cv_text[:3500]}
 
 Restituisci SOLO JSON valido con questa struttura:
 {{
@@ -7923,7 +7913,7 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=3000, timeout=60))
+        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, timeout=60))
         normalized = normalize_cv_job_evaluation(result, fallback)
         questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
         normalized["optimization_questions"] = questions

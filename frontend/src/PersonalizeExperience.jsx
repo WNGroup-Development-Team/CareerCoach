@@ -52,18 +52,19 @@ export default function PersonalizeExperience({
   const hasQuickMethod = normalizedGoal.length > 19;
   const hasSpecificDetails = normalizedCompany.length > 2 && hasRole && normalizedRole.length > 3;
   const linkLooksValid = !normalizedLink || /^https?:\/\/\S+\.\S+$/i.test(normalizedLink) || /^[\w.-]+\.[a-z]{2,}/i.test(normalizedLink);
+  const hasLink = normalizedLink.length > 5 && linkLooksValid;
   const localErrors = {
-    description: hasQuickMethod || hasSpecificDetails ? "" : "Compila il metodo rapido oppure inserisci almeno azienda e ruolo nei dettagli specifici.",
-    company: hasQuickMethod || !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
-    role: hasQuickMethod || !normalizedRole || (hasRole && normalizedRole.length > 3) ? "" : "Inserisci un ruolo lavorativo reale.",
+    description: hasQuickMethod || hasSpecificDetails || hasLink ? "" : "Compila il metodo rapido, i dettagli dell'azienda, oppure il link dell'annuncio.",
+    company: hasQuickMethod || hasLink || !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
+    role: hasQuickMethod || hasLink || !normalizedRole || (hasRole && normalizedRole.length > 3) ? "" : "Inserisci un ruolo lavorativo reale.",
     role_level: !normalizedRoleLevel || normalizedRoleLevel.length >= 2 ? "" : "Inserisci un livello riconoscibile oppure lascia il campo vuoto.",
-    link: linkLooksValid ? "" : "Inserisci un URL valido oppure lascia il campo vuoto.",
+    link: !normalizedLink || linkLooksValid ? "" : "Inserisci un URL valido oppure lascia il campo vuoto.",
   };
   const fieldErrors = {
     ...Object.fromEntries(Object.entries(localErrors).filter(([, value]) => value)),
     ...(validation.errors || {}),
   };
-  const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails) && !localErrors.company && !localErrors.role && !localErrors.role_level && !localErrors.link;
+  const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails || hasLink) && !localErrors.company && !localErrors.role && !localErrors.role_level && !localErrors.link;
   const canSubmit = hasLocalValidFields && !isValidating;
 
   const handleSubmit = (event) => {
@@ -87,7 +88,7 @@ export default function PersonalizeExperience({
         <label htmlFor="goal">Per quale colloquio vuoi prepararti?</label>
         <textarea
           id="goal"
-          className="interview-textarea"
+          className={`interview-textarea ${fieldErrors.description ? "input-error" : ""}`}
           value={goal}
           onChange={(event) => onChange("goal", event.target.value)}
           placeholder="Es. Voglio prepararmi per un colloquio da Data Analyst in Google."
@@ -97,7 +98,7 @@ export default function PersonalizeExperience({
         <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
         <label htmlFor="personalize-company">Nome Azienda</label>
-        <div className="personalize-field">
+        <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
           <BuildingIcon />
           <input
             id="personalize-company"
@@ -109,7 +110,7 @@ export default function PersonalizeExperience({
         {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
 
         <label htmlFor="personalize-role">Ruolo desiderato</label>
-        <div className="personalize-field">
+        <div className={`personalize-field ${fieldErrors.role || fieldErrors.coherence ? "input-error" : ""}`}>
           <BriefcaseIcon />
           <input
             id="personalize-role"
@@ -122,7 +123,7 @@ export default function PersonalizeExperience({
         {fieldErrors.coherence && <p className="field-error">{fieldErrors.coherence}</p>}
 
         <label htmlFor="personalize-role-level">Livello ruolo</label>
-        <div className="personalize-field">
+        <div className={`personalize-field ${fieldErrors.role_level ? "input-error" : ""}`}>
           <BriefcaseIcon />
           <input
             id="personalize-role-level"
@@ -133,20 +134,8 @@ export default function PersonalizeExperience({
         </div>
         {fieldErrors.role_level && <p className="field-error">{fieldErrors.role_level}</p>}
 
-        <label htmlFor="personalize-sector">Settore</label>
-        <div className="personalize-field">
-          <BriefcaseIcon />
-          <input
-            id="personalize-sector"
-            value={sector}
-            onChange={(event) => onChange("sector", event.target.value)}
-            placeholder="Es. Tecnologia, Finanza, Marketing"
-          />
-        </div>
-        {fieldErrors.sector && <p className="field-error">{fieldErrors.sector}</p>}
-
         <label htmlFor="personalize-link">Link all'annuncio o all'azienda</label>
-        <div className="personalize-field">
+        <div className={`personalize-field ${fieldErrors.link ? "input-error" : ""}`}>
           <LinkIcon />
           <input
             id="personalize-link"
@@ -157,7 +146,7 @@ export default function PersonalizeExperience({
         </div>
         {fieldErrors.link && <p className="field-error">{fieldErrors.link}</p>}
         <p className="personalize-hint form-helper-text">
-          Facoltativo: se inserisci l'annuncio, le domande saranno piu aderenti alla posizione.
+          Inserendo tutti i campi la simulazione e l'ottimizzazione CV saranno molto più specifiche.
         </p>
         {validation.message && (
           <p className={`job-validation-message ${validation.status}`}>
@@ -183,7 +172,7 @@ export default function PersonalizeExperience({
         </div>
         {!hasLocalValidFields && (
           <p className="continue-helper-text">
-            Usa il metodo rapido oppure compila azienda e ruolo nei dettagli specifici.
+            Usa il metodo rapido, compila azienda e ruolo, oppure inserisci un link per continuare.
           </p>
         )}
       </form>

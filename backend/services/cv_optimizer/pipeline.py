@@ -275,7 +275,7 @@ class ResumeRewriter:
         sections: Optional[List[ResumeSection]] = None,
     ) -> str:
         section_payload = [
-            {"name": section.name, "heading": section.heading, "text": section.text[:2500]}
+            {"name": section.name, "heading": section.heading, "text": section.text}
             for section in (sections or self.parser.parse_text(cv_text))
         ]
         return f"""
@@ -420,17 +420,7 @@ Regole:
         }
         if any(normalize_text(line).strip(":") in exact_heading_lines for line in lines):
             return False
-        word_count = len(tokenize(replacement))
-        max_words = {
-            "profilo": 250,
-            "competenze": 300,
-            "formazione": 300,
-            "esperienze": 600,
-        }.get(section_name, 500)
-        if word_count > max_words:
-            return False
-        if section_name == "profilo" and len(lines) > 15:
-            return False
+        # No length limits, allowing arbitrary CV sizes and details.
         blocked_profile_lines = {"formazione", "esperienze professionali", "esperienza professionale", "contatti", "lingue"}
         if section_name == "competenze" and any(normalize_text(line).strip(":") in blocked_profile_lines for line in lines):
             return False
@@ -526,9 +516,13 @@ class DocxPreserver:
     def _table_paragraph_contexts(self, table, inherited_section: str = "intestazione") -> List[ParagraphContext]:
         contexts: List[ParagraphContext] = []
         current_section = inherited_section or "intestazione"
+        seen_tc = set()
         for row in table.rows:
             row_section = current_section
             for cell in row.cells:
+                if id(cell._tc) in seen_tc:
+                    continue
+                seen_tc.add(id(cell._tc))
                 cell_section = row_section
                 for paragraph in cell.paragraphs:
                     text = (paragraph.text or "").strip()
