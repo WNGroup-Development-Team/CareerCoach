@@ -4659,3 +4659,21 @@ textarea {
   display: block;
   margin: 0 auto;
 }
+
+/* Nasconde la barra di scorrimento laterale nella chat di simulazione */
+.chat-messages-scroll {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE ed Edge */
+}
+
+.chat-messages-scroll::-webkit-scrollbar {
+  display: none; /* Chrome, Safari e Opera */
+}
+
+#answer {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE ed Edge */
+}
+#answer::-webkit-scrollbar {
+  display: none; /* Chrome, Safari e Opera */
+}

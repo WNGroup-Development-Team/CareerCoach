@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import "./App.css";
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
@@ -609,6 +609,8 @@ function App() {
   const [isCvDragging, setIsCvDragging] = useState(false);
   const cvFileInputRef = useRef(null);
   const linkedinFileInputRef = useRef(null);
+  const chatContainerRef = useRef(null);
+  const answerRef = useRef(null);
   const [linkedinUploadMessage, setLinkedinUploadMessage] = useState("");
   const [socialScreenshotMessages, setSocialScreenshotMessages] = useState({});
   const [screenshotAnalysisProgress, setScreenshotAnalysisProgress] = useState({
@@ -732,6 +734,25 @@ function App() {
   }, [question, step, showTransition]);
 
   useEffect(() => {
+    if (step === "question" && chatContainerRef.current) {
+      // Determiniamo se l'AI sta scrivendo per decidere se lo scroll deve essere fluido o immediato
+      const isTyping = displayedText.length > 0 && displayedText.length < (question?.length || 0);
+      
+      chatContainerRef.current.scrollTo({
+        top: chatContainerRef.current.scrollHeight,
+        behavior: isTyping ? "auto" : "smooth"
+      });
+    }
+  }, [allFeedbacks, question, displayedText, step, loading]);
+
+  useEffect(() => {
+    if (step === "question" && answerRef.current) {
+      answerRef.current.style.height = "auto";
+      answerRef.current.style.height = `${answerRef.current.scrollHeight}px`;
+    }
+  }, [answer, step]);
+
+  useEffect(() => {
     const splashTimer = setTimeout(() => {
       setShowSplash(false);
     }, INTRO_SPLASH_DURATION_MS);
@@ -743,7 +764,7 @@ function App() {
     let transitionTimer;
 
     if (loading) {
-      setShowTransition(true);
+      setShowTransition(step !== "question" && step !== "interview-summary"); 
       return () => clearTimeout(transitionTimer);
     }
 
@@ -2361,6 +2382,8 @@ function App() {
       if (currentQuestionIndex < questions.length - 1) {
         const nextIndex = currentQuestionIndex + 1;
         const nextQuestion = questions[nextIndex];
+        
+        if (!nextQuestion) return;
 
         setCurrentQuestionIndex(nextIndex);
         setQuestionId(nextQuestion.question_id);
@@ -4913,47 +4936,90 @@ function App() {
       )}
 
       {step === "question" && (
-        <section className="card">
-          <h2>Simulazione colloquio</h2>
-
-          <div className="progress-question">
-            Domanda {currentQuestionIndex + 1} di {questions.length || 10}
+        <section className="card chat-simulation-container" style={{ display: 'flex', flexDirection: 'column', height: '75vh', padding: 0, overflow: 'hidden', backgroundColor: 'var(--bg-light)' }}>
+          <div className="chat-header" style={{ padding: '1rem 1.5rem', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff', zIndex: 10 }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: '1.2rem' }}>Simulazione Colloquio</h2>
+              <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                Domanda {currentQuestionIndex + 1} di {questions.length || 10}
+              </p>
+            </div>
+            <button 
+              className="secondary-button" 
+              onClick={() => transitionToStep("gym")} 
+              style={{ margin: 0, padding: '6px 12px', fontSize: '0.85rem' }}
+            >
+              Esci
+            </button>
           </div>
 
-          <div className="interviewer-container">
-            <div className="avatar-wrapper">
-              <div className={`interviewer-avatar ${isSpeaking ? 'speaking' : ''}`}>
-                  <img src={logoCareerCoach} alt="Logo" className="avatar-logo" />
-                {isSpeaking && (
-                  <div className="audio-visualizer">
-                    <span className="bar"></span>
-                    <span className="bar"></span>
-                    <span className="bar"></span>
+          <div className="chat-messages-scroll" ref={chatContainerRef} style={{ flex: 1, overflowY: 'auto', padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem', background: '#f8faff' }}>
+            {allFeedbacks.map((item, index) => (
+              <React.Fragment key={`turn-${index}`}>
+                <div className="interviewer-container" style={{ margin: 0, justifyContent: 'flex-start' }}>
+                  <div className="avatar-wrapper" style={{ width: '36px', height: '36px', minWidth: '36px' }}>
+                    <div className="interviewer-avatar" style={{ padding: '3px' }}>
+                      <img src={logoCareerCoach} alt="AI" className="avatar-logo" />
+                    </div>
                   </div>
-                )}
+                  <div className="interviewer-content" style={{ maxWidth: '85%' }}>
+                    <div className="question-bubble" style={{ background: '#fff', color: 'var(--text-primary)', borderRadius: '4px 16px 16px 16px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', padding: '12px 16px' }}>{item.question}</div>
+                  </div>
+                </div>
+                <div className="user-chat-turn" style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <div className="user-bubble" style={{ background: 'var(--primary)', color: 'white', padding: '12px 16px', borderRadius: '16px 16px 4px 16px', maxWidth: '80%', fontSize: '0.95rem', boxShadow: '0 2px 8px rgba(36, 130, 105, 0.2)' }}>
+                    {item.answer}
+                  </div>
+                </div>
+              </React.Fragment>
+            ))}
+
+            {/* Turno corrente dell'intervistatore */}
+            <div className="interviewer-container" style={{ margin: 0, justifyContent: 'flex-start', opacity: loading ? 0.6 : 1 }}>
+              <div className="avatar-wrapper" style={{ width: '40px', height: '40px', minWidth: '40px' }}>
+                <div className={`interviewer-avatar ${isSpeaking ? 'speaking' : ''}`}>
+                  <img src={logoCareerCoach} alt="Logo" className="avatar-logo" />
+                </div>
+              </div>
+              <div className="interviewer-content" style={{ maxWidth: '85%' }}>
+                <div className="question-bubble" aria-live="polite" style={{ background: '#fff', borderRadius: '4px 18px 18px 18px', boxShadow: '0 2px 5px rgba(0,0,0,0.06)', padding: '14px 18px' }}>
+                  {displayedText}
+                  {displayedText.length < (question?.length || 0) && !loading && <span className="cursor">|</span>}
+                </div>
               </div>
             </div>
-            <div className="interviewer-content">
-              <div className="question-bubble" aria-live="polite">
-                {displayedText}
-                {displayedText.length < (question?.length || 0) && <span className="cursor">|</span>}
+
+            {loading && (
+              <div className="interviewer-container" style={{ margin: '10px 0' }}>
+                <div className="typing-indicator" style={{ fontStyle: 'italic', color: 'var(--text-secondary)', paddingLeft: '50px', fontSize: '0.9rem' }}>
+                  Il coach sta valutando la risposta...
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
-          <div className="response-field">
-            <label htmlFor="answer">La tua risposta</label>
-            <div className="textarea-wrapper">
+          <div className="chat-input-bar" style={{ padding: '1.2rem 1.5rem', background: '#fff', borderTop: '1px solid var(--border-color)', boxShadow: '0 -4px 12px rgba(0,0,0,0.03)' }}>
+            <div className="textarea-wrapper" style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', background: '#f0f2f5', padding: '8px 16px', borderRadius: '28px', border: '1px solid transparent', transition: 'border-color 0.2s' }}>
               <textarea
                 id="answer"
+                ref={answerRef}
                 value={answer}
                 onChange={(e) => setAnswer(e.target.value)}
-                placeholder="Scrivi qui la tua risposta oppure usa il microfono per trascrivere la risposta..."
-                rows={9}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!loading && answer.trim()) evaluateAnswer();
+                  }
+                }}
+                placeholder="Scrivi la tua risposta..."
+                rows={1}
+                style={{ flex: 1, border: 'none', background: 'transparent', padding: '10px 4px', resize: 'none', outline: 'none', fontSize: '1rem', minHeight: '40px' }}
               />
+              <div style={{ display: 'flex', gap: '8px', paddingBottom: '4px', flexShrink: 0 }}>
               <button
                 type="button"
-                className={`mic-button ${isListening ? "active" : ""}`}
+                  className="chat-mic-button" 
+                  style={{ position: 'static', margin: 0, background: isListening ? '#ff4d4d' : 'transparent', color: isListening ? '#fff' : 'var(--text-secondary)', width: '38px', height: '38px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '50%', border: 'none', cursor: 'pointer' }}
                 onClick={() => {
                   if (isListening) {
                     stopVoiceAnswer();
@@ -4965,21 +5031,23 @@ function App() {
                 title="Usa il microfono"
                 aria-label="Usa il microfono"
               >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" width="22" height="22" fill="currentColor">
                   <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2Zm-5 9a7 7 0 0 0 7-7h2a9 9 0 0 1-18 0h2a7 7 0 0 0 7 7Zm-1 2h2v2h-2v-2Z"/>
                 </svg>
               </button>
+              <button 
+                className="send-message-btn" 
+                onClick={evaluateAnswer} 
+                disabled={loading || !answer.trim()}
+                  style={{ position: 'static', margin: 0, background: 'var(--primary)', color: '#fff', border: 'none', width: '38px', height: '38px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', opacity: (loading || !answer.trim()) ? 0.6 : 1 }}
+              >
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+              </button>
+              </div>
             </div>
-          </div>
-
-          <div className="actions">
-            <button className="primary-button" onClick={evaluateAnswer} disabled={loading}>
-              Invia risposta
-            </button>
-
-            <button className="secondary-button" onClick={() => transitionToStep("gym")}>
-              Torna alla palestra
-            </button>
           </div>
         </section>
       )}
