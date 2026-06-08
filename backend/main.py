@@ -14,11 +14,14 @@ import io
 import ipaddress
 import socket
 import textwrap
+import zipfile
+import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from html.parser import HTMLParser
 from typing import Optional, List, Dict, Any
+from urllib3.exceptions import MaxRetryError, NewConnectionError
 
 from dotenv import dotenv_values, load_dotenv
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
@@ -1099,23 +1102,81 @@ def extract_text_from_file_bytes(file_bytes: bytes, filename: str) -> tuple[str,
             from docx import Document
 
             document = Document(io.BytesIO(file_bytes))
-            text_parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
-            text_parts.extend(
-                cell.text
-                for table in document.tables
-                for row in table.rows
-                for cell in row.cells
-                if cell.text
-            )
-            return "\n".join(text_parts).strip(), "docx"
+            text_parts = []
+
+            def append_paragraphs(paragraphs):
+                for paragraph in paragraphs:
+                    if paragraph.text:
+                        text_parts.append(paragraph.text)
+
+            append_paragraphs(document.paragraphs)
+            for table in document.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text:
+                            text_parts.append(cell.text)
+
+            for section in document.sections:
+                append_paragraphs(section.header.paragraphs)
+                for table in section.header.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text:
+                                text_parts.append(cell.text)
+                append_paragraphs(section.footer.paragraphs)
+                for table in section.footer.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text:
+                                text_parts.append(cell.text)
+
+            docx_text = "\n".join(text_parts).strip()
+            xml_text = _extract_docx_text_from_xml(file_bytes)
+            if len(xml_text) > len(docx_text):
+                return xml_text, "docx_xml"
+            return docx_text or xml_text, "docx"
         except Exception as exc:
             print("Errore DOCX:", exc)
-            return "", "failed"
+            xml_text = _extract_docx_text_from_xml(file_bytes)
+            return xml_text, "docx_xml"
 
     if lower_filename.endswith(".txt"):
         return decode_text_bytes(file_bytes).strip(), "txt"
 
     return "", "failed"
+
+
+def _extract_text_from_word_ml(xml_bytes: bytes) -> str:
+    try:
+        root = ET.fromstring(xml_bytes)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs = []
+        for paragraph in root.findall(".//w:p", ns):
+            text_segments = [node.text for node in paragraph.findall('.//w:t', ns) if node.text]
+            if text_segments:
+                paragraphs.append("".join(text_segments))
+        return "\n".join(paragraphs).strip()
+    except Exception:
+        return ""
+
+
+def _extract_docx_text_from_xml(file_bytes: bytes) -> str:
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            content_files = sorted(
+                name
+                for name in archive.namelist()
+                if name == "word/document.xml" or name.startswith("word/header") or name.startswith("word/footer")
+            )
+            text_parts = []
+            for name in content_files:
+                xml_text = _extract_text_from_word_ml(archive.read(name))
+                if xml_text:
+                    text_parts.append(xml_text)
+            return "\n".join(text_parts).strip()
+    except Exception as exc:
+        print("Errore DOCX XML parsing:", exc)
+        return ""
 
 
 def extract_text_with_method(file_bytes: bytes, filename: str) -> Dict:
@@ -1164,8 +1225,8 @@ def analyze_cv_heuristics(text: str) -> Dict:
     has_email = bool(re.search(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", normalized))
     has_phone = bool(re.search(r"(?:\+?\d[\s().-]*){8,}", normalized))
     has_name_like_line = any(
-        2 <= len(re.findall(r"\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ']+\b", line)) <= 4
-        for line in text.splitlines()[:8]
+        2 <= len(re.findall(r"\b[A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ'`-]{1,}\b", line)) <= 5
+        for line in text.splitlines()[:12]
     )
 
     if has_email:
@@ -1193,6 +1254,7 @@ def analyze_cv_heuristics(text: str) -> Dict:
     score += 15 if "email" in unique_signals else 0
     score += 15 if "telefono" in unique_signals else 0
     score += 10 if "linkedin" in unique_signals else 0
+    score += 10 if "nome e cognome" in unique_signals else 0
     score += 20 if "esperienze professionali" in unique_signals else 0
     score += 20 if "formazione" in unique_signals else 0
     score += 20 if "competenze" in unique_signals else 0
@@ -6939,7 +7001,7 @@ def extract_candidate_name_from_cv(text: str) -> Dict:
     for line in lines[:12]:
         if "@" in line or re.search(r"\d", line):
             continue
-        candidates = re.findall(r"\b[A-ZÀ-ÖØ-Ý][a-zà-öø-ÿ'`-]{1,}\b", line)
+        candidates = re.findall(r"\b[A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ'`-]{1,}\b", line)
         if 2 <= len(candidates) <= 4:
             return {"name": " ".join(candidates[:3]), "confidence": 0.78}
 
@@ -7000,12 +7062,20 @@ def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -
             "message": "Identità coerente: il nome presente nel CV corrisponde a quello dell'utente.",
         }
 
-    if detected.get("confidence", 0) >= 0.65 and confidence < 0.45:
+    if len(detected_tokens) >= 2 and confidence < 0.50:
         return {
             "matches_user": False,
             "confidence": round(1 - confidence, 2),
             "detected_name": detected.get("name", ""),
-            "message": "Possibile incoerenza: il nome presente nel CV non sembra corrispondere a quello dell'utente.",
+            "message": "Il nome presente nel CV non corrisponde al nome del profilo.",
+        }
+
+    if detected.get("confidence", 0) >= 0.65 and confidence < 0.60:
+        return {
+            "matches_user": False,
+            "confidence": round(1 - confidence, 2),
+            "detected_name": detected.get("name", ""),
+            "message": "Il nome presente nel CV non corrisponde al nome del profilo.",
         }
 
     return {
@@ -8652,6 +8722,40 @@ def download_optimized_cv_legacy(user_id: int):
     )
 
 
+def is_visual_service_unavailable_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if isinstance(exc, requests.exceptions.RequestException):
+        return True
+    if isinstance(exc, (MaxRetryError, NewConnectionError)):
+        return True
+    if "httpconnectionpool" in message or "connection" in message or "connessione" in message:
+        return True
+    return False
+
+
+def detect_disallowed_cv_content(text: str) -> Dict[str, Any]:
+    normalized = normalize_for_cv_detection(text)
+    disallowed_patterns = [
+        r"\bporn(?:o|ografia)?\b",
+        r"\bnud(?:o|ità)\b",
+        r"\bnaked\b",
+        r"\bsex\b",
+        r"\bsesso\b",
+        r"\berotic(?:o|a)?\b",
+        r"\bviol(?:en[za]|ento)\b",
+        r"\b(?:sangue|gore|ferit[oa]?|omicid[io]|assass|arma|pistola|coltello|bomba|terror(?:ismo|ista)?)\b",
+        r"\b(?:drugs?|droga|cocaina|eroina|hashish|marijuana|spaccio)\b",
+        r"\b(?:razz(?:is(?:ta|mo)|ismo)|odio|hate|genocidio)\b",
+    ]
+    for pattern in disallowed_patterns:
+        if re.search(pattern, normalized):
+            return {
+                "blocked": True,
+                "reason": "Il CV contiene contenuti non idonei alle linee guida.",
+            }
+    return {"blocked": False}
+
+
 def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:
     filename = filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -8678,44 +8782,10 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
             "confidence": 0,
             "reason": "Il file e vuoto.",
             "detected_sections": [],
-            "debug": debug,
-        }
-
-    try:
-        visual_validation = validate_cv_images(
-            filename,
-            file_bytes,
-            analyze_embedded_cv_image,
-        )
-    except Exception as exc:
-        return {
-            "is_cv": False,
-            "confidence": 0,
-            "reason": (
-                "Il CV contiene immagini che non e stato possibile verificare in modo sicuro. "
-                f"Riprova quando il servizio visuale e disponibile. Dettaglio: {exc}"
-            ),
-            "detected_sections": [],
             "visual_validation": {
-                "status": "analysis_failed",
-                "blocked": True,
-                "message": str(exc),
+                "status": "no_content",
+                "blocked": False,
             },
-            "debug": debug,
-        }
-
-    if visual_validation.get("blocked"):
-        categories = ", ".join(visual_validation.get("blocked_categories") or [])
-        return {
-            "is_cv": False,
-            "confidence": 0,
-            "reason": (
-                "Il CV contiene un'immagine non ammessa"
-                + (f": {categories}." if categories else ".")
-                + " Sono consentiti solo un normale ritratto professionale e grafica innocua del CV."
-            ),
-            "detected_sections": [],
-            "visual_validation": visual_validation,
             "debug": debug,
         }
 
@@ -8725,11 +8795,38 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
     debug["extraction_method"] = extraction_method
 
     if len(normalized_text) == 0:
+        print(
+            f"DEBUG CV validation: file={filename}, extraction_method={extraction_method}, text_length=0, reason=no_text"
+        )
         return {
             "is_cv": False,
             "confidence": 0,
             "reason": "Non riesco a estrarre testo dal file. Potrebbe essere un PDF scannerizzato o composto da immagini.",
             "detected_sections": [],
+            "visual_validation": {
+                "status": "no_text",
+                "blocked": False,
+            },
+            "debug": debug,
+        }
+
+    print(
+        f"DEBUG CV validation: file={filename}, extension={extension}, extraction_method={extraction_method}, text_length={len(normalized_text)}"
+    )
+    print(f"DEBUG CV validation: sample_text={repr(normalized_text[:200])}")
+
+    disallowed = detect_disallowed_cv_content(normalized_text)
+    if disallowed["blocked"]:
+        print(f"DEBUG CV validation: disallowed_content=True, reason={disallowed['reason']}")
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": disallowed["reason"],
+            "detected_sections": [],
+            "visual_validation": {
+                "status": "disallowed_content",
+                "blocked": False,
+            },
             "debug": debug,
         }
 
@@ -8739,9 +8836,13 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
     if len(normalized_text) < 50 and heuristic_score < 35:
         return {
             "is_cv": False,
-            "confidence": heuristic_score,
+            "confidence": clamp_score(heuristic_score),
             "reason": "Il testo estratto e molto breve e non contiene abbastanza elementi tipici di un curriculum.",
             "detected_sections": heuristic["detected_sections"],
+            "visual_validation": {
+                "status": "short_text",
+                "blocked": False,
+            },
             "debug": debug,
         }
 
@@ -8761,10 +8862,68 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
         confidence = heuristic_score
         reason = "Il documento e leggibile, ma non contiene abbastanza elementi tipici di un curriculum."
 
+    if not is_cv:
+        print(
+            f"DEBUG CV validation: file={filename}, is_cv=False, heuristic_score={heuristic_score}, detected_sections={heuristic['detected_sections']}, reason={reason}"
+        )
+        return {
+            "is_cv": False,
+            "confidence": clamp_score(confidence),
+            "reason": reason,
+            "detected_sections": heuristic["detected_sections"],
+            "visual_validation": {
+                "status": "skipped",
+                "blocked": False,
+            },
+            "debug": debug,
+        }
+
+    visual_validation = {
+        "status": "not_analyzed",
+        "blocked": False,
+    }
+    visual_warning = None
+    try:
+        visual_validation = validate_cv_images(
+            filename,
+            file_bytes,
+            analyze_embedded_cv_image,
+        )
+    except Exception as exc:
+        print(
+            f"Controllo immagini non completato perché il servizio visuale non e disponibile: {exc}"
+        )
+        visual_validation = {
+            "status": "analysis_failed",
+            "image_count": 0,
+            "analyzed_count": 0,
+            "blocked": False,
+            "message": "Controllo immagini non completato perché il servizio visuale non e disponibile.",
+        }
+        visual_warning = (
+            "Il CV e stato letto correttamente. Il controllo automatico delle immagini non e disponibile al momento, ma il caricamento puo proseguire."
+        )
+
+    if visual_validation.get("blocked"):
+        categories = ", ".join(visual_validation.get("blocked_categories") or [])
+        print(f"DEBUG CV validation: visual_blocked=True, categories={categories}")
+        return {
+            "is_cv": False,
+            "confidence": 0,
+            "reason": (
+                "Il CV contiene immagini o contenuti non idonei alle linee guida"
+                + (f": {categories}." if categories else ".")
+            ),
+            "detected_sections": heuristic["detected_sections"],
+            "visual_validation": visual_validation,
+            "debug": debug,
+        }
+
+    print(f"DEBUG CV validation: heuristic_score={heuristic_score},detected_sections={heuristic['detected_sections']} visual_validation={visual_validation} final_reason={visual_warning or reason}")
     return {
-        "is_cv": is_cv,
+        "is_cv": True,
         "confidence": clamp_score(confidence),
-        "reason": reason,
+        "reason": visual_warning or reason,
         "detected_sections": heuristic["detected_sections"],
         "visual_validation": visual_validation,
         "debug": debug,
@@ -8815,6 +8974,10 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
     if not existing_user:
         conn.close()
         raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    print(
+        f"DEBUG CV upload: user_id={user_id}, file={filename}, profile_name={existing_user[1]!r}, extracted_text_length={len(clean_extracted_text(extracted_text))}, extraction_method={_extraction_method}"
+    )
 
     profile_name_parts = (existing_user[1] or "").split()
     first_name = profile_name_parts[0] if profile_name_parts else ""
