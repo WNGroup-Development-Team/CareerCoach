@@ -8,12 +8,6 @@ const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
 const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
-const CV_FLOW_STEPS = [
-  { id: "cv-upload", label: "CV" },
-  { id: "cv-digital", label: "Digitale" },
-  { id: "cv-analysis", label: "Analisi" },
-  { id: "gym", label: "Percorso" },
-];
 const CV_ADDITIONAL_DATA_FIELDS = [
   { key: "experiences", label: "Esperienze da valorizzare" },
   { key: "technical_skills", label: "Competenze tecniche aggiuntive" },
@@ -551,56 +545,6 @@ function InterviewIcon() {
       <path d="M18 5.5h2.5v4H18" />
       <path d="M6 5.5H3.5v4H6" />
     </svg>
-  );
-}
-
-function CvFlowProgress({ currentStep, onStepSelect }) {
-  const activeIndex = Math.max(
-    CV_FLOW_STEPS.findIndex((flowStep) => flowStep.id === currentStep),
-    0
-  );
-  const progress = (activeIndex / (CV_FLOW_STEPS.length - 1)) * 100;
-
-  return (
-    <nav className="progress-steps" aria-label="Avanzamento percorso CV">
-      <div className="progress-steps-track" aria-hidden="true">
-        <span style={{ width: `${progress}%` }} />
-      </div>
-
-      <ol>
-        {CV_FLOW_STEPS.map((flowStep, index) => {
-          const isActive = index === activeIndex;
-          const isComplete = index < activeIndex;
-          const canReturnToStep = isComplete && typeof onStepSelect === "function";
-          const stepContent = (
-            <>
-              <span aria-hidden="true">{isComplete ? "✓" : ""}</span>
-              <strong>{flowStep.label}</strong>
-            </>
-          );
-
-          return (
-            <li
-              className={[
-                "progress-step",
-                isActive ? "active" : "",
-                isComplete ? "complete" : "",
-              ].filter(Boolean).join(" ")}
-              aria-current={isActive ? "step" : undefined}
-              key={flowStep.id}
-            >
-              {canReturnToStep ? (
-                <button type="button" onClick={() => onStepSelect(flowStep.id)}>
-                  {stepContent}
-                </button>
-              ) : (
-                stepContent
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    </nav>
   );
 }
 
@@ -1601,7 +1545,6 @@ function App() {
     setLoading(true);
 
     try {
-      const selectedCvFile = cvFile;
       const text = await readCvText(cvFile);
       const fileBase64 = await readFileBase64(cvFile);
       const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv`, {
@@ -1638,10 +1581,6 @@ function App() {
       });
       setCvFile(null);
       setCvPreview(null);
-      if (personalizeIntent === "cv") {
-        await analyzeCvOptimization(updatedUser, selectedCvFile);
-        return;
-      }
       transitionToStep("cv-digital");
     } catch (err) {
       console.error(err);
@@ -3427,8 +3366,6 @@ function App() {
 
       {step === "cv-upload" && (
         <section className="cv-onboarding">
-          <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
-
           <div className="cv-onboarding-copy">
             <h2>Costruiamo il tuo profilo professionale</h2>
             <p>
@@ -3535,8 +3472,6 @@ function App() {
 
       {step === "cv-digital" && (
         <section className="cv-flow-page digital-profile-page">
-          <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
-
           <div className="cv-loaded-card">
             <span className="cv-loaded-check" aria-hidden="true">✓</span>
             <div>
@@ -3653,16 +3588,14 @@ function App() {
             <span>Analizza Coerenza Digitale</span>
           </button>
 
-          <button className="cv-skip-button" onClick={() => transitionToStep("profile")}>
-            Salta per ora e aggiorna dal profilo
+          <button className="cv-skip-button" onClick={() => transitionToStep("home")}>
+            Salta per ora
           </button>
         </section>
       )}
 
       {step === "cv-analysis" && (
         <section className="cv-flow-page">
-          <CvFlowProgress currentStep={step} onStepSelect={transitionToStep} />
-
           <div className="cv-analysis-heading">
             <h2>Analisi Coerenza Digitale</h2>
             <p>Confronto tra il tuo CV e i profili online.</p>
@@ -3867,9 +3800,8 @@ function App() {
             </div>
           )}
 
-          <button className="cv-next-button" onClick={() => transitionToStep("gym")}>
-            Avanti
-            
+          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
+            Vai alla home
           </button>
         </section>
       )}
