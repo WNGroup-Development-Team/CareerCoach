@@ -4019,8 +4019,21 @@ def validate_optimized_docx_structure(final_text: str) -> List[str]:
         if count > 1:
             warnings.append(f"La sezione {title} compare {count} volte nel CV finale.")
 
-    if normalize_plain_text("CV ottimizzato - bozza guidata") in normalize_plain_text(normalized_text):
+    normalized_document = normalize_plain_text(normalized_text)
+    if normalize_plain_text("CV ottimizzato - bozza guidata") in normalized_document:
         warnings.append("Il CV finale contiene testo di bozza/report.")
+
+    web_noise_patterns = [
+        r"\bfonte\s+titolo\b",
+        r"\btitolo\s+con\b",
+        r"\burl\s+https?\b",
+        r"\bhttps\s+www\b",
+        r"\bwww\.[a-z0-9.-]+",
+        r"\bscambieuropei\b",
+        r"\bestratto\b",
+    ]
+    if any(re.search(pattern, normalized_document) for pattern in web_noise_patterns):
+        warnings.append("Il CV finale contiene frammenti di fonti web o URL inseriti nel contenuto.")
 
     return warnings
 
@@ -5013,9 +5026,10 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
             item_type = str(item.get("type") or "skillConfirmation").strip()
         else:
             continue
-        if not name:
+        if not name or not is_meaningful_cv_keyword(name):
+            rejected_candidates.append(f"conferma skill {name or 'senza nome'}")
             continue
-        if detail and is_low_quality_text(detail, min_chars=6, min_words=2):
+        if detail and (is_low_quality_text(detail, min_chars=6, min_words=2) or is_web_source_noise_keyword(detail)):
             rejected_candidates.append(f"conferma skill {name}")
             continue
         confirmed_skills.append({
@@ -6012,6 +6026,27 @@ ROLE_KEYWORDS = {
     "cloud", "qa", "tester", "business", "amministrativo", "contabile"
 }
 
+GENERIC_ROLE_TERMS = {
+    "data", "analyst", "analysis", "business", "project", "manager", "team", "office",
+    "scientist", "specialist", "developer", "engineer", "designer", "consultant",
+    "intern", "junior", "senior", "lead", "coordinator", "researcher", "assistant",
+    "role", "job", "position", "posizione", "candidatura", "candidato", "candidate",
+    "azienda", "company", "profilo", "profile", "requirements", "requisiti",
+    "responsibilities", "responsabilita", "mansioni", "lavoro", "stage",
+}
+
+WEB_SOURCE_NOISE_TERMS = {
+    "fonte", "fonti", "titolo", "title", "url", "http", "https", "www",
+    "estratto", "snippet", "link", "pagina", "sito", "source", "sources",
+    "scambieuropei", "indeed", "glassdoor", "linkedin", "workday", "greenhouse",
+    "lever", "successfactors", "monster", "career", "careers", "jobs",
+}
+
+ATS_GENERIC_KEYWORD_BLOCKLIST = GENERIC_ROLE_TERMS.union(WEB_SOURCE_NOISE_TERMS).union({
+    "skill", "skills", "hard", "soft", "competenza", "competenze", "strumento",
+    "strumenti", "tool", "tools", "tecnologia", "tecnologie", "attivita",
+})
+
 KNOWN_COMPANIES = {
     "google", "amazon", "microsoft", "apple", "meta", "facebook",
     "netflix", "tesla", "ibm", "oracle", "accenture", "deloitte",
@@ -6344,26 +6379,92 @@ def validate_job_input(
     }
 
 
-def extract_requested_keywords(role: str, description: str, required_skills: str = "") -> List[str]:
-    return JobAnalyzer(normalize_plain_text).extract_keywords(role, description, required_skills)
+def is_web_source_noise_keyword(value: Any) -> bool:
+    raw = str(value or "").strip()
+    normalized = normalize_plain_text(raw)
+    if not normalized:
+        return True
+    if re.search(r"https?://|www\.|\.[a-z]{2,}(/|$)", raw.lower()):
+        return True
+    tokens = re.findall(r"[a-z0-9+#.-]+", normalized)
+    if not tokens:
+        return True
+    if any(token in WEB_SOURCE_NOISE_TERMS for token in tokens):
+        return True
+    if any("/" in token for token in tokens):
+        return True
+    if len(tokens) >= 3 and sum(1 for token in tokens if token in WEB_SOURCE_NOISE_TERMS) >= 1:
+        return True
+    return False
+
+
+def is_meaningful_cv_keyword(value: Any) -> bool:
+    text = str(value or "").strip()
+    normalized = normalize_plain_text(text)
+    if not normalized:
+        return False
+    if is_web_source_noise_keyword(text):
+        return False
+    if normalized in ATS_GENERIC_KEYWORD_BLOCKLIST:
+        return False
+    if len(normalized) < 4 and normalized not in {"sql", "c#", "c++", "ux", "ui", "r"}:
+        return False
+    tokens = re.findall(r"[a-z0-9+#.-]+", normalized)
+    if not tokens:
+        return False
+    if len(tokens) > 1 and all(token in ATS_GENERIC_KEYWORD_BLOCKLIST for token in tokens):
+        return False
+    if len(tokens) > 5:
+        return False
+    return True
 
 
 def filter_cv_keyword_list(values: List[Any]) -> List[str]:
-    blocked = {"data", "analyst", "analysis", "business", "project", "manager", "team", "office"}
     cleaned = []
     seen = set()
     for value in values or []:
         text = str(value or "").strip()
         normalized = normalize_plain_text(text)
-        if not normalized or normalized in blocked:
-            continue
-        if normalized == "data analyst":
+        if not is_meaningful_cv_keyword(text):
             continue
         if normalized in seen:
             continue
         seen.add(normalized)
         cleaned.append(text)
     return cleaned
+
+
+def safe_job_requirement_context(
+    description: str = "",
+    required_skills: str = "",
+    sources: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """Build a clean job context for keyword extraction without URL/title noise."""
+    parts = []
+    if description and not is_web_source_noise_keyword(description):
+        parts.append(description.strip())
+    if required_skills and not is_web_source_noise_keyword(required_skills):
+        parts.append(required_skills.strip())
+    for source in (sources or [])[:4]:
+        if not isinstance(source, dict):
+            continue
+        # Use only snippet/content, never URL. Titles often contain scraped SEO fragments.
+        content = str(source.get("content") or "").strip()
+        content = re.sub(r"https?://\S+|www\.\S+", " ", content)
+        content = re.sub(r"\b(?:fonte|titolo|url|estratto|source|title|snippet)\b", " ", content, flags=re.I)
+        content = re.sub(r"\s+", " ", content).strip()
+        if len(content) >= 40:
+            parts.append(content[:1200])
+    return "\n".join(part for part in parts if part).strip()
+
+
+def extract_requested_keywords(role: str, description: str, required_skills: str = "") -> List[str]:
+    raw_keywords = JobAnalyzer(normalize_plain_text).extract_keywords(role, description, required_skills)
+    # Keep the complete role as target label, but never split title fragments into skills.
+    role_phrase = (role or "").strip()
+    if role_phrase and 4 <= len(role_phrase) <= 60 and not is_web_source_noise_keyword(role_phrase):
+        raw_keywords.insert(0, role_phrase)
+    return filter_cv_keyword_list(raw_keywords)[:24]
 
 
 ATS_HARD_SKILL_TERMS = [
@@ -6456,42 +6557,133 @@ def keyword_group_present(cv_plain: str, variants: List[str]) -> bool:
 
 def role_keyword_snapshot(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, List[str]]:
     cv_plain = normalize_plain_text(cv_text)
-    target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
-    family = infer_role_family(role, description, required_skills)
-    groups = ROLE_KEYWORD_GROUPS.get(family, [])
-    present = [label for label, variants in groups if keyword_group_present(cv_plain, variants)]
-    partially_present = []
-    if family == "data analyst" and any(item in present for item in ["Machine Learning / AI", "NLP / LLM"]) and "Analisi dei dati" not in present:
-        partially_present.append("Analisi dei dati")
-    confirm_library = {
-        "data analyst": DATA_ANALYST_KEYWORDS_TO_CONFIRM,
-        "game design": GAME_DESIGN_KEYWORDS_TO_CONFIRM,
-    }.get(family, [])
-    to_confirm = [keyword for keyword in confirm_library if not keyword_group_present(cv_plain, [keyword])]
+    keywords = extract_requested_keywords(role, description, required_skills)
+    present = []
+    to_confirm = []
+    for keyword in keywords:
+        if keyword_group_present(cv_plain, [keyword]):
+            present.append(keyword)
+        else:
+            to_confirm.append(keyword)
     return {
-        "present": present,
-        "partially_present": partially_present,
-        "to_confirm": to_confirm,
+        "present": filter_cv_keyword_list(present)[:12],
+        "partially_present": [],
+        "to_confirm": filter_cv_keyword_list(to_confirm)[:12],
     }
 
 
 def infer_role_family(role: str, description: str = "", required_skills: str = "") -> str:
-    target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
-    if any(term in target_plain for term in ["game design", "game designer", "level design", "unity", "unreal"]):
-        return "game design"
-    if any(term in target_plain for term in ["backend developer", "back end", "backend", "api", "fastapi", "django", "spring"]):
-        return "backend developer"
-    if any(term in target_plain for term in ["data analyst", "analista dati", "analisi dati", "data analysis", "business intelligence"]):
-        return "data analyst"
-    return ""
+    # Kept only for compatibility with existing payloads. The CV logic below is dynamic.
+    return "dynamic"
 
 
-def build_role_skill_suggestions(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, Any]:
-    family = infer_role_family(role, description, required_skills)
-    library = ROLE_SKILL_LIBRARY.get(family, {"hard_skills": [], "soft_skills": [], "programming_languages": [], "tools": []})
+def categorize_dynamic_requirement(name: str, raw_category: str = "") -> str:
+    normalized = normalize_plain_text(name)
+    category = normalize_plain_text(raw_category)
+    if category in {"soft_skill", "soft skills", "soft"}:
+        return "soft_skill"
+    if category in {"tool", "tools", "strumento", "strumenti"}:
+        return "tool"
+    if category in {"language", "linguaggio", "programming_language", "programming languages"}:
+        return "language"
+    if category in {"keyword", "ats_keyword", "keyword ats"}:
+        return "keyword"
+    language_markers = {"python", "java", "javascript", "typescript", "c++", "c#", "sql", "r", "php", "go", "ruby", "matlab"}
+    tool_markers = {"excel", "tableau", "power bi", "figma", "docker", "kubernetes", "git", "aws", "azure", "cloud", "salesforce", "jira", "trello"}
+    soft_markers = {"comunicazione", "collaborazione", "leadership", "team", "problem solving", "organizzazione", "autonomia", "precisione", "negoziazione"}
+    if normalized in language_markers or any(f" {marker} " in f" {normalized} " for marker in language_markers):
+        return "language"
+    if any(marker in normalized for marker in tool_markers):
+        return "tool"
+    if any(marker in normalized for marker in soft_markers):
+        return "soft_skill"
+    return "hard_skill"
+
+
+def normalize_dynamic_requirement_items(items: Any) -> List[Dict[str, str]]:
+    normalized_items: List[Dict[str, str]] = []
+    seen = set()
+    raw_items = items if isinstance(items, list) else []
+    for item in raw_items:
+        if isinstance(item, str):
+            name = item.strip()
+            category = ""
+        elif isinstance(item, dict):
+            name = str(item.get("name") or item.get("skill") or item.get("keyword") or item.get("label") or "").strip()
+            category = str(item.get("category") or item.get("type") or "").strip()
+        else:
+            continue
+        if not is_meaningful_cv_keyword(name):
+            continue
+        key = normalize_plain_text(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_items.append({
+            "name": name,
+            "category": categorize_dynamic_requirement(name, category),
+        })
+        if len(normalized_items) >= 20:
+            break
+    return normalized_items
+
+
+def infer_dynamic_target_requirements(
+    role: str,
+    description: str = "",
+    required_skills: str = "",
+    sources: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
+    clean_context = safe_job_requirement_context(description, required_skills, sources)
+    explicit = [
+        {"name": keyword, "category": "keyword"}
+        for keyword in extract_requested_keywords(role, clean_context, required_skills)
+        if is_meaningful_cv_keyword(keyword)
+    ]
+    if not normalize_plain_text(role) and not normalize_plain_text(clean_context):
+        return normalize_dynamic_requirement_items(explicit)
+
+    prompt = f"""
+Sei un analizzatore di annunci di lavoro. Restituisci SOLO JSON valido.
+
+Obiettivo: estrarre requisiti professionali concreti e trasferibili per la candidatura, senza usare librerie hardcoded.
+La logica deve funzionare per qualunque ruolo: data, design, legale, marketing, HR, finance, sviluppo software, consulenza, operations, project management, ecc.
+
+Ruolo target:
+{role or "Non specificato"}
+
+Testo annuncio/competenze, gia ripulito da URL e rumore tecnico:
+{clean_context[:4500] or "Non specificato"}
+
+Schema:
+{{
+  "requirements": [
+    {{"name": "competenza o keyword concreta", "category": "hard_skill | soft_skill | tool | language | keyword"}}
+  ]
+}}
+
+Regole obbligatorie:
+- Non restituire parole isolate del titolo del ruolo, seniority o contesto, ad esempio scientist, analyst, manager, developer, engineer, specialist, junior, senior, intern.
+- Non restituire URL, domini, nomi di siti, frammenti come fonte/titolo/url/estratto.
+- Non restituire il titolo del ruolo come skill.
+- Preferisci competenze, strumenti, metodi, responsabilita operative e keyword ATS concrete.
+- Se l'annuncio e assente, puoi inferire requisiti tipici del ruolo, ma devono restare elementi da confermare dall'utente.
+- Non nominare aziende, esperienze o certificazioni non presenti.
+- Massimo 14 requisiti, ordinati per rilevanza.
+"""
+    try:
+        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=45))
+        inferred = normalize_dynamic_requirement_items(result.get("requirements") if isinstance(result, dict) else [])
+    except Exception as exc:
+        print(f"Inferenza requisiti dinamici non disponibile: {exc}")
+        inferred = []
+    return normalize_dynamic_requirement_items([*explicit, *inferred])
+
+
+def build_role_skill_suggestions(cv_text: str, role: str, description: str = "", required_skills: str = "", sources: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     cv_plain = normalize_plain_text(cv_text)
     result = {
-        "role_family": family,
+        "role_family": "dynamic",
         "hard_skills": [],
         "soft_skills": [],
         "programming_languages": [],
@@ -6501,49 +6693,77 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
         "to_confirm": [],
         "confirmation_items": [],
     }
-    for group_name in ["hard_skills", "soft_skills", "programming_languages", "tools"]:
-        for skill in library.get(group_name, []):
-            present = keyword_group_present(cv_plain, [skill])
-            item = {"name": skill, "status": "present" if present else "to_confirm"}
-            result[group_name].append(item)
-            category = {
-                "soft_skills": "soft_skill",
-                "programming_languages": "language",
-                "tools": "tool",
-            }.get(group_name, "hard_skill")
+    requirements = infer_dynamic_target_requirements(role, description, required_skills, sources)
+    existing_confirmation_names = set()
+
+    def add_unique(target: List[str], value: str) -> None:
+        normalized_value = normalize_plain_text(value)
+        if value and normalized_value not in {normalize_plain_text(item) for item in target}:
+            target.append(value)
+
+    for requirement in requirements:
+        name = requirement["name"]
+        category = requirement["category"]
+        normalized_name = normalize_plain_text(name)
+        if normalized_name in existing_confirmation_names:
+            continue
+        present = keyword_group_present(cv_plain, [name])
+        group_name = {
+            "soft_skill": "soft_skills",
+            "tool": "tools",
+            "language": "programming_languages",
+            "keyword": "hard_skills",
+        }.get(category, "hard_skills")
+        result[group_name].append({"name": name, "status": "present" if present else "to_confirm"})
+        if present:
+            add_unique(result["already_present"], name)
+            add_unique(result["to_highlight"], name)
+        else:
+            add_unique(result["to_confirm"], name)
             result["confirmation_items"].append({
-                "id": f"{family.replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
-                "type": "skillConfirmation",
-                "name": skill,
+                "id": f"dynamic-{category}-{normalized_name.replace(' ', '-')}",
+                "type": "keywordConfirmation" if category == "keyword" else "skillConfirmation",
+                "name": name,
                 "category": category,
-                "reason": f"Competenza utile per il ruolo {role or family}; puo essere valorizzata solo se confermata e coerente con il CV.",
-                "already_present": present,
+                "reason": "Elemento ricavato dinamicamente da ruolo e annuncio: inserirlo solo se reale e confermato dall'utente.",
+                "already_present": False,
                 "requires_confirmation": True,
                 "status": "pending",
                 "user_example": "",
                 "target_section": "SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS",
             })
-            if present:
-                result["already_present"].append(skill)
-                result["to_highlight"].append(skill)
-            else:
-                result["to_confirm"].append(skill)
-    for keyword in role_keyword_snapshot(cv_text, role, description, required_skills).get("to_confirm", []):
-        if normalize_plain_text(keyword) in {normalize_plain_text(item["name"]) for item in result["confirmation_items"]}:
-            continue
-        result["confirmation_items"].append({
-            "id": f"{family.replace(' ', '-')}-keyword-{normalize_plain_text(keyword).replace(' ', '-')}",
-            "type": "keywordConfirmation",
-            "name": keyword,
-            "category": "keyword",
-            "reason": f"Keyword specifica utile per rendere il CV piu coerente con {role or family}.",
-            "already_present": False,
-            "requires_confirmation": True,
-            "status": "pending",
-            "user_example": "",
-            "target_section": "HARD SKILLS",
-        })
+        existing_confirmation_names.add(normalized_name)
     return result
+
+
+def enrich_evaluation_with_dynamic_requirements(
+    evaluation: Dict,
+    cv_text: str,
+    role: str,
+    description: str = "",
+    required_skills: str = "",
+    sources: Optional[List[Dict[str, str]]] = None,
+) -> Dict:
+    suggested = build_role_skill_suggestions(cv_text, role, description, required_skills, sources)
+    evaluation["suggested_skills"] = suggested
+    present_keywords = list(evaluation.get("present_keywords") or [])
+    missing_keywords = list(evaluation.get("missing_keywords") or [])
+    for name in suggested.get("already_present", []):
+        present_keywords.append(name)
+    for name in suggested.get("to_confirm", []):
+        missing_keywords.append(name)
+    evaluation["present_keywords"] = filter_cv_keyword_list(present_keywords)[:16]
+    evaluation["missing_keywords"] = filter_cv_keyword_list(missing_keywords)[:16]
+    evaluation["missing_skills_for_role"] = filter_cv_keyword_list([
+        item.get("name") for item in suggested.get("confirmation_items", []) if isinstance(item, dict)
+    ])[:16]
+    ats = evaluation.setdefault("ats_analysis", {})
+    ats["present_keywords"] = evaluation["present_keywords"]
+    ats["keywords_present"] = evaluation["present_keywords"]
+    ats["missing_keywords"] = evaluation["missing_keywords"]
+    ats["keywords_missing"] = evaluation["missing_keywords"]
+    ats["keywords_to_confirm"] = suggested.get("to_confirm", [])[:16]
+    return evaluation
 
 
 def compute_cv_completeness_score(cv_text: str, role: str = "", description: str = "", required_skills: str = "") -> int:
@@ -7295,37 +7515,37 @@ Regole:
 
 
 def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> List[Dict]:
+    """Last-resort suggestions: improve text already in the CV, never add role slogans."""
     suggestions: List[Dict] = []
-    clean_role = re.sub(r"\s+", " ", role or "").strip()
 
     profile = re.sub(r"\s+", " ", section_map.get("profile", "")).strip()
-    if profile and clean_role and normalize_plain_text(clean_role) not in normalize_plain_text(profile):
-        proposed = f"{profile.rstrip('.')}. Obiettivo professionale: {clean_role}."
+    improved_profile = improve_profile_text_conservatively(profile)
+    if profile and improved_profile and normalize_plain_text(profile) != normalize_plain_text(improved_profile):
         suggestion = make_coach_suggestion(
             "profile",
-            f"Allinea il profilo al ruolo {clean_role}",
-            "Rende esplicito il ruolo target senza aggiungere esperienze o competenze.",
+            "Rendi il profilo più concreto",
+            "Migliora chiarezza e tono del profilo usando solo informazioni già presenti nel CV.",
             section="CHI SONO",
             original_text=profile,
-            proposed_text=proposed,
+            proposed_text=improved_profile,
             keywords_added=[],
         )
         if is_valid_actionable_suggestion(suggestion):
             suggestions.append(suggestion)
 
     for section, key, category, title in [
-        ("ESPERIENZE PROFESSIONALI", "experience", "experience", "Rendi più leggibile l'esperienza professionale"),
-        ("FORMAZIONE", "education", "education", "Rendi più leggibile il percorso formativo"),
-        ("PROGETTI", "progetti", "project", "Rendi più leggibile la descrizione dei progetti"),
+        ("ESPERIENZE PROFESSIONALI", "experience", "experience", "Riorganizza l'esperienza in attività leggibili"),
+        ("FORMAZIONE", "education", "education", "Rendi più chiaro il percorso formativo"),
+        ("PROGETTI", "progetti", "project", "Rendi più chiara la descrizione dei progetti"),
     ]:
         original = section_map.get(key, "").strip()
         proposed = format_section_as_readable_blocks(original)
-        if not original or not proposed or original.strip() == proposed.strip():
+        if not original or not proposed or normalize_plain_text(original) == normalize_plain_text(proposed):
             continue
         suggestion = make_coach_suggestion(
             category,
             title,
-            "Migliora ordine e leggibilità mantenendo invariati tutti i fatti presenti.",
+            "Riorganizza il contenuto esistente senza aggiungere fatti nuovi.",
             section=section,
             original_text=original,
             proposed_text=proposed,
@@ -7334,21 +7554,52 @@ def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> L
         if is_valid_actionable_suggestion(suggestion):
             suggestions.append(suggestion)
 
-    return suggestions[:4]
+    return suggestions[:3]
+
+
+def improve_profile_text_conservatively(profile: str) -> str:
+    clean = re.sub(r"\s+", " ", profile or "").strip()
+    if not clean:
+        return ""
+    clean = clean.replace("Sono una", "Studentessa").replace("Sono un", "Studente")
+    clean = clean.replace("Motivata a crescere professionalmente", "Motivata a crescere")
+    clean = re.sub(r"\bapplicando competenze tecniche e approccio analitico\b", "applicando competenze tecniche e un approccio analitico", clean, flags=re.I)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if clean and not clean.endswith("."):
+        clean += "."
+    # Do not append "Obiettivo professionale: ruolo"; it sounds artificial and is not a factual CV improvement.
+    return clean if len(clean.split()) >= 8 else ""
+
+
+def fix_common_cv_typos(value: str) -> str:
+    fixed = value or ""
+    replacements = {
+        "applicand tecniche": "applicando tecniche",
+        "orientate alle materie": "orientata alle materie",
+        "piu": "più",
+    }
+    for wrong, right in replacements.items():
+        fixed = re.sub(re.escape(wrong), right, fixed, flags=re.IGNORECASE)
+    return fixed
 
 
 def format_section_as_readable_blocks(value: str) -> str:
-    clean = re.sub(r"[ \t]+", " ", value or "").strip()
+    clean = fix_common_cv_typos(re.sub(r"[ \t]+", " ", value or "").strip())
     if not clean:
         return ""
     sentences = [
-        sentence.strip()
+        sentence.strip(" -•\t")
         for sentence in re.split(r"(?<=[.!?])\s+", clean)
-        if sentence.strip()
+        if sentence.strip(" -•\t")
     ]
     if len(sentences) < 2:
         return ""
-    return "\n".join(f"- {sentence}" for sentence in sentences)
+    first = sentences[0]
+    rest = sentences[1:]
+    # Keep the opening line as context, then bullet the activities/results.
+    bullet_lines = [first]
+    bullet_lines.extend(f"- {sentence}" for sentence in rest[:5])
+    return "\n".join(bullet_lines).strip()
 
 
 def normalize_accepted_coach_suggestions(value: Any) -> List[Dict]:
@@ -7405,16 +7656,17 @@ def build_fallback_cv_job_evaluation(
     sources: List[Dict[str, str]],
     required_skills: str = "",
 ) -> Dict:
+    clean_context = safe_job_requirement_context(description, required_skills, sources)
     cv_tokens = tokenize_meaningful(cv_text)
     role_tokens = tokenize_meaningful(role)
-    description_tokens = tokenize_meaningful(description)
+    description_tokens = tokenize_meaningful(clean_context)
     company_tokens = tokenize_meaningful(company)
 
     company_hits = len(cv_tokens.intersection(company_tokens))
     heuristic = analyze_cv_heuristics(cv_text)
 
-    completeness = compute_cv_completeness_score(cv_text, role, description, required_skills)
-    role_match = compute_role_match_score(cv_text, role, description, required_skills)
+    completeness = compute_cv_completeness_score(cv_text, role, clean_context, required_skills)
+    role_match = compute_role_match_score(cv_text, role, clean_context, required_skills)
     sector_hits = len(cv_tokens.intersection(description_tokens))
     if company.strip() or description.strip():
         company_fit = clamp_score(28 + min(company_hits * 12, 24) + min(sector_hits * 4, 32) + (8 if sources else 0))
@@ -7427,8 +7679,8 @@ def build_fallback_cv_job_evaluation(
     required_skill_tokens = tokenize_meaningful(required_skills)
     relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens).union(required_skill_tokens))))[:8]
     missing = filter_cv_keyword_list(sorted(list((role_tokens.union(description_tokens).union(required_skill_tokens)) - cv_tokens)))[:8]
-    ats_analysis = analyze_cv_ats(cv_text, role, description, required_skills)
-    suggested_skills = build_role_skill_suggestions(cv_text, role, description, required_skills)
+    ats_analysis = analyze_cv_ats(cv_text, role, clean_context, required_skills)
+    suggested_skills = build_role_skill_suggestions(cv_text, role, clean_context, required_skills, sources)
     questions_for_user = generate_cv_optimization_questions(cv_text, {
         "weaknesses": [],
         "missing_skills_for_role": missing,
@@ -7482,6 +7734,14 @@ def build_fallback_cv_job_evaluation(
         "cv_text": cv_text,
         "summary": "Il CV e valido e analizzabile. Per renderlo piu competitivo, va personalizzato meglio rispetto a ruolo, azienda e descrizione inseriti.",
     }
+    evaluation = enrich_evaluation_with_dynamic_requirements(
+        evaluation,
+        cv_text,
+        role,
+        clean_context,
+        required_skills,
+        sources,
+    )
     evaluation["coach_suggestions"] = build_coach_suggestions_from_evaluation(evaluation)
     return evaluation
 
@@ -7715,12 +7975,28 @@ Regole:
     try:
         result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=3000, timeout=60))
         normalized = normalize_cv_job_evaluation(result, fallback)
+        normalized = enrich_evaluation_with_dynamic_requirements(
+            normalized,
+            cv_text,
+            role,
+            description,
+            required_skills,
+            sources,
+        )
         questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
         normalized["optimization_questions"] = questions
         normalized["questions_for_user"] = questions
         return normalized
     except Exception as exc:
         print(f"Valutazione CV per candidatura non riuscita, uso fallback: {exc}")
+        fallback = enrich_evaluation_with_dynamic_requirements(
+            fallback,
+            cv_text,
+            role,
+            description,
+            required_skills,
+            sources,
+        )
         questions = generate_cv_optimization_questions(cv_text, fallback, fallback.get("ats_analysis", ats_analysis))
         fallback["optimization_questions"] = questions
         fallback["questions_for_user"] = questions

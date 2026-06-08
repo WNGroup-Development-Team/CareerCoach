@@ -66,6 +66,27 @@ const GENERIC_CV_CONFIRMATION_KEYWORDS = new Set([
   "project",
   "manager",
   "team",
+  "scientist",
+  "specialist",
+  "developer",
+  "engineer",
+  "designer",
+  "consultant",
+  "intern",
+  "junior",
+  "senior",
+  "role",
+  "job",
+  "position",
+  "posizione",
+  "candidatura",
+  "fonte",
+  "titolo",
+  "url",
+  "https",
+  "www",
+  "estratto",
+  "scambieuropei",
 ]);
 
 const CV_SECTION_MARKERS = [
@@ -134,9 +155,29 @@ const normalizeConfirmationName = (value) => {
   return value?.name || value?.label || value?.keyword || value?.title || "";
 };
 
+const isGenericConfirmationName = (value = "") => {
+  const normalized = String(value)
+    .toLowerCase()
+    .replace(/https?:\/\/\S+|www\.\S+/g, " ")
+    .replace(/[^a-z0-9+#.\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return true;
+  }
+  if (GENERIC_CV_CONFIRMATION_KEYWORDS.has(normalized)) {
+    return true;
+  }
+  if (["http", "https", "www"].some((token) => normalized.includes(token))) {
+    return true;
+  }
+  const tokens = normalized.split(" ").filter(Boolean);
+  return tokens.length > 1 && tokens.every((token) => GENERIC_CV_CONFIRMATION_KEYWORDS.has(token));
+};
+
 const normalizeSkillConfirmationItem = (value, index, fallback = {}) => {
   const name = normalizeConfirmationName(value).trim();
-  if (!name || GENERIC_CV_CONFIRMATION_KEYWORDS.has(name.toLowerCase())) {
+  if (!name || isGenericConfirmationName(name)) {
     return null;
   }
   const isKeyword = fallback.type === "keywordConfirmation";
