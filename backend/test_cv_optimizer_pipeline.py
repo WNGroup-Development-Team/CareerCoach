@@ -3,6 +3,7 @@ import unittest
 
 from docx import Document
 
+from main import build_confirmed_skill_rewrite_instructions
 from services.cv_optimizer.pipeline import (
     DocxPreserver,
     ResumeParser,
@@ -281,6 +282,37 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
         self.assertEqual(applied, 1)
         self.assertEqual(texts, ["PROGETTI", "Progetto confermato dall'utente."])
+
+    def test_appends_new_skill_section_without_new_page(self):
+        document = Document()
+        document.add_paragraph("FORMAZIONE")
+        document.add_paragraph("Laurea in Economia")
+
+        updated_bytes, applied = DocxPreserver().apply(
+            self._docx_bytes(document),
+            [
+                RewriteInstruction(
+                    section="COMPETENZE",
+                    original="",
+                    replacement="Python",
+                    category="skills",
+                    source_id="skill-end",
+                )
+            ],
+        )
+
+        updated = Document(io.BytesIO(updated_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+        self.assertEqual(applied, 1)
+        self.assertEqual(texts[-2:], ["COMPETENZE", "Python"])
+
+    def test_skips_role_like_confirmed_skill(self):
+        instructions = build_confirmed_skill_rewrite_instructions(
+            "PROFILO\nCandidato interessato a Project Manager (stage)",
+            {"confirmed_skills": [{"name": "Project Manager (stage)", "category": "keyword"}]},
+            "Project Manager (stage)"
+        )
+        self.assertEqual(instructions, [])
 
     def test_reuses_new_section_for_multiple_additions(self):
         document = Document()

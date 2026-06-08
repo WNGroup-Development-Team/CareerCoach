@@ -40,6 +40,12 @@ GENERIC_KEYWORDS = {
     "data", "analyst", "analysis", "business", "project", "manager", "team", "office",
     "azienda", "ruolo", "junior", "senior", "stage", "internship", "lavoro",
 }
+
+# Tokens that are generic role nouns and should not be proposed alone as keywords
+GENERIC_ROLE_TOKENS = {
+    "scientist", "analyst", "engineer", "developer", "manager", "specialist",
+    "consultant", "designer", "researcher", "assistant",
+}
 SYNONYMS = {
     "analisi dati": {"data analysis", "data analytics", "analisi dati"},
     "excel": {"excel", "microsoft excel", "fogli di calcolo"},
@@ -165,7 +171,11 @@ class JobAnalyzer:
             if item.strip()
         ]
         source = description.strip() or role.strip()
+        # If role looks like a multi-word title (e.g., "Data Scientist"), prefer keeping it whole
         candidates = explicit + self._phrases(source) + tokenize(source)
+        role_title = role.strip()
+        if role_title and " " in role_title and len(role_title) >= 4:
+            candidates = [role_title] + candidates
 
         keywords: List[str] = []
         seen = set()
@@ -173,8 +183,13 @@ class JobAnalyzer:
             clean = self.normalizer(candidate).strip(" .,:;")
             if not clean or clean in seen:
                 continue
+            # Skip generic keywords and very short tokens (except common acronyms like SQL)
             if clean in GENERIC_KEYWORDS or (len(clean) < 4 and clean not in {"sql"}):
                 continue
+            # Avoid proposing single-word generic role tokens (e.g. "scientist", "engineer")
+            if " " not in clean and clean in GENERIC_ROLE_TOKENS:
+                continue
+            # Also avoid single-word fragments that are just "data" or similar generic terms
             if " " not in clean and clean in {"data", "analyst"}:
                 continue
             seen.add(clean)
@@ -189,7 +204,7 @@ class JobAnalyzer:
         for phrase in sorted(SYNONYMS, key=len, reverse=True):
             if phrase in normalized or any(alias in normalized for alias in SYNONYMS[phrase]):
                 phrases.append(phrase)
-        words = [word for word in tokenize(text) if word not in GENERIC_KEYWORDS]
+        words = [word for word in tokenize(text) if word not in GENERIC_KEYWORDS and word not in GENERIC_ROLE_TOKENS]
         for size in (3, 2):
             for index in range(0, max(len(words) - size + 1, 0)):
                 phrase = " ".join(words[index:index + size])
@@ -298,6 +313,7 @@ Regole:
 - Per AGGIUNGERE nuove competenze/skill (es. confermate dall'utente) usa SEMPRE una istruzione dedicata con `section`: "competenze", `original`: "" e `replacement`: "Nome skill 1, Nome skill 2". NON copiare le vecchie skill nel replacement di questa istruzione, il sistema appenderà quelle nuove automaticamente alla sezione corretta.
 - ATTENZIONE CRITICA: Se invece stai modificando o migliorando un'esperienza, formazione o profilo GIÀ PRESENTE nel CV, DEVI OBBLIGATORIAMENTE inserire in `original` il frammento esatto di testo originale da sostituire.
 - Non duplicare mai sezioni già presenti. Usa `original: ""` SOLO ED ESCLUSIVAMENTE per aggiungere skill, progetti o esperienze completamente nuove non menzionate nel CV.
+- Non aggiungere nuove pagine o sezioni finali artificiali solo per skill, keyword o suggerimenti.
 - Riscrivi in modo intelligente e naturale.
 - Mantieni separazione tra Hard Skills e Soft Skills se necessario, oppure uniscile logicamente.
 - Ogni replacement con original NON vuoto deve sostituire solo il blocco originale della stessa sezione.
@@ -744,13 +760,19 @@ class DocxPreserver:
 
         heading_reference = self._last_heading_paragraph(document)
         body_reference = self._last_styled_paragraph(document)
-        document.add_page_break()
         heading_paragraph = document.add_paragraph(heading)
         body_paragraph = document.add_paragraph(instruction.replacement)
         if heading_reference is not None:
             self._copy_paragraph_format(heading_reference, heading_paragraph)
         if body_reference is not None:
             self._copy_paragraph_format(body_reference, body_paragraph)
+        if body_reference is not None:
+            body_reference._p.addnext(heading_paragraph._p)
+            heading_paragraph._p.addnext(body_paragraph._p)
+        elif heading_reference is not None:
+            heading_reference._p.addnext(heading_paragraph._p)
+            heading_paragraph._p.addnext(body_paragraph._p)
+        # Leave the new section in document flow without forcing a page break.
 
     def _replace_and_cleanup(
         self,

@@ -57,38 +57,6 @@ const getSuggestionText = (item) => {
   return item.description || item.suggestion || item.coach_tip || item.title || "";
 };
 
-const GENERIC_CV_CONFIRMATION_KEYWORDS = new Set([
-  "data",
-  "analyst",
-  "data analyst",
-  "analysis",
-  "business",
-  "project",
-  "manager",
-  "team",
-  "scientist",
-  "specialist",
-  "developer",
-  "engineer",
-  "designer",
-  "consultant",
-  "intern",
-  "junior",
-  "senior",
-  "role",
-  "job",
-  "position",
-  "posizione",
-  "candidatura",
-  "fonte",
-  "titolo",
-  "url",
-  "https",
-  "www",
-  "estratto",
-  "scambieuropei",
-]);
-
 const CV_SECTION_MARKERS = [
   "CONTATTI",
   "LINGUE",
@@ -155,29 +123,9 @@ const normalizeConfirmationName = (value) => {
   return value?.name || value?.label || value?.keyword || value?.title || "";
 };
 
-const isGenericConfirmationName = (value = "") => {
-  const normalized = String(value)
-    .toLowerCase()
-    .replace(/https?:\/\/\S+|www\.\S+/g, " ")
-    .replace(/[^a-z0-9+#.\s-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) {
-    return true;
-  }
-  if (GENERIC_CV_CONFIRMATION_KEYWORDS.has(normalized)) {
-    return true;
-  }
-  if (["http", "https", "www"].some((token) => normalized.includes(token))) {
-    return true;
-  }
-  const tokens = normalized.split(" ").filter(Boolean);
-  return tokens.length > 1 && tokens.every((token) => GENERIC_CV_CONFIRMATION_KEYWORDS.has(token));
-};
-
 const normalizeSkillConfirmationItem = (value, index, fallback = {}) => {
   const name = normalizeConfirmationName(value).trim();
-  if (!name || isGenericConfirmationName(name)) {
+  if (!name) {
     return null;
   }
   const isKeyword = fallback.type === "keywordConfirmation";
@@ -792,10 +740,52 @@ function App() {
 
   const [feedback, setFeedback] = useState(null);
   const [history, setHistory] = useState([]);
+  const [expandedHistorySessions, setExpandedHistorySessions] = useState([]);
+  const [expandedHistoryQuestions, setExpandedHistoryQuestions] = useState([]);
   const [progress, setProgress] = useState(null);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Stati per l'effetto typewriter e la voce AI
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [displayedText, setDisplayedText] = useState("");
+
+  useEffect(() => {
+    // Ogni volta che compare una nuova domanda o entriamo nello step "question"
+    if (step === "question" && question && !showTransition) {
+      window.speechSynthesis.cancel(); // Interrompi voci precedenti
+      setDisplayedText("");
+      setIsSpeaking(true);
+
+      // Effetto Typewriter: rivela un carattere alla volta
+      let i = 0;
+      const typewriter = setInterval(() => {
+        setDisplayedText(question.substring(0, i + 1));
+        i++;
+        if (i >= question.length) clearInterval(typewriter);
+      }, 60); // Velocità di comparsa del testo
+
+      // Sintesi Vocale (TTS)
+      try {
+        const utter = new SpeechSynthesisUtterance(question);
+        utter.lang = "it-IT";
+        utter.rate = 0.95; // Velocità naturale
+        utter.onend = () => setIsSpeaking(false);
+        window.speechSynthesis.speak(utter);
+      } catch (e) {
+        setIsSpeaking(false);
+      }
+
+      return () => {
+        clearInterval(typewriter);
+        window.speechSynthesis.cancel();
+      };
+    } else if (step === "question" && showTransition) {
+      setDisplayedText("");
+      setIsSpeaking(false);
+    }
+  }, [question, step, showTransition]);
 
   useEffect(() => {
     const splashTimer = setTimeout(() => {
@@ -2428,7 +2418,22 @@ function App() {
         }
       ]);
 
-      setStep("feedback");
+      // Se ci sono altre domande, passa alla prossima, altrimenti vai al riepilogo finale
+      if (currentQuestionIndex < questions.length - 1) {
+        const nextIndex = currentQuestionIndex + 1;
+        const nextQuestion = questions[nextIndex];
+
+        setCurrentQuestionIndex(nextIndex);
+        setQuestionId(nextQuestion.question_id);
+        setQuestion(nextQuestion.question);
+        setAnswer("");
+        setFeedback(null);
+        setSpeechMetrics(null);
+        setAnswerMode("text");
+        // Restiamo nello step "question"
+      } else {
+        transitionToStep("interview-summary");
+      }
     } catch (err) {
       console.error(err);
 
@@ -2442,7 +2447,7 @@ function App() {
     }
   };
 
-  const loadHistory = async () => {
+  const loadHistory = async (navigateToHistory = true) => {
     resetError();
     setLoading(true);
 
@@ -2457,7 +2462,9 @@ function App() {
       }
 
       setHistory(data);
-      setStep("history");
+      if (navigateToHistory) {
+        setStep("history");
+      }
     } catch (err) {
       console.error(err);
 
@@ -2470,6 +2477,14 @@ function App() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (step !== "gym" || !userId || history.length > 0) {
+      return;
+    }
+
+    loadHistory(false);
+  }, [step, userId]);
 
   const loadProgress = async () => {
     resetError();
@@ -2876,6 +2891,47 @@ function App() {
   const acceptedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "confirmed" || item.status === "accepted");
   const rejectedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "rejected");
   const latestOptimizedCv = optimizedCvsList[0] || null;
+
+  // Calcolo delle medie per il riepilogo finale della sessione
+  const sessionSummary = {
+    totalScore: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.total_score, 0) / allFeedbacks.length) : 0,
+    clarity: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.clarity_score, 0) / allFeedbacks.length) : 0,
+    completeness: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.completeness_score, 0) / allFeedbacks.length) : 0,
+    relevance: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.relevance_score, 0) / allFeedbacks.length) : 0,
+    professionalism: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.professionalism_score, 0) / allFeedbacks.length) : 0,
+    synthesis: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.synthesis_score, 0) / allFeedbacks.length) : 0,
+    speaking: allFeedbacks.length > 0 ? Math.round(allFeedbacks.reduce((acc, f) => acc + f.feedback.speaking_score, 0) / allFeedbacks.length) : 0,
+  };
+
+  const previousInterviewTargetsFromHistory = history
+    .filter((item) => item.company || item.role)
+    .map((item) => ({
+      company: item.company || "Generica",
+      role: item.role || "Ruolo da definire",
+      id: `${(item.company || "Generica").trim().toLowerCase()}::${(item.role || "").trim().toLowerCase()}`,
+    }))
+    .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+
+  const previousInterviewTargetsFromOptimizedCv = optimizedCvsList
+    .filter((item) => item.target_company || item.target_role)
+    .map((item) => ({
+      company: item.target_company || "Generica",
+      role: item.target_role || "Ruolo da definire",
+      id: `${(item.target_company || "Generica").trim().toLowerCase()}::${(item.target_role || "").trim().toLowerCase()}`,
+    }))
+    .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+
+  const previousInterviewTargets = [
+    ...previousInterviewTargetsFromHistory,
+    ...previousInterviewTargetsFromOptimizedCv,
+  ].filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
+
+  const difficultyOptions = [
+    { value: "base", label: "Base", description: "Domande dirette, perfette per iniziare con ritmo tranquillo." },
+    { value: "intermedio", label: "Intermedio", description: "Domande realistiche e professionali su competenze e motivazione." },
+    { value: "avanzato", label: "Avanzato", description: "Domande sfidanti, tecniche e situazionali per un vero test di preparazione." },
+  ];
+  const currentDifficulty = difficultyOptions.find((option) => option.value === difficulty) || difficultyOptions[1];
   const coachSuggestions = getCoachSuggestionsFromAnalysis(cvOptimizationAnalysis);
   const selectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "accepted" || selectedCoachSuggestions[item.id] === true);
   const rejectedCoachSuggestionItems = coachSuggestions.filter((item) => selectedCoachSuggestions[item.id] === "rejected");
@@ -2900,6 +2956,95 @@ function App() {
       reason: item.description || item.coach_tip || "",
       category: "approfondimento",
     }));
+  const formatHistoryDate = (value) => {
+    if (!value) return "";
+    const normalized = String(value).trim().replace(" ", "T");
+    const date = new Date(normalized);
+    if (!Number.isNaN(date.getTime())) {
+      return new Intl.DateTimeFormat("it-IT", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      }).format(date);
+    }
+    return String(value);
+  };
+
+  const displayInterviewType = (type) => {
+    if (!type) return "Generale";
+    const labels = {
+      conoscitive_motivazionali: "Conoscitive motivazionali",
+      tecniche: "Tecniche",
+      logica: "Logica",
+    };
+    const key = String(type).toLowerCase();
+    if (labels[key]) return labels[key];
+    const label = type.replace(/_/g, " ");
+    return label.charAt(0).toUpperCase() + label.slice(1).toLowerCase();
+  };
+
+  const displayDifficulty = (difficulty) => {
+    if (!difficulty) return "—";
+    return difficulty.charAt(0).toUpperCase() + difficulty.slice(1).toLowerCase();
+  };
+
+  const groupedHistory = Object.values(history.reduce((groups, item) => {
+    const sessionId = item.session_id;
+    if (!groups[sessionId]) {
+      groups[sessionId] = {
+        session_id: sessionId,
+        company: item.company || "Azienda generica",
+        role: item.role || "Ruolo non specificato",
+        interview_type: item.interview_type || "",
+        difficulty: item.difficulty || "",
+        created_at: item.created_at,
+        total_score: item.total_score,
+        questions: [],
+      };
+    }
+
+    groups[sessionId].questions.push({
+      question_id: `${sessionId}-${groups[sessionId].questions.length}`,
+      question: item.question,
+      user_answer: item.user_answer,
+      feedback: item.feedback,
+      speaking_feedback: item.speaking_feedback,
+      improved_answer: item.improved_answer,
+      solution_explanation: item.solution_explanation,
+      clarity_score: item.clarity_score,
+      completeness_score: item.completeness_score,
+      relevance_score: item.relevance_score,
+      professionalism_score: item.professionalism_score,
+      synthesis_score: item.synthesis_score,
+      speaking_score: item.speaking_score,
+      question_mode: item.question_mode,
+    });
+
+    return groups;
+  }, {})).sort((a, b) => {
+    const aDate = new Date(String(a.created_at).trim().replace(" ", "T"));
+    const bDate = new Date(String(b.created_at).trim().replace(" ", "T"));
+    return bDate - aDate;
+  });
+
+  const toggleHistorySession = (sessionId) => {
+    setExpandedHistorySessions((current) => {
+      if (current.includes(sessionId)) {
+        return current.filter((id) => id !== sessionId);
+      }
+      return [...current, sessionId];
+    });
+  };
+
+  const toggleHistoryQuestion = (questionId) => {
+    setExpandedHistoryQuestions((current) => {
+      if (current.includes(questionId)) {
+        return current.filter((id) => id !== questionId);
+      }
+      return [...current, questionId];
+    });
+  };
+
   const confirmedChangesSummary = {
     profile: selectedCoachSuggestionItems.filter((item) => ["profile", "profilo"].includes(item.category) || normalizeSuggestionText(item.section).includes("profilo")),
     skills: [
@@ -4059,7 +4204,9 @@ function App() {
                         </small>
                         {!item.already_present && (
                           <small>
-                            Puoi accettare subito la skill. Se aggiungi un esempio reale, verrà riformulato e inserito nella sezione più coerente del CV.
+                            {item.type === "keywordConfirmation"
+                              ? "Puoi accettare questa keyword. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."
+                              : "Puoi accettare subito la skill. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."}
                           </small>
                         )}
                         <label className="cv-additional-field">
@@ -4067,7 +4214,13 @@ function App() {
                           <textarea
                             value={item.user_example}
                             onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
-                            placeholder={`Facoltativo: descrivi un uso reale di ${item.name} in un progetto, studio o lavoro...`}
+                            placeholder={
+                              item.type === "keywordConfirmation"
+                                ? "Facoltativo: descrivi un uso reale di questa keyword in un progetto, studio o lavoro..."
+                                : item.category === "soft_skill"
+                                ? "Facoltativo: descrivi una situazione reale in cui hai dimostrato questa competenza..."
+                                : "Facoltativo: descrivi dove hai usato questa competenza tecnica..."
+                            }
                             rows={2}
                           />
                         </label>
@@ -4700,22 +4853,64 @@ function App() {
             L’app genererà 10 domande realistiche e personalizzate per simulare un colloquio completo.
           </p>
 
-          <div className="interview-context">
-            <div>
-              <span>Azienda</span>
-              <strong>{company || "Generica"}</strong>
+          <div className="interview-context interview-context-form">
+            <div className="field-card">
+              <label htmlFor="gym-company">Azienda</label>
+              <input
+                id="gym-company"
+                type="text"
+                value={personalizeForm.company}
+                placeholder={company || "Generica"}
+                onChange={(event) => updatePersonalizeForm("company", event.target.value)}
+              />
             </div>
-            <div>
-              <span>Candidatura</span>
-              <strong>{personalizeForm.role || profile.target_role || "Ruolo da definire"}</strong>
+            <div className="field-card">
+              <label htmlFor="gym-role">Candidatura</label>
+              <input
+                id="gym-role"
+                type="text"
+                value={personalizeForm.role}
+                placeholder={profile.target_role || "Ruolo da definire"}
+                onChange={(event) => updatePersonalizeForm("role", event.target.value)}
+              />
             </div>
             {personalizeForm.goal && (
-              <div className="full">
-                <span>Obiettivo</span>
-                <strong>{personalizeForm.goal}</strong>
+              <div className="field-card full">
+                <label>Obiettivo</label>
+                <input
+                  type="text"
+                  value={personalizeForm.goal}
+                  placeholder="Obiettivo specifico della candidatura"
+                  onChange={(event) => updatePersonalizeForm("goal", event.target.value)}
+                />
               </div>
             )}
           </div>
+
+          {previousInterviewTargets.length > 0 && (
+            <div className="previous-targets-card">
+              <label>Usa un'azienda e candidatura già ottimizzate</label>
+              <div className="previous-target-list">
+                {previousInterviewTargets.map((target) => {
+                  const isActive = target.company === (personalizeForm.company.trim() || company) && target.role === (personalizeForm.role.trim() || profile.target_role);
+                  return (
+                    <button
+                      key={target.id}
+                      type="button"
+                      className={isActive ? "target-chip active" : "target-chip"}
+                      onClick={() => {
+                        updatePersonalizeForm("company", target.company);
+                        updatePersonalizeForm("role", target.role);
+                      }}
+                    >
+                      <strong>{target.company}</strong>
+                      <span>{target.role}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <h3 className="sub-title">Tipo di allenamento</h3>
 
@@ -4755,14 +4950,19 @@ function App() {
           </div>
 
           <label>Difficoltà</label>
-          <select
-            value={difficulty}
-            onChange={(e) => setDifficulty(e.target.value)}
-          >
-            <option value="base">Base</option>
-            <option value="intermedio">Intermedio</option>
-            <option value="avanzato">Avanzato</option>
-          </select>
+          <div className="difficulty-grid">
+            {difficultyOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={difficulty === option.value ? "difficulty-pill active" : "difficulty-pill"}
+                onClick={() => setDifficulty(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <p className="difficulty-description">{currentDifficulty.description}</p>
 
           <div className="actions">
             <button className="primary-button" onClick={generateQuestion} disabled={loading}>
@@ -4784,62 +4984,57 @@ function App() {
             Domanda {currentQuestionIndex + 1} di {questions.length || 10}
           </div>
 
-          <div className="tag-row">
-            <span>{company}</span>
-            <span>{interviewType}</span>
-            <span>{difficulty}</span>
-          </div>
-
-          <div className="question-box">{question}</div>
-
-          <div className="info-box">
-            La domanda è stata generata in base al tuo profilo, al ruolo scelto, all’azienda e al livello di difficoltà.
-            Le eventuali fonti usate sono salvate nel database dell’app.
-          </div>
-
-          <div className="mode-switch">
-            <button
-              className={answerMode === "text" ? "mode active" : "mode"}
-              onClick={() => setAnswerMode("text")}
-            >
-              Risposta scritta
-            </button>
-
-            <button
-              className={answerMode === "voice" ? "mode active" : "mode"}
-              onClick={() => setAnswerMode("voice")}
-            >
-              Risposta con microfono
-            </button>
-          </div>
-
-          {answerMode === "voice" && (
-            <div className="voice-panel">
-              <h3>Allenamento vocale</h3>
-              <p>
-                Parla come se fossi davanti a un recruiter. L’app trascrive la tua
-                risposta e analizza il modo di parlare, senza mostrare numeri tecnici a schermo.
-              </p>
-
-              {!isListening ? (
-                <button className="primary-button" onClick={startVoiceAnswer}>
-                  Avvia microfono
-                </button>
-              ) : (
-                <button className="danger-button" onClick={stopVoiceAnswer}>
-                  Ferma registrazione
-                </button>
-              )}
+          <div className="interviewer-container">
+            <div className="avatar-wrapper">
+              <div className={`interviewer-avatar ${isSpeaking ? 'speaking' : ''}`}>
+                  <img src={logoCareerCoach} alt="Logo" className="avatar-logo" />
+                {isSpeaking && (
+                  <div className="audio-visualizer">
+                    <span className="bar"></span>
+                    <span className="bar"></span>
+                    <span className="bar"></span>
+                  </div>
+                )}
+              </div>
             </div>
-          )}
+            <div className="interviewer-content">
+              <div className="question-bubble" aria-live="polite">
+                {displayedText}
+                {displayedText.length < (question?.length || 0) && <span className="cursor">|</span>}
+              </div>
+            </div>
+          </div>
 
-          <label>La tua risposta</label>
-          <textarea
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            placeholder="Scrivi qui la tua risposta oppure usa il microfono e poi correggi la trascrizione..."
-            rows={9}
-          />
+          <div className="response-field">
+            <label htmlFor="answer">La tua risposta</label>
+            <div className="textarea-wrapper">
+              <textarea
+                id="answer"
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Scrivi qui la tua risposta oppure usa il microfono per trascrivere la risposta..."
+                rows={9}
+              />
+              <button
+                type="button"
+                className={`mic-button ${isListening ? "active" : ""}`}
+                onClick={() => {
+                  if (isListening) {
+                    stopVoiceAnswer();
+                  } else {
+                    setAnswerMode("voice");
+                    startVoiceAnswer();
+                  }
+                }}
+                title="Usa il microfono"
+                aria-label="Usa il microfono"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2Zm-5 9a7 7 0 0 0 7-7h2a9 9 0 0 1-18 0h2a7 7 0 0 0 7 7Zm-1 2h2v2h-2v-2Z"/>
+                </svg>
+              </button>
+            </div>
+          </div>
 
           <div className="actions">
             <button className="primary-button" onClick={evaluateAnswer} disabled={loading}>
@@ -4940,6 +5135,120 @@ function App() {
         </section>
       )}
 
+      {step === "interview-summary" && (
+        <section className="card">
+          <h2>Riepilogo Simulazione</h2>
+          <p className="section-description">
+            Ottimo lavoro! Hai completato tutte le domande per il ruolo di <strong>{profile.target_role}</strong> in <strong>{company}</strong>.
+          </p>
+
+          <div className="score-main">
+            <span>{sessionSummary.totalScore}</span>
+            <p>Punteggio Medio Sessione</p>
+          </div>
+
+          <div className="scores-grid">
+            <div>
+              <strong>{sessionSummary.clarity}</strong>
+              <p>Chiarezza</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.completeness}</strong>
+              <p>Completezza</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.relevance}</strong>
+              <p>Pertinenza</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.professionalism}</strong>
+              <p>Professionalità</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.synthesis}</strong>
+              <p>Sintesi</p>
+            </div>
+            <div>
+              <strong>{sessionSummary.speaking}</strong>
+              <p>Parlato</p>
+            </div>
+          </div>
+
+          <h3 className="sub-title">Dettaglio Domande</h3>
+          <div className="history-question-list" style={{ borderTop: 'none' }}>
+            {allFeedbacks.map((item, index) => {
+              const isQuestionExpanded = expandedHistoryQuestions.includes(`summary-${index}`);
+              return (
+                <div className="history-item" key={`summary-${index}`} style={{ background: '#fff' }}>
+                  <div className="history-header">
+                    <div style={{ flex: 1 }}>
+                      <p style={{ margin: 0, fontWeight: 'bold', color: 'var(--primary)' }}>
+                        Domanda {index + 1}
+                      </p>
+                      <p style={{ margin: '4px 0', fontSize: '1.1rem' }}>{item.question}</p>
+                    </div>
+                    <div className="score-pill" style={{ 
+                      background: 'var(--primary-light)', 
+                      padding: '8px 12px', 
+                      borderRadius: '12px',
+                      fontWeight: 'bold',
+                      color: 'var(--primary)'
+                    }}>
+                      {item.feedback.total_score}/100
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="history-question-toggle"
+                    onClick={() => toggleHistoryQuestion(`summary-${index}`)}
+                  >
+                    {isQuestionExpanded ? "Nascondi analisi" : "Vedi analisi e consigli"}
+                  </button>
+
+                  {isQuestionExpanded && (
+                    <div className="history-question-details">
+                      <div className="feedback-block" style={{ marginTop: 0 }}>
+                        <h3>Feedback</h3>
+                        <p>{item.feedback.feedback}</p>
+                      </div>
+
+                      {item.feedback.speaking_feedback && (
+                        <div className="feedback-block">
+                          <h3>Parlato</h3>
+                          <p>{item.feedback.speaking_feedback}</p>
+                        </div>
+                      )}
+
+                      <div className="improved-answer">
+                        <h3>Risposta Modello</h3>
+                        <p>{item.feedback.improved_answer}</p>
+                      </div>
+
+                      {item.feedback.solution_explanation && (
+                        <div className="solution-block">
+                          <h3>Logica / Soluzione</h3>
+                          <p>{item.feedback.solution_explanation}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="actions">
+            <button className="primary-button" onClick={startNewTraining}>
+              Nuovo Allenamento
+            </button>
+            <button className="secondary-button" onClick={() => transitionToStep("home")}>
+              Torna alla Home
+            </button>
+          </div>
+        </section>
+      )}
+
       {step === "history" && (
         <section className="card">
           <h2>Storico allenamenti</h2>
@@ -4948,61 +5257,99 @@ function App() {
             <p className="empty-message">Non ci sono ancora allenamenti salvati.</p>
           )}
 
-          {history.map((item) => (
-            <div className="history-item" key={`${item.session_id}-${item.question}`}>
-              <div className="history-header">
-                <h3>{item.company || "Azienda generica"}</h3>
-                <span>{item.interview_type}</span>
+          {groupedHistory.map((session) => {
+            const isExpanded = expandedHistorySessions.includes(session.session_id);
+            return (
+              <div className="history-item" key={session.session_id}>
+                <div className="history-header">
+                  <div>
+                    <h3>{session.company}</h3>
+                    <p className="history-session-subtitle">
+                      {session.role}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="history-toggle-button"
+                    onClick={() => toggleHistorySession(session.session_id)}
+                  >
+                    {isExpanded ? "Chiudi" : "Apri"}
+                  </button>
+                </div>
+
+                <div className="history-session-meta">
+                  <span>{formatHistoryDate(session.created_at)}</span>
+                  <span>{displayInterviewType(session.interview_type)}</span>
+                  <span>Difficoltà: {displayDifficulty(session.difficulty)}</span>
+                  <span>Punteggio: {session.total_score !== null ? `${session.total_score}/100` : "Non valutato"}</span>
+                </div>
+
+                {isExpanded && (
+                  <div className="history-question-list">
+                    {session.questions.map((item, index) => {
+                      const questionKey = `${session.session_id}-${index}`;
+                      const hasDetails = item.user_answer || item.feedback || item.speaking_feedback || item.improved_answer || item.solution_explanation;
+                      const isQuestionExpanded = expandedHistoryQuestions.includes(questionKey);
+
+                      return (
+                        <div className="history-question-item" key={questionKey}>
+                          <p>
+                            <strong>Domanda {index + 1}:</strong> {item.question}
+                          </p>
+
+                          {hasDetails && (
+                            <button
+                              type="button"
+                              className="history-question-toggle"
+                              onClick={() => toggleHistoryQuestion(questionKey)}
+                            >
+                              {isQuestionExpanded ? "Nascondi dettagli" : "Mostra dettagli"}
+                            </button>
+                          )}
+
+                          {isQuestionExpanded && (
+                            <div className="history-question-details">
+                              {item.user_answer && (
+                                <p>
+                                  <strong>Risposta:</strong> {item.user_answer}
+                                </p>
+                              )}
+
+                              {item.feedback && (
+                                <p>
+                                  <strong>Feedback:</strong> {item.feedback}
+                                </p>
+                              )}
+
+                              {item.speaking_feedback && (
+                                <p>
+                                  <strong>Feedback parlato:</strong> {item.speaking_feedback}
+                                </p>
+                              )}
+
+                              {item.improved_answer && (
+                                <div className="mini-improved">
+                                  <strong>Risposta modello / migliorata:</strong>
+                                  <p>{item.improved_answer}</p>
+                                </div>
+                              )}
+
+                              {item.solution_explanation && (
+                                <div className="mini-solution">
+                                  <strong>Soluzione:</strong>
+                                  <p>{item.solution_explanation}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-
-              <p className="date">{item.created_at}</p>
-
-              <p>
-                <strong>Difficoltà:</strong> {item.difficulty}
-              </p>
-
-              <p>
-                <strong>Punteggio:</strong>{" "}
-                {item.total_score !== null ? `${item.total_score}/100` : "Non valutato"}
-              </p>
-
-              <p>
-                <strong>Domanda:</strong> {item.question}
-              </p>
-
-              {item.user_answer && (
-                <p>
-                  <strong>Risposta:</strong> {item.user_answer}
-                </p>
-              )}
-
-              {item.feedback && (
-                <p>
-                  <strong>Feedback:</strong> {item.feedback}
-                </p>
-              )}
-
-              {item.speaking_feedback && (
-                <p>
-                  <strong>Feedback parlato:</strong> {item.speaking_feedback}
-                </p>
-              )}
-
-              {item.improved_answer && (
-                <div className="mini-improved">
-                  <strong>Risposta modello / migliorata:</strong>
-                  <p>{item.improved_answer}</p>
-                </div>
-              )}
-
-              {item.solution_explanation && (
-                <div className="mini-solution">
-                  <strong>Soluzione:</strong>
-                  <p>{item.solution_explanation}</p>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
 
           <button className="primary-button" onClick={() => transitionToStep("gym")}>
             Torna alla palestra
