@@ -11061,6 +11061,7 @@ Regole di valutazione:
 - Se la risposta è molto prolissa, divaga o contiene molte informazioni non rilevanti, abbassa clarity_score e synthesis_score.
 - improved_answer deve essere SEMPRE valorizzata.
 - Se il candidato non risponde alla domanda, improved_answer deve contenere una risposta modello corretta alla domanda originale.
+- Il punteggio massimo può essere raggiunto anche con risposte corrette ma formulate in modo diverso dalla risposta modello.
 - Se la domanda è tecnica, improved_answer deve mostrare una risposta tecnica corretta ma credibile per il livello del candidato.
 - Se la domanda è conoscitiva o motivazionale, improved_answer deve mostrare una risposta naturale, professionale e adatta a un colloquio.
 - Se la domanda è di logica, improved_answer deve contenere una possibile risposta ragionata e solution_explanation deve contenere la soluzione spiegata passo passo.
