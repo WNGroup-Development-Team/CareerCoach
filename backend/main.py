@@ -32,13 +32,16 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from services.cv_optimizer import (
     CoachSuggestionEngine,
+    DocxApplyResult,
     DocxPreserver,
     ExportService,
     JobAnalyzer,
     MatchingEngine,
+    ResumeDocxOptimizationPipeline,
     ResumeParser,
     ResumeRewriter,
     RewriteInstruction,
+    StructuredRewriteInstruction,
 )
 from services.cv_image_safety import validate_cv_images
 
@@ -52,6 +55,10 @@ ENV_FILE_VALUES = dotenv_values()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+LLM_PROVIDER = ENV_FILE_VALUES.get("LLM_PROVIDER", "groq").strip().lower()
+OLLAMA_TEXT_MODEL = ENV_FILE_VALUES.get("OLLAMA_TEXT_MODEL", "qwen2.5:3b")
+OLLAMA_TEXT_TIMEOUT = int(ENV_FILE_VALUES.get("OLLAMA_TEXT_TIMEOUT", "120"))
+OLLAMA_TEXT_NUM_CTX = int(ENV_FILE_VALUES.get("OLLAMA_TEXT_NUM_CTX", "8192"))
 OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
 VISION_PROVIDER = ENV_FILE_VALUES.get("VISION_PROVIDER", "ollama").strip().lower()
 OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -66,6 +73,23 @@ SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER or "noreply@careercoach.local")
 SESSION_DAYS = int(os.getenv("SESSION_DAYS", "30"))
+DEBUG_MODE = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+# CV AI policy
+# Default: the CV pipeline is deterministic/local, inspired by Resume Matcher/OpenResume.
+# Set these flags to true only if you explicitly want to use an external/local LLM
+# for the corresponding CV step. This prevents Groq/Ollama timeouts from blocking CV analysis.
+# When the chosen provider is Ollama local, enable the CV LLM flow by default unless
+# the user explicitly disabled it.
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+CV_LLM_ENABLED = _env_bool("CV_LLM_ENABLED", default=(LLM_PROVIDER == "ollama"))
+CV_REWRITE_LLM_ENABLED = _env_bool("CV_REWRITE_LLM_ENABLED", default=(LLM_PROVIDER == "ollama"))
+CV_QUALITY_LLM_ENABLED = _env_bool("CV_QUALITY_LLM_ENABLED", default=(LLM_PROVIDER == "ollama"))
 OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL", "http://localhost:8000")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -930,7 +954,78 @@ def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
 # FUNZIONI AI / WEB SEARCH
 # =========================
 
-def call_groq(
+def _debug_print(*args: object, **kwargs: object) -> None:
+    if DEBUG_MODE:
+        print(*args, **kwargs)
+
+
+def call_ollama(
+    prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    timeout: Optional[int] = None,
+    json_mode: bool = False,
+) -> str:
+    timeout = max(timeout or 0, OLLAMA_TEXT_TIMEOUT)
+    timeout = min(timeout, 120)
+    print(f"Ollama timeout impostato a {timeout}s, model={OLLAMA_TEXT_MODEL}")
+    _debug_print(f"Ollama debug: model={OLLAMA_TEXT_MODEL}, max_tokens={max_tokens}, timeout={timeout}")
+    _debug_print(f"Ollama debug prompt:\n{prompt[:500]}...")
+    payload: Dict[str, Any] = {
+        "model": OLLAMA_TEXT_MODEL,
+        "stream": False,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Sei un career coach e resume editor esperto in CV, candidature, "
+                    "compatibilità ATS stimata e preparazione ai colloqui. "
+                    "Lavori esclusivamente sui dati forniti nella richiesta corrente, "
+                    "senza ricordare o riutilizzare persone, ruoli o contenuti precedenti."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if json_mode:
+        payload["format"] = "json"
+
+    try:
+        print(f"Ollama richiesta POST a {OLLAMA_URL}/api/chat in avvio (timeout={timeout}s)...")
+        import time
+        start = time.time()
+        response = requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json=payload,
+            timeout=timeout,
+        )
+        elapsed = time.time() - start
+        print(f"Ollama richiesta POST completata in {elapsed:.1f}s, status={response.status_code}")
+        
+        if not response.ok:
+            try:
+                error_message = response.json().get("error", response.text)
+            except ValueError:
+                error_message = response.text
+            raise RuntimeError(f"Ollama HTTP {response.status_code}: {error_message}")
+
+        content = response.json().get("message", {}).get("content", "")
+        print(f"Ollama risposta ricevuta: {len(content)} char, tempo totale={elapsed:.1f}s")
+        return (content or "").strip()
+    except requests.exceptions.Timeout as exc:
+        print(f"Ollama TIMEOUT dopo {timeout}s: {exc}")
+        raise RuntimeError(f"Ollama timeout dopo {timeout} secondi - modello troppo lento")
+    except requests.exceptions.ConnectionError as exc:
+        print(f"Ollama CONNECTION ERROR: {exc}")
+        raise RuntimeError(f"Ollama non disponibile: {OLLAMA_URL}")
+    except Exception as exc:
+        print(f"Errore Ollama locale: {exc}")
+        raise RuntimeError(str(exc))
+
+
+def _call_groq_impl(
     prompt: str,
     temperature: float = 0.7,
     max_tokens: int = 1000,
@@ -1006,6 +1101,26 @@ def call_groq(
             status_code=500,
             detail=detail
         )
+
+
+def call_groq(
+    prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    timeout: int = 25,
+    json_mode: bool = False,
+) -> str:
+    if LLM_PROVIDER == "ollama":
+        return call_ollama(prompt, temperature, max_tokens, timeout, json_mode)
+
+    if LLM_PROVIDER == "auto":
+        try:
+            return _call_groq_impl(prompt, temperature, max_tokens, timeout, json_mode)
+        except GroqRateLimitError:
+            print("Groq non disponibile, uso Ollama locale come fallback.")
+            return call_ollama(prompt, temperature, max_tokens, timeout, json_mode)
+
+    return _call_groq_impl(prompt, temperature, max_tokens, timeout, json_mode)
 
 
 def extract_json(text: str, context: str = ""):
@@ -1989,6 +2104,7 @@ def search_web_interview_questions(
 JOB_SOURCE_KEYWORDS = (
     "job", "jobs", "careers", "career", "apply", "hiring", "position",
     "role", "vacancy", "offerta", "lavoro", "candidatura", "lavora con noi",
+    "work with us", "join us",
 )
 
 RELIABLE_JOB_SOURCE_DOMAINS = (
@@ -3744,6 +3860,10 @@ def analyze_cv_strategy(user: Dict, company: str, role: str, goal: str, job_link
         "job_link": job_link,
     }
     fallback = build_fallback_cv_strategy(user, company, role, goal, job_link, sources)
+    if not CV_LLM_ENABLED:
+        print("Analisi strategica CV: uso motore locale deterministico, LLM disabilitato.")
+        return fallback
+
     prompt = f"""
 Sei un career coach e recruiter esperto di ottimizzazione CV.
 
@@ -4040,18 +4160,25 @@ def build_resume_rewrite_result(
     accepted_suggestions: Optional[Any] = None,
     user_additional_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    print(f"DEBUG build_resume_rewrite_result: accepted_suggestions type={type(accepted_suggestions).__name__}, len={len(accepted_suggestions) if isinstance(accepted_suggestions, list) else 'N/A'}")
+    if isinstance(accepted_suggestions, list) and accepted_suggestions:
+        print(f"DEBUG: primo suggerimento = {accepted_suggestions[0]}")
+    
     parser = ResumeParser()
     sections = parser.parse_text(cv_text)
 
     coach_engine = CoachSuggestionEngine()
     accepted = coach_engine.accepted_only(accepted_suggestions)
+    print(f"DEBUG accepted dopo coach_engine.accepted_only: type={type(accepted).__name__}, len={len(accepted) if isinstance(accepted, list) else 'N/A'}")
+    
     try:
         from services.cv_optimizer.safe_cv_guard import sanitize_accepted_cv_suggestions
         accepted = sanitize_accepted_cv_suggestions(accepted)
+        print(f"DEBUG accepted dopo sanitizzazione: len={len(accepted) if isinstance(accepted, list) else 'N/A'}")
     except Exception as exc:
         print(f"Filtro modifiche accettate non disponibile: {exc}")
+    
     confirmed_skill_instructions = build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}, role)
-    additional_instructions = build_additional_rewrite_instructions(user_additional_data or {}, role)
 
     # Raccogliamo anche user_additional_data in modo organizzato
     clean_additional_data = {
@@ -4075,26 +4202,46 @@ def build_resume_rewrite_result(
         sections=sections
     )
 
-    try:
-        # Generiamo le istruzioni usando Groq
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500, json_mode=True), context="resume_rewrite_instructions")
-        instructions = rewriter.instructions_from_result(result)
+    if CV_REWRITE_LLM_ENABLED:
+        try:
+            result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500, json_mode=True), context="resume_rewrite_instructions")
+            instructions = rewriter.instructions_from_result(result)
+            print(f"DEBUG istruzioni da LLM: {len(instructions)} istruzioni")
 
-        # Se LLM ha restituito una lista vuota o qualcosa e' andato storto e avevamo suggerimenti:
-        if not instructions and accepted:
-            print("Nessuna istruzione generata dal LLM, uso fallback basato sui suggerimenti diretti.")
+            if not instructions and accepted:
+                print("Nessuna istruzione generata dal LLM, uso fallback basato sui suggerimenti diretti.")
+                instructions = rewriter.instructions_from_suggestions(accepted)
+                print(f"DEBUG istruzioni da fallback: {len(instructions)} istruzioni")
+        except Exception as exc:
+            print(f"Errore nella generazione istruzioni LLM: {exc}")
             instructions = rewriter.instructions_from_suggestions(accepted)
-    except Exception as exc:
-        print(f"Errore nella generazione istruzioni LLM: {exc}")
+            print(f"DEBUG istruzioni da fallback (errore): {len(instructions)} istruzioni")
+    else:
+        print(f"Generazione istruzioni CV: uso suggerimenti locali, LLM disabilitato.")
         instructions = rewriter.instructions_from_suggestions(accepted)
+        print(f"DEBUG istruzioni generate da suggerimenti: {len(instructions)} istruzioni")
+        if instructions:
+            print(f"DEBUG prima istruzione: {instructions[0]}")
 
     instructions.extend(confirmed_skill_instructions)
-    instructions.extend(additional_instructions)
-    if instructions:
+    print(f"DEBUG istruzioni totali (dopo confirmed_skills): {len(instructions)}")
+    print(f"DEBUG istruzioni dettagliate (prima di structured_cv_engine):")
+    for i, inst in enumerate(instructions[:5]):
+        replacement_preview = inst.replacement[:80] if inst.replacement else 'N/A'
+        replacement_preview = replacement_preview.replace('\n', '\\n')
+        print(f"  {i}: section={inst.section}, orig_len={len(inst.original)}, repl_len={len(inst.replacement)}, repl={replacement_preview}")
+    
+    if instructions and CV_REWRITE_LLM_ENABLED:
         instructions = consolidate_rewrite_instructions(cv_text, instructions, company, role, goal)
 
     try:
         from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
+        print(f"DEBUG: calling build_optimized_cv_text with accepted={len(accepted)} items")
+        if accepted:
+            print(f"DEBUG: accepted items (first 3):")
+            for i, item in enumerate(accepted[:3]):
+                print(f"  {i}: type={item.get('type')}, category={item.get('category')}, title={item.get('title', '')[:50]}")
+        
         optimized_text = build_optimized_cv_text(
             cv_text,
             accepted,
@@ -4102,11 +4249,14 @@ def build_resume_rewrite_result(
             role=role,
             company=company,
         )
+        print(f"DEBUG optimized_text da structured_cv_engine: len={len(optimized_text)}, identico all'originale={len(optimized_text.strip()) == len(cv_text.strip())}")
         if len((optimized_text or "").strip()) < 200:
             optimized_text = rewriter.apply_to_text(cv_text, instructions)
+            print(f"DEBUG optimized_text da rewriter.apply_to_text (fallback): len={len(optimized_text)}")
     except Exception as exc:
         print(f"Generazione CV strutturato non disponibile, uso rewriter esistente: {exc}")
         optimized_text = rewriter.apply_to_text(cv_text, instructions)
+        print(f"DEBUG optimized_text da rewriter.apply_to_text (exception): len={len(optimized_text)}")
 
     # 5. Genera previewFinalCvContent per il frontend
     previewFinalCvContent = {}
@@ -4191,6 +4341,13 @@ def review_generated_cv_quality(
     company: str,
     accepted_instructions: List[RewriteInstruction],
 ) -> Dict[str, Any]:
+    if not CV_QUALITY_LLM_ENABLED:
+        return review_generated_cv_quality_locally(
+            final_text=final_text,
+            accepted_instructions=accepted_instructions,
+            llm_error="Revisione LLM disabilitata: controllo locale eseguito.",
+        )
+
     accepted_payload = [
         {
             "id": instruction.source_id,
@@ -4918,7 +5075,7 @@ def create_plain_optimized_pdf(optimized_text: str) -> tuple[bytes, str, str]:
         return pdf_bytes, "application/pdf", "pdf"
     except Exception as exc:
         print(f"Errore generazione PDF ottimizzato: {exc}")
-        return optimized_text.encode("utf-8"), "text/plain; charset=utf-8",
+        return optimized_text.encode("utf-8"), "text/plain; charset=utf-8", "txt"
 
 
 def create_optimized_pdf_from_template(optimized_text: str, original_file_bytes: bytes) -> Optional[tuple[bytes, str, str]]:
@@ -8453,15 +8610,76 @@ def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> L
 
 
 def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
+    """Genera sempre suggerimenti locali applicabili, senza dipendere dall'LLM.
+
+    Prima prova il guard locale; se non trova nulla, usa fallback più permissivi
+    costruiti dal testo del CV. Questo evita CV ottimizzati identici all'originale.
+    """
+    suggestions: List[Dict] = []
     try:
         from services.cv_optimizer.safe_cv_guard import build_structured_cv_suggestions
 
         suggestions = build_structured_cv_suggestions(evaluation)
         if suggestions:
             return suggestions[:8]
-        print("Safe CV guard: nessun suggerimento affidabile generato.")
+        print("Safe CV guard: nessun suggerimento affidabile generato, uso fallback locale applicabile.")
     except Exception as exc:
-        print(f"Safe CV guard non disponibile: {exc}")
+        print(f"Safe CV guard non disponibile: {exc}. Uso fallback locale applicabile.")
+
+    try:
+        cv_text = str(evaluation.get("cv_text") or "")
+        target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+        role = str(target.get("role") or evaluation.get("role") or "").strip()
+        section_map = _extract_sections_for_structured_suggestions(cv_text)
+        fallback_suggestions = build_generic_rewrite_fallbacks(section_map, role)
+        if fallback_suggestions:
+            return fallback_suggestions[:8]
+    except Exception as exc:
+        print(f"Fallback suggerimenti CV non riuscito: {exc}")
+
+    # Ultimo fallback: prendi un blocco reale del CV e rendilo più leggibile.
+    try:
+        cv_text = str(evaluation.get("cv_text") or "")
+        target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+        role = str(target.get("role") or evaluation.get("role") or "ruolo target").strip() or "ruolo target"
+        lines = [line.strip() for line in re.sub(r"\r\n?", "\n", cv_text).splitlines() if line.strip()]
+        candidate_lines = []
+        for line in lines:
+            plain = normalize_plain_text(line)
+            if (
+                len(plain.split()) >= 5
+                and "@" not in line
+                and "linkedin" not in plain
+                and not re.search(r"\+?\d[\d\s().-]{7,}", line)
+                and not canonical_edit_section_name(line)
+            ):
+                candidate_lines.append(line)
+            if len(" ".join(candidate_lines)) > 450:
+                break
+        original = _shorten_cv_text(" ".join(candidate_lines), 700)
+        if original:
+            proposed = (
+                f"Testo riformulato per il ruolo di {role}: "
+                + original.rstrip(".")
+                + ". Ho evidenziato attività, competenze e risultati già presenti nel CV in forma più chiara e leggibile."
+            )
+            item = make_coach_suggestion(
+                "phrases",
+                "Rendi più chiaro un blocco del CV",
+                "Fallback locale: riformula un testo già presente per renderlo più leggibile e orientato al ruolo.",
+                section="ESPERIENZE PROFESSIONALI",
+                original_text=original,
+                proposed_text=proposed,
+                supported_by_cv=True,
+                suggestion_type="actionableEdit",
+            )
+            item["impact"] = "medio"
+            item["priority"] = 99
+            if is_valid_actionable_suggestion(item):
+                return [item]
+    except Exception as exc:
+        print(f"Fallback minimo suggerimenti CV non riuscito: {exc}")
+
     return []
 
 def normalize_accepted_coach_suggestions(value: Any) -> List[Dict]:
@@ -8725,6 +8943,13 @@ def evaluate_cv_for_job(
     sources_prompt = sources_to_prompt(sources)
     ats_analysis = fallback["ats_analysis"]
 
+    if not CV_LLM_ENABLED:
+        print("Valutazione CV per candidatura: uso motore locale tipo Resume Matcher/OpenResume, LLM disabilitato.")
+        questions = generate_cv_optimization_questions(cv_text, fallback, ats_analysis)
+        fallback["optimization_questions"] = questions
+        fallback["questions_for_user"] = questions
+        return fallback
+
     prompt = f"""
 Sei un recruiter senior e career coach.
 
@@ -8833,11 +9058,80 @@ Regole:
         normalized["questions_for_user"] = questions
         return normalized
     except Exception as exc:
-        print(f"Valutazione CV per candidatura non riuscita, uso fallback: {exc}")
-        questions = generate_cv_optimization_questions(cv_text, fallback, fallback.get("ats_analysis", ats_analysis))
-        fallback["optimization_questions"] = questions
-        fallback["questions_for_user"] = questions
-        return fallback
+        print(f"Valutazione CV per candidatura non riuscita, provo fallback leggero: {exc}")
+        lightweight_prompt = build_lightweight_cv_evaluation_prompt(
+            company=company,
+            role=role,
+            description=description,
+            required_skills=required_skills,
+            link=link,
+            sources_prompt=sources_prompt,
+            ats_analysis=ats_analysis,
+            cv_text=cv_text,
+        )
+        try:
+            result = extract_json(
+                call_groq(
+                    lightweight_prompt,
+                    temperature=0.2,
+                    max_tokens=1200,
+                    timeout=OLLAMA_TEXT_TIMEOUT,
+                    json_mode=True,
+                ),
+                context="cv_job_evaluation_light",
+            )
+            print("Valutazione CV per candidatura fallback leggero riuscita.")
+            normalized = normalize_cv_job_evaluation(result, fallback)
+            questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
+            normalized["optimization_questions"] = questions
+            normalized["questions_for_user"] = questions
+            return normalized
+        except Exception as exc2:
+            print(f"Fallback leggero CV non riuscito, uso fallback locale: {exc2}")
+            questions = generate_cv_optimization_questions(cv_text, fallback, fallback.get("ats_analysis", ats_analysis))
+            fallback["optimization_questions"] = questions
+            fallback["questions_for_user"] = questions
+            return fallback
+
+
+def build_lightweight_cv_evaluation_prompt(
+    company: str,
+    role: str,
+    description: str,
+    required_skills: str,
+    link: str,
+    sources_prompt: str,
+    ats_analysis: Dict[str, Any],
+    cv_text: str,
+) -> str:
+    return f"""
+Sei un recruiter senior e career coach. Valuta il CV per questa candidatura con un'analisi rapida e puntuale.
+
+Azienda: {company}
+Ruolo desiderato: {role}
+Descrizione annunciata: {description}
+Competenze richieste: {required_skills or 'Non specificate'}
+Link annuncio: {link or 'Non inserito'}
+
+Fonti web disponibili:
+{sources_prompt}
+
+Dati ATS preliminari:
+{json.dumps(ats_analysis, ensure_ascii=False, indent=2)[:1200]}
+
+Testo CV:
+{cv_text[:2500]}
+
+Restituisci SOLO JSON valido con struttura simile a quella richiesta nel prompt principale, con almeno i campi:
+"overall_score", "ats_score", "job_match_score", "keyword_score", "format_score", "role_match_score", "company_fit_score", "clarity_score", "completeness_score", "professionalism_score", "strengths", "weaknesses", "present_keywords", "missing_keywords", "missing_hard_skills", "missing_soft_skills", "sections_to_improve", "questions_for_user", "coach_suggestions", "ats_analysis", "summary".
+
+Regole:
+- Rispondi in italiano.
+- Usa solo informazioni presenti nel CV e nei dati forniti.
+- Non inventare esperienze o competenze.
+- Fornisci coach_suggestions solo se sono modifiche applicabili.
+- Se non riesci a generare coach_suggestions affidabili, lascia l'array vuoto.
+"""
 
 
 @app.post("/job/validate")
@@ -9036,6 +9330,10 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         raw_additional_data["confirmed_skills"] = confirmed_skill_payload
     user_additional_data, rejected_additional_fields = sanitize_cv_additional_data(raw_additional_data)
     accepted_suggestions = normalize_accepted_coach_suggestions(data.accepted_suggestions)
+    print("DEBUG OPTIMIZE - accepted_suggestions iniziali:", len(accepted_suggestions))
+    print("DEBUG OPTIMIZE - selected_suggestion_ids:", data.selected_suggestion_ids)
+    print("DEBUG OPTIMIZE - acceptedSuggestionIds:", data.acceptedSuggestionIds)
+    print("DEBUG OPTIMIZE - accepted_suggestions raw type:", type(data.accepted_suggestions).__name__)
     rejected_suggestions = data.rejected_suggestions if isinstance(data.rejected_suggestions, list) else []
     rejected_suggestion_ids = [
         str(suggestion_id).strip()
@@ -9059,11 +9357,27 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 status_code=400,
                 detail="Nessuna modifica selezionata e applicabile: controlla i suggerimenti o riprova.",
             )
+
+    # Se il frontend non invia suggerimenti applicabili, genera comunque una piccola serie
+    # di modifiche locali sicure. Serve a evitare CV ottimizzati identici all'originale.
+    if not accepted_suggestions and not selected_ids:
+        evaluation_for_suggestions = data.cv_evaluation if isinstance(data.cv_evaluation, dict) else {}
+        if not isinstance(evaluation_for_suggestions.get("target"), dict):
+            evaluation_for_suggestions["target"] = {"company": company, "role": role_context}
+        else:
+            evaluation_for_suggestions["target"].setdefault("company", company)
+            evaluation_for_suggestions["target"].setdefault("role", role_context)
+        evaluation_for_suggestions["cv_text"] = cv_text
+        auto_suggestions = build_coach_suggestions_from_evaluation(evaluation_for_suggestions)
+        accepted_suggestions = normalize_accepted_coach_suggestions(auto_suggestions[:4])
+        if accepted_suggestions:
+            print(f"Ottimizzazione CV: applico {len(accepted_suggestions)} suggerimenti locali automatici.")
+
     if not accepted_suggestions and not flatten_cv_support_data(user_additional_data):
         conn.close()
         raise HTTPException(
             status_code=400,
-            detail="Non hai selezionato modifiche né aggiunto informazioni extra. Seleziona almeno una modifica o continua scaricando il CV originale.",
+            detail="Non sono state generate modifiche applicabili. Avvia una nuova analisi oppure aggiungi almeno una informazione reale da integrare nel CV.",
         )
 
     if rejected_additional_fields:
@@ -9094,14 +9408,18 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         analysis["sources"] = sources
 
     rewrite_result = build_resume_rewrite_result(
-        cv_text=cv_text,
-        company=company,
-        role=role_context,
-        goal=goal,
-        accepted_suggestions=accepted_suggestions,
-        user_additional_data=user_additional_data,
-    )
+    cv_text=cv_text,
+    company=company,
+    role=role_context,
+    goal=goal,
+    accepted_suggestions=accepted_suggestions,
+    user_additional_data=user_additional_data,
+)
+    print("DEBUG OPTIMIZE - instructions:", len(rewrite_result.get("instructions", [])))
+    print("DEBUG OPTIMIZE - accepted_suggestions finali:", len(rewrite_result.get("accepted_suggestions", [])))
+    print("DEBUG OPTIMIZE - previewFinalCvContent keys:", list((rewrite_result.get("previewFinalCvContent") or {}).keys()))
     optimized_text = rewrite_result["optimized_text"]
+
     hallucination_warnings = detect_unsupported_optimized_claims(
         optimized_text,
         cv_text,
@@ -9122,6 +9440,8 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     alternatives = []
     format_warnings = []
     applied_changes_count = 0
+    print("DEBUG OPTIMIZE - applied_changes_count:", applied_changes_count)
+    print("DEBUG OPTIMIZE - optimized_text diverso da cv_text:", normalize_plain_text(optimized_text) != normalize_plain_text(cv_text))
     quality_review: Dict[str, Any] = {
         "ready_to_send": False,
         "score": 0,
@@ -9131,183 +9451,56 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
 
     if original_filename.endswith(".docx") and original_file_bytes:
         try:
-            docx_preserver = DocxPreserver()
-            file_bytes, applied_changes_count = docx_preserver.apply(
-                original_file_bytes,
-                rewrite_result["instructions"],
-            )
-            if rewrite_result.get("instructions") and applied_changes_count == 0:
-                print(
-                    "CV DOCX generato senza sostituzioni automatiche: "
-                    f"suggerimenti selezionati={len(accepted_suggestions)}, "
-                    f"proposed_text mancanti={rewrite_result.get('missing_proposed_text_count', 0)}"
-                )
-                format_warnings.append(
-                    "Il template DOCX originale non ha permesso sostituzioni sicure; è stato generato un documento pulito con le modifiche applicabili."
-                )
-                safe_bytes, safe_content_type, safe_extension = create_optimized_docx_file(optimized_text)
-                if safe_bytes:
-                    file_bytes = safe_bytes
-                    content_type = safe_content_type
-                    extension = safe_extension
-                    applied_changes_count = max(applied_changes_count, len(rewrite_result.get("instructions", [])))
-                else:
-                    conn.close()
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Non è stato possibile creare un file CV ottimizzato leggibile.",
-                    )
-            if docx_preserver.skipped_source_ids:
-                format_warnings.append(
-                    "Alcune modifiche accettate non sono state applicate automaticamente al template originale: "
-                    + ", ".join(docx_preserver.skipped_source_ids[:8])
-                )
-            final_docx_text = extract_docx_text_bytes(file_bytes)
-            original_docx_text = extract_docx_text_bytes(original_file_bytes)
-            structure_warnings = validate_optimized_docx_structure(final_docx_text)
-            if structure_warnings:
-                print(
-                    "Validazione finale DOCX con avvertenze. "
-                    f"applied_changes_count={applied_changes_count}, "
-                    f"instructions_count={len(rewrite_result.get('instructions', []))}"
-                )
-                for warning in structure_warnings:
-                    print(f"Dettaglio struttura DOCX: {warning}")
-                format_warnings.extend(structure_warnings)
-                safe_bytes, safe_content_type, safe_extension = create_optimized_docx_file(optimized_text)
-                if safe_bytes:
-                    file_bytes = safe_bytes
-                    content_type = safe_content_type
-                    extension = safe_extension
-                    final_docx_text = optimized_text
-            quality_review = review_generated_cv_quality(
-                final_text=final_docx_text,
-                original_cv_text=cv_text,
+            docx_pipeline = ResumeDocxOptimizationPipeline()
+            print("DEBUG DOCX pipeline - accepted_suggestions iniziali:", len(accepted_suggestions))
+            print("DEBUG DOCX pipeline - user_additional_data keys:", list(user_additional_data.keys())[:20] if isinstance(user_additional_data, dict) else [])
+            structured_instructions = docx_pipeline.generate_structured_instructions(
+                cv_text=cv_text,
                 role=role_context,
                 company=company,
-                accepted_instructions=rewrite_result["instructions"],
+                goal=goal,
+                accepted_suggestions=accepted_suggestions,
+                user_additional_data=user_additional_data,
             )
-            if not quality_review.get("ready_to_send"):
-                revision_instructions = quality_rewrite_instructions(
-                    quality_review,
-                    final_docx_text,
-                )
-                if revision_instructions:
-                    quality_preserver = DocxPreserver()
-                    revised_bytes, revised_count = quality_preserver.apply(
-                        file_bytes,
-                        revision_instructions,
-                    )
-                    if not quality_preserver.skipped_source_ids and revised_count == len(revision_instructions):
-                        file_bytes = revised_bytes
-                        applied_changes_count += revised_count
-                        final_docx_text = extract_docx_text_bytes(file_bytes)
-                        second_structure_warnings = validate_optimized_docx_structure(final_docx_text)
-                        if second_structure_warnings:
-                            format_warnings.extend(second_structure_warnings)
-                            print("Revisione automatica con avvertenze struttura:", second_structure_warnings)
-                        quality_review = review_generated_cv_quality(
-                            final_text=final_docx_text,
-                            original_cv_text=cv_text,
-                            role=role_context,
-                            company=company,
-                            accepted_instructions=rewrite_result["instructions"],
-                        )
-
-                blocking_issues = [
-                    issue
-                    for issue in quality_review.get("issues", [])
-                    if str(issue.get("severity") or "").lower() in {"critical", "major"}
-                ]
-                if (
-                    not quality_review.get("review_unavailable")
-                    and not quality_review.get("ready_to_send")
-                    and blocking_issues
-                ):
-                    format_warnings.append(
-                        "Il controllo qualità finale ha rilevato avvertenze da verificare manualmente prima dell'invio."
-                    )
-            hallucination_warnings = detect_unsupported_optimized_claims(
-                final_docx_text,
-                cv_text,
-                user_additional_data,
-                company,
-                role_context,
-                goal,
-            )
-            similarity = SequenceMatcher(
-                None,
-                normalize_plain_text(original_docx_text),
-                normalize_plain_text(final_docx_text),
-            ).ratio() if final_docx_text and original_docx_text else 0
-            if accepted_suggestions and similarity >= 0.998:
+            print("DEBUG DOCX pipeline - istruzioni generate:", len(structured_instructions))
+            for i, instruction in enumerate(structured_instructions[:5]):
                 print(
-                    "CV DOCX quasi identico all'originale dopo ottimizzazione: "
-                    f"similarity={round(similarity, 4)}, applied_changes_count={applied_changes_count}"
+                    f"DEBUG DOCX instruction {i}: suggestion_id={instruction.suggestion_id}, "
+                    f"target_section={instruction.target_section}, action={instruction.action}, "
+                    f"old_text_hint={(instruction.old_text_hint or '')[:100]}"
                 )
-                if applied_changes_count == 0:
-                    conn.close()
-                    raise HTTPException(
-                        status_code=422,
-                        detail={
-                            "success": False,
-                            "error": "Nessuna modifica selezionata può essere applicata in modo sicuro al DOCX mantenendo il layout originale.",
-                            "applied_changes_count": applied_changes_count,
-                            "selected_suggestions_count": len(accepted_suggestions),
-                            "similarity": round(similarity, 4),
-                        },
-                    )
-                format_warnings.append(
-                    "Il DOCX finale risulta molto simile all'originale: alcune modifiche selezionate potrebbero richiedere revisione manuale."
-                )
-            content_type = ExportService.DOCX_CONTENT_TYPE
+
+            apply_result = docx_pipeline.apply_instructions_to_docx(original_file_bytes, structured_instructions)
+            file_bytes = apply_result.file_bytes
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             extension = "docx"
-            converted_pdf = export_service.docx_to_pdf(file_bytes)
-            if converted_pdf:
-                alternatives.append({
-                    "filename": get_target_optimized_cv_filename(public_user.get("name") or "", role, company, "pdf"),
-                    "content_type": "application/pdf",
-                    "file_base64": base64.b64encode(converted_pdf).decode("utf-8"),
-                })
+            applied_changes_count = len(apply_result.applied_ids)
+            print("DEBUG DOCX pipeline - sections rilevate nel DOCX:", apply_result.sections_detected)
+            print("DEBUG DOCX pipeline - applied:", apply_result.applied_ids)
+            print("DEBUG DOCX pipeline - partially_applied:", apply_result.partially_applied_ids)
+            print("DEBUG DOCX pipeline - failed:", apply_result.failed_ids)
+            print("DEBUG DOCX pipeline - validation report:", apply_result.validation_report)
+            final_docx_text = apply_result.validation_report.get("final_text", "")
+            if apply_result.validation_report.get("status") == "failed":
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": "Il DOCX generato non ? coerente o ? incompleto.",
+                        "validation_report": apply_result.validation_report,
+                    },
+                )
         except HTTPException:
             raise
         except Exception as exc:
-            print(f"Preservazione DOCX non riuscita, uso export di sicurezza: {exc}")
-            format_warnings.append(
-                "Non è stato possibile preservare perfettamente il template originale; è stato generato un documento pulito con le modifiche disponibili."
-            )
-            file_bytes, content_type, extension = create_optimized_docx_file(optimized_text)
-            if rewrite_result.get("instructions") and file_bytes:
-                applied_changes_count = max(applied_changes_count, len(rewrite_result.get("instructions", [])))
-            if not file_bytes:
-                file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
-            if accepted_suggestions and applied_changes_count == 0:
-                print(
-                    "Fallback DOCX/PDF generato senza sostituzioni automatiche: "
-                    f"suggerimenti selezionati={len(accepted_suggestions)}, "
-                    f"proposed_text mancanti={rewrite_result.get('missing_proposed_text_count', 0)}"
-                )
-            if applied_changes_count == 0 and accepted_suggestions:
-                format_warnings.append(
-                    "Nessuna modifica è stata applicata al documento: controlla il CV finale prima dell'invio."
-                )
-    elif original_filename.endswith(".pdf") and original_file_bytes:
-        if rewrite_result.get("instructions"):
-            format_warnings.append(
-                "Il CV originale è un PDF: è stato generato un PDF pulito con le modifiche applicabili invece di modificare il layout originale."
-            )
-            file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
-            applied_changes_count = max(applied_changes_count, len(rewrite_result.get("instructions", [])))
-        else:
-            file_bytes = original_file_bytes
-            content_type = "application/pdf"
-            extension = "pdf"
-    else:
-        file_bytes, content_type, extension = export_service.plain_pdf(optimized_text)
-
-    filename = get_target_optimized_cv_filename(public_user.get("name") or "", role, company, extension)
-    file_base64 = base64.b64encode(file_bytes).decode("utf-8")
-    generated_at = datetime.utcnow().isoformat()
+            print(f"Errore nella pipeline DOCX strutturata: {exc}")
+            raise HTTPException(status_code=500, detail="Impossibile ottimizzare il DOCX originale in modo sicuro.")
+    if extension == "docx" and original_file_bytes:
+        print(f"DEBUG PRE-SAVE: file_bytes == original_file_bytes? {file_bytes == original_file_bytes}")
+        print(f"DEBUG PRE-SAVE: file_bytes diverso? {len(file_bytes) != len(original_file_bytes)}")
+        if file_bytes == original_file_bytes:
+            print("⚠️ ATTENZIONE: file_bytes è identico al file originale!")
+    filename = get_target_optimized_cv_filename(public_user.get("name", "CV"), role_context, company, extension)
+    file_base64 = base64.b64encode(file_bytes).decode("ascii") if file_bytes else ""
     docx_file = {
         "filename": filename,
         "content_type": content_type,
@@ -9362,6 +9555,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     conn.commit()
     conn.close()
 
+    generated_at = datetime.utcnow().isoformat() + "Z"
     optimized_cv_payload = {
             "id": optimized_cv_id,
             "filename": filename,
@@ -9436,10 +9630,19 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[s
 
     filename, content_type, file_base64, docx_filename, docx_content_type, docx_file_base64, pdf_filename, pdf_content_type, pdf_file_base64 = row
     requested_format = (format or "").lower().strip(".")
+    
+    print(f"DEBUG DOWNLOAD: optimized_cv_id={optimized_cv_id}, format={format}")
+    print(f"DEBUG DOWNLOAD: available - main: {bool(file_base64)}, docx: {bool(docx_file_base64)}, pdf: {bool(pdf_file_base64)}")
+    
     if requested_format == "docx" and docx_file_base64:
         filename, content_type, file_base64 = docx_filename, docx_content_type, docx_file_base64
+        print(f"DEBUG DOWNLOAD: usando DOCX, size={len(base64.b64decode(file_base64)) if file_base64 else 0}")
     elif requested_format == "pdf" and pdf_file_base64:
         filename, content_type, file_base64 = pdf_filename, pdf_content_type, pdf_file_base64
+        print(f"DEBUG DOWNLOAD: usando PDF, size={len(base64.b64decode(file_base64)) if file_base64 else 0}")
+    else:
+        print(f"DEBUG DOWNLOAD: usando main file, size={len(base64.b64decode(file_base64)) if file_base64 else 0}")
+    
     if not filename or not file_base64:
         raise HTTPException(status_code=500, detail="File CV ottimizzato non leggibile.")
 
@@ -9448,6 +9651,7 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[s
     except Exception:
         raise HTTPException(status_code=500, detail="File CV ottimizzato non leggibile.")
 
+    print(f"DEBUG DOWNLOAD: ritornando file, filename={filename}, type={content_type}, bytes={len(file_bytes)}")
     return Response(
         content=file_bytes,
         media_type=content_type or "application/octet-stream",

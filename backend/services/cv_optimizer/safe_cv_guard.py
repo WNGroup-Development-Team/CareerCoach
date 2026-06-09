@@ -366,108 +366,6 @@ def select_relevant_experience(experience_text: str, target: Dict[str, str]) -> 
     return best or compact(experience_text, 850)
 
 
-def _llm_rewrite(prompt: str, fallback: str, max_tokens: int = 400) -> str:
-    """Call Groq/LLM to rewrite a CV section. Returns fallback on any error."""
-    try:
-        import os
-        from openai import OpenAI
-
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            return fallback
-        model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-        client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1", timeout=15.0)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=0.4,
-        )
-        result = (response.choices[0].message.content or "").strip()
-        if len(result) < 20:
-            return fallback
-        return result
-    except Exception:
-        return fallback
-
-
-def _llm_rewrite_profile(original: str, role: str, company: str, signals: List[str]) -> str:
-    company_part = f" per {company}" if company else ""
-    signals_str = f"Competenze rilevanti presenti nel CV: {', '.join(signals[:6])}." if signals else ""
-    fallback_company = f" presso {company}" if company else ""
-    fallback_signals = f", valorizzando competenze in {', '.join(signals[:5])}" if signals else ""
-    fallback = (
-        f"{original.rstrip('.')}. Obiettivo professionale: contribuire a iniziative coerenti con il ruolo di {role}{fallback_company}"
-        f"{fallback_signals}, con un approccio orientato ad analisi, progetti, collaborazione e risultati concreti."
-    )
-    prompt = f"""Sei un career coach esperto. Riscrivi il profilo professionale di questo CV per renderlo più efficace per il ruolo di {role}{company_part}.
-
-PROFILO ORIGINALE:
-{original}
-
-{signals_str}
-
-REGOLE IMPORTANTI:
-- Usa SOLO le informazioni già presenti nel profilo originale e nel CV, non inventare nulla
-- Mantieni il tono in prima persona o terza persona coerente con l'originale
-- Massimo 4-5 frasi, circa 80-120 parole
-- Il testo deve essere fluente e naturale, non elenchi puntati
-- Non iniziare con frasi generiche come "Sono un professionista" o "Con X anni di esperienza"
-- Integra il ruolo target in modo naturale
-
-Rispondi SOLO con il testo riscritto, senza spiegazioni o prefissi."""
-    return _llm_rewrite(prompt, fallback, max_tokens=250)
-
-
-def _llm_rewrite_experience(original: str, role: str, company: str) -> str:
-    company_part = f" per {company}" if company else ""
-    bullets = []
-    for sentence in re.split(r"(?<=[.!?])\s+", compact(original, 850)):
-        sentence = sentence.strip().rstrip(".")
-        if sentence:
-            bullets.append(f"- {sentence}.")
-    fallback = f"Esperienza rilevante per il ruolo di {role}:\n" + "\n".join(bullets[:5])
-    prompt = f"""Sei un career coach esperto. Riscrivi questa sezione ESPERIENZE di un CV per renderla più efficace per il ruolo di {role}{company_part}.
-
-ESPERIENZA ORIGINALE:
-{original}
-
-REGOLE IMPORTANTI:
-- Usa SOLO le informazioni già presenti nel testo originale, non inventare nulla
-- Riformula in 3-5 bullet point iniziando con verbi di azione forti (es: "Sviluppato", "Gestito", "Implementato", "Coordinato")
-- Ogni bullet deve essere conciso (max 2 righe) e orientato ai risultati quando possibile
-- Mantieni date, nomi di aziende e ruoli esatti così come appaiono nell'originale
-- Non aggiungere intestazioni ridondanti come "Esperienza valorizzata per il ruolo di"
-
-Rispondi SOLO con i bullet point riscritti, senza spiegazioni o prefissi."""
-    return _llm_rewrite(prompt, fallback, max_tokens=350)
-
-
-def _llm_rewrite_projects(original: str, role: str) -> str:
-    project_lines = []
-    for part in re.split(r"\n|·|•", original):
-        part = clean_line(part).strip(".")
-        if len(norm(part).split()) >= 5 and part not in {"/", "\\"}:
-            project_lines.append(f"- {part}.")
-    fallback = f"Progetti rilevanti per il ruolo di {role}:\n" + "\n".join(unique(project_lines)[:7])
-    if not project_lines:
-        return fallback
-    prompt = f"""Sei un career coach esperto. Riscrivi questa sezione PROGETTI di un CV per renderla più efficace per il ruolo di {role}.
-
-PROGETTI ORIGINALI:
-{original}
-
-REGOLE IMPORTANTI:
-- Usa SOLO i progetti già presenti nel testo originale, non inventarne di nuovi
-- Per ogni progetto, evidenzia tecnologie usate, il tuo ruolo e l'impatto o risultato
-- Usa bullet point concisi (max 2 righe ciascuno)
-- Mantieni i nomi dei progetti esatti
-- Non aggiungere intestazioni ridondanti come "Progetti rilevanti per il ruolo di"
-
-Rispondi SOLO con i bullet point riscritti, senza spiegazioni o prefissi."""
-    return _llm_rewrite(prompt, fallback, max_tokens=350)
-
-
 def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:
     cv_text = str(evaluation.get("cv_text") or "")
     target = target_from_evaluation(evaluation)
@@ -479,7 +377,12 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
 
     profile = sections.get("profile", "")
     if profile:
-        proposed = _llm_rewrite_profile(profile, role, company, signals)
+        company_part = f" presso {company}" if company else ""
+        signal_part = f", valorizzando competenze in {', '.join(signals[:5])}" if signals else ""
+        proposed = (
+            f"{profile.rstrip('.')}. Obiettivo professionale: contribuire a iniziative coerenti con il ruolo di {role}{company_part}"
+            f"{signal_part}, con un approccio orientato ad analisi, progetti, collaborazione e risultati concreti."
+        )
         item = make_action("profile", "PROFILO", "Riscrivi il profilo in funzione del ruolo", profile, proposed, "Rende il profilo più mirato al ruolo usando solo informazioni già presenti nel CV.", "alto", 1, [role])
         if item:
             suggestions.append(item)
@@ -495,14 +398,24 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
     exp = sections.get("experience", "")
     if exp:
         selected = select_relevant_experience(exp, target)
-        proposed = _llm_rewrite_experience(selected, role, company)
-        item = make_action("experience", "ESPERIENZE PROFESSIONALI", "Valorizza l'esperienza più rilevante", selected, proposed, "Trasforma l'esperienza in bullet leggibili e orientati al ruolo, mantenendo i fatti presenti.", "alto", 3, [])
+        bullets = []
+        for sentence in re.split(r"(?<=[.!?])\s+", compact(selected, 850)):
+            sentence = sentence.strip().rstrip(".")
+            if sentence:
+                bullets.append(f"- {sentence}.")
+        proposed = f"Esperienza rilevante per il ruolo di {role}:\n" + "\n".join(bullets[:5])
+        item = make_action("experience", "ESPERIENZE PROFESSIONALI", "Valorizza l’esperienza più rilevante", selected, proposed, "Trasforma l’esperienza in bullet leggibili e orientati al ruolo, mantenendo i fatti presenti.", "alto", 3, [])
         if item:
             suggestions.append(item)
 
     projects = sections.get("projects", "")
     if projects:
-        proposed = _llm_rewrite_projects(projects, role)
+        project_lines = []
+        for part in re.split(r"\n|·|•", projects):
+            part = clean_line(part).strip(".")
+            if len(norm(part).split()) >= 5 and part not in {"/", "\\"}:
+                project_lines.append(f"- {part}.")
+        proposed = f"Progetti rilevanti per il ruolo di {role}:\n" + "\n".join(unique(project_lines)[:7])
         item = make_action("project", "PROGETTI", "Valorizza i progetti più coerenti", projects, proposed, "Rende i progetti più chiari e collegati alla candidatura senza inventare dettagli.", "medio", 4, [])
         if item:
             suggestions.append(item)
@@ -587,4 +500,432 @@ def filter_confirmation_items(items: Any) -> List[Dict[str, Any]]:
             continue
         seen.add(key)
         clean.append(item)
+    return clean
+
+# ---------------------------------------------------------------------------
+# Patch CareerCoach 2026-06: deterministic Resume Matcher/OpenResume style
+# ---------------------------------------------------------------------------
+# The original guard was intentionally very strict and could return an empty
+# suggestion list. The definitions below override the previous public functions
+# with a more robust local engine: it uses only text already present in the CV,
+# never calls an LLM, and still returns actionableEdit items the existing
+# DocxPreserver/ResumeRewriter pipeline can apply safely.
+
+ROLE_MATCHER_LIBRARY = {
+    "game design": {
+        "role_terms": ["game design", "game designer", "level design", "unity", "unreal"],
+        "hard_skills": ["Game design", "Level design", "Prototipazione", "Game mechanics", "User experience", "Playtesting", "Storytelling"],
+        "tools": ["Unity", "Unreal Engine", "Blender", "Figma", "Miro"],
+        "languages": ["C#", "C++", "Python"],
+        "soft_skills": ["Creatività", "Problem solving", "Collaborazione", "Comunicazione", "Iterazione su feedback"],
+    },
+    "data analyst": {
+        "role_terms": ["data analyst", "analista dati", "analisi dati", "business intelligence", "reporting", "kpi"],
+        "hard_skills": ["Analisi dati", "SQL", "Python", "Data visualization", "Reporting", "KPI", "Business intelligence"],
+        "tools": ["Excel", "Power BI", "Tableau", "Looker", "Google Analytics"],
+        "languages": ["Python", "SQL"],
+        "soft_skills": ["Pensiero analitico", "Comunicazione", "Problem solving", "Attenzione ai dettagli"],
+    },
+    "data scientist": {
+        "role_terms": ["data scientist", "data science", "machine learning", "modelli predittivi"],
+        "hard_skills": ["Python", "Machine Learning", "SQL", "Analisi predittiva", "Modelli statistici", "Data preprocessing", "Feature engineering"],
+        "tools": ["pandas", "scikit-learn", "Jupyter", "TensorFlow", "Tableau"],
+        "languages": ["Python", "SQL", "R"],
+        "soft_skills": ["Problem solving", "Pensiero analitico", "Comunicazione scientifica", "Collaborazione"],
+    },
+    "project manager": {
+        "role_terms": ["project manager", "project management", "gestione progetti", "pianificazione", "stakeholder"],
+        "hard_skills": ["Pianificazione attività", "Gestione scadenze", "Coordinamento team", "Monitoraggio avanzamento", "Risk management", "Budget management"],
+        "tools": ["Excel", "Trello", "Jira", "Notion", "Microsoft Project", "Asana"],
+        "languages": [],
+        "soft_skills": ["Comunicazione", "Organizzazione", "Problem solving", "Leadership", "Gestione priorità", "Negoziazione"],
+    },
+    "software engineer": {
+        "role_terms": ["software engineer", "software developer", "sviluppatore", "developer", "programmatore"],
+        "hard_skills": ["Sviluppo software", "Debugging", "Version control", "Unit testing", "Code review", "API"],
+        "tools": ["Git", "GitHub", "Docker", "VS Code", "PostgreSQL"],
+        "languages": ["Python", "Java", "JavaScript", "C++"],
+        "soft_skills": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione"],
+    },
+}
+
+
+def matcher_role_family(role: str, description: str = "") -> str:
+    target = norm(f"{role or ''} {description or ''}")
+    for family, payload in ROLE_MATCHER_LIBRARY.items():
+        if any(norm(term) in target for term in payload.get("role_terms", [])):
+            return family
+    return ""
+
+
+def matcher_library_for(role: str, description: str = "") -> Dict[str, List[str]]:
+    family = matcher_role_family(role, description)
+    if family:
+        return ROLE_MATCHER_LIBRARY[family]
+    return {
+        "role_terms": [],
+        "hard_skills": ["Competenza tecnica principale", "Competenza tecnica secondaria"],
+        "tools": [],
+        "languages": [],
+        "soft_skills": ["Problem solving", "Comunicazione", "Collaborazione", "Organizzazione"],
+    }
+
+
+def _phrase_present(text: str, phrase: str) -> bool:
+    haystack = f" {norm(text)} "
+    needle = norm(phrase)
+    if not needle:
+        return False
+    if len(needle) <= 3:
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack))
+    return needle in haystack
+
+
+def _supported_role_keywords(cv_text: str, role: str, description: str = "") -> List[str]:
+    library = matcher_library_for(role, description)
+    candidates = []
+    for key in ("hard_skills", "tools", "languages", "soft_skills"):
+        candidates.extend(library.get(key, []))
+    candidates.extend([skill for skill in COMMON_SKILLS if _phrase_present(cv_text, skill)])
+    return unique([kw for kw in candidates if _phrase_present(cv_text, kw)])[:14]
+
+
+def _missing_role_keywords(cv_text: str, role: str, description: str = "") -> List[str]:
+    library = matcher_library_for(role, description)
+    candidates = []
+    for key in ("hard_skills", "tools", "languages", "soft_skills"):
+        candidates.extend(library.get(key, []))
+    return unique([kw for kw in candidates if not _phrase_present(cv_text, kw)])[:14]
+
+
+def _best_free_text_block(cv_text: str) -> str:
+    lines = prepare_lines(cv_text)
+    candidates: List[str] = []
+    buffer: List[str] = []
+    for line in lines:
+        if heading_key(line) or looks_like_contact(line):
+            if buffer:
+                candidates.append(compact(" ".join(buffer), 850))
+                buffer = []
+            continue
+        if len(norm(line).split()) >= 4:
+            buffer.append(line)
+        if len(" ".join(buffer)) > 650:
+            candidates.append(compact(" ".join(buffer), 850))
+            buffer = []
+    if buffer:
+        candidates.append(compact(" ".join(buffer), 850))
+    candidates = [c for c in candidates if len(norm(c).split()) >= 10]
+    if not candidates:
+        return ""
+    # Prefer blocks that contain project/technical signals, otherwise the first readable block.
+    scored = []
+    for candidate in candidates:
+        plain = norm(candidate)
+        score = sum(2 for term in ["progetto", "project", "svilupp", "analisi", "data", "software", "tesi", "team"] if term in plain)
+        scored.append((score, candidate))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
+def _compact_to_bullets(text: str, max_items: int = 5) -> str:
+    chunks = []
+    for part in re.split(r"\n+|(?<=[.!?])\s+|[•·]", text or ""):
+        clean = clean_line(part).rstrip(".")
+        if len(norm(clean).split()) >= 5:
+            chunks.append(clean)
+    chunks = unique(chunks)[:max_items]
+    return "\n".join(f"- {chunk}." for chunk in chunks)
+
+
+def _make_matcher_action(
+    category: str,
+    section: str,
+    title: str,
+    original: str,
+    proposed: str,
+    reason: str,
+    impact: str,
+    priority: int,
+    keywords: Optional[List[str]] = None,
+) -> Optional[Dict[str, Any]]:
+    original = compact(original, 950)
+    proposed = compact(proposed, 1100)
+    if not original or not proposed or normalize_pair_equal(original, proposed):
+        return None
+    payload = {
+        "id": make_id(section, title, original),
+        "type": "actionableEdit",
+        "category": category,
+        "category_label": CATEGORY_LABELS.get(category, "Suggerimento"),
+        "title": title,
+        "message": reason,
+        "description": reason,
+        "reason": reason,
+        "action": "",
+        "section": section,
+        "original_text": original,
+        "proposed_text": proposed,
+        "impact": impact,
+        "priority": priority,
+        "requires_confirmation": False,
+        "supported_by_cv": True,
+        "keywords_added": [kw for kw in unique(keywords or []) if not is_noise_keyword(kw)][:8],
+    }
+    # Keep only basic safety checks. The old guard filtered out too many useful edits.
+    if not payload["original_text"] or not payload["proposed_text"]:
+        return None
+    if any(marker in norm(payload["proposed_text"]) for marker in BAD_PROPOSED_MARKERS):
+        return None
+    return payload
+
+
+def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
+    cv_text = str(evaluation.get("cv_text") or "")
+    target = target_from_evaluation(evaluation)
+    role = target.get("role") or "ruolo target"
+    company = target.get("company") or ""
+    sections = parse_sections(cv_text)
+    present_keywords = _supported_role_keywords(cv_text, role)
+    suggestions: List[Dict[str, Any]] = []
+
+    profile = sections.get("profile", "")
+    if profile and not is_bad_profile_text(profile):
+        company_part = f" presso {company}" if company else ""
+        keyword_part = f", valorizzando competenze già presenti come {', '.join(present_keywords[:4])}" if present_keywords else ""
+        proposed = (
+            f"{profile.rstrip('.')}. Profilo orientato al ruolo di {role}{company_part}"
+            f"{keyword_part}, con attenzione a chiarezza, collaborazione e risultati concreti."
+        )
+        item = _make_matcher_action(
+            "profile", "PROFILO", "Rendi il profilo più mirato alla candidatura",
+            profile, proposed,
+            "Adatta il profilo al ruolo usando solo competenze già presenti nel CV.",
+            "alto", 1, [role, *present_keywords[:4]],
+        )
+        if item:
+            suggestions.append(item)
+
+    hard = sections.get("hard_skills", "")
+    skills = unique([*extract_skills(hard), *present_keywords])
+    grouped = group_skills(skills)
+    if hard and grouped:
+        item = _make_matcher_action(
+            "skills", "HARD SKILLS", "Riorganizza le competenze tecniche",
+            hard, grouped,
+            "Presenta le competenze in gruppi leggibili per ATS e recruiter, senza aggiungere skill non supportate.",
+            "alto", 2, skills,
+        )
+        if item:
+            suggestions.append(item)
+
+    exp = sections.get("experience", "")
+    if exp:
+        selected = select_relevant_experience(exp, target)
+        bullets = _compact_to_bullets(selected, 5)
+        proposed = bullets or selected
+        item = _make_matcher_action(
+            "experience", "ESPERIENZE PROFESSIONALI", "Trasforma l’esperienza in bullet più leggibili",
+            selected, proposed,
+            "Rende l’esperienza più chiara e scansionabile, mantenendo i fatti del CV originale.",
+            "alto", 3, present_keywords,
+        )
+        if item:
+            suggestions.append(item)
+
+    projects = sections.get("projects", "")
+    if projects:
+        bullets = _compact_to_bullets(projects, 6)
+        item = _make_matcher_action(
+            "project", "PROGETTI", "Rendi i progetti più chiari",
+            projects, bullets,
+            "Organizza i progetti in righe più leggibili, senza inventare dettagli.",
+            "medio", 4, present_keywords,
+        )
+        if item:
+            suggestions.append(item)
+
+    soft = sections.get("soft_skills", "")
+    if soft:
+        soft_items = unique(re.split(r"[,;|•·\n]+", soft))
+        if len(soft_items) >= 2:
+            proposed = "Soft skills: " + ", ".join(soft_items[:8])
+            item = _make_matcher_action(
+                "soft_skills", "SOFT SKILLS", "Rendi più pulita la sezione soft skills",
+                soft, proposed,
+                "Mantiene le soft skill reali e le mostra in modo più ordinato.",
+                "medio", 5, soft_items,
+            )
+            if item:
+                suggestions.append(item)
+
+    if not suggestions:
+        block = _best_free_text_block(cv_text)
+        if block:
+            bullets = _compact_to_bullets(block, 4)
+            if bullets:
+                item = _make_matcher_action(
+                    "phrases", "ESPERIENZE PROFESSIONALI", "Rendi più leggibile un blocco del CV",
+                    block, bullets,
+                    "Fallback locale: trasforma un blocco già presente in bullet più chiari e compatibili con ATS.",
+                    "medio", 6, present_keywords,
+                )
+                if item:
+                    suggestions.append(item)
+
+    clean: List[Dict[str, Any]] = []
+    seen = set()
+    for item in sorted(suggestions, key=lambda x: int(x.get("priority", 99))):
+        key = (item.get("section"), norm(item.get("original_text") or "")[:200], norm(item.get("proposed_text") or "")[:200])
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(item)
+    return clean[:8]
+
+
+def build_matcher_keyword_snapshot(cv_text: str, role: str, description: str = "") -> Dict[str, List[str]]:
+    """Small helper for debug/tests: Resume Matcher style present/missing keywords."""
+    return {
+        "present": _supported_role_keywords(cv_text, role, description),
+        "missing": _missing_role_keywords(cv_text, role, description),
+        "role_family": [matcher_role_family(role, description)] if matcher_role_family(role, description) else [],
+    }
+
+
+# =========================
+# Fallback finale più permissivo stile Resume Matcher
+# =========================
+
+def _final_best_block(cv_text: str) -> str:
+    lines = prepare_lines(cv_text)
+    blocks: List[str] = []
+    buffer: List[str] = []
+    for line in lines:
+        if heading_key(line) or looks_like_contact(line):
+            if buffer:
+                blocks.append(compact(" ".join(buffer), 900))
+                buffer = []
+            continue
+        plain = norm(line)
+        if len(plain.split()) >= 4:
+            buffer.append(line)
+        if len(" ".join(buffer)) >= 500:
+            blocks.append(compact(" ".join(buffer), 900))
+            buffer = []
+    if buffer:
+        blocks.append(compact(" ".join(buffer), 900))
+    blocks = [b for b in blocks if len(norm(b).split()) >= 10]
+    if not blocks:
+        return ""
+    return sorted(
+        blocks,
+        key=lambda b: sum(1 for term in ["progetto", "project", "svilupp", "analisi", "data", "software", "team", "tesi"] if term in norm(b)),
+        reverse=True,
+    )[0]
+
+
+def _final_role_phrase(role: str, company: str = "") -> str:
+    role = clean_line(role) or "ruolo target"
+    company = clean_line(company)
+    return f" per il ruolo di {role}" + (f" presso {company}" if company else "")
+
+
+def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
+    """Versione finale: deve restituire almeno una modifica applicabile se il CV è leggibile."""
+    cv_text = str(evaluation.get("cv_text") or "")
+    if not cv_text.strip():
+        return []
+    target = target_from_evaluation(evaluation)
+    role = target.get("role") or "ruolo target"
+    company = target.get("company") or ""
+    sections = parse_sections(cv_text)
+    present_keywords = _supported_role_keywords(cv_text, role)
+    suggestions: List[Dict[str, Any]] = []
+
+    profile = sections.get("profile", "")
+    if profile and not is_bad_profile_text(profile):
+        kw = f", valorizzando competenze già presenti come {', '.join(present_keywords[:4])}" if present_keywords else ""
+        proposed = (
+            f"{profile.rstrip('.')}. Profilo orientato{_final_role_phrase(role, company)}{kw}, "
+            "con attenzione a chiarezza, collaborazione e risultati concreti."
+        )
+        item = _make_matcher_action(
+            "profile", "PROFILO", "Rendi il profilo più mirato alla candidatura",
+            profile, proposed,
+            "Adatta il profilo al ruolo usando solo informazioni già presenti nel CV.",
+            "alto", 1, [role, *present_keywords[:4]],
+        )
+        if item:
+            suggestions.append(item)
+
+    hard = sections.get("hard_skills", "")
+    skills = unique([*extract_skills(hard), *present_keywords])
+    grouped = group_skills(skills)
+    if hard and grouped:
+        item = _make_matcher_action(
+            "skills", "HARD SKILLS", "Riorganizza le competenze tecniche",
+            hard, grouped,
+            "Presenta le competenze in gruppi leggibili per ATS e recruiter, senza aggiungere skill non supportate.",
+            "alto", 2, skills,
+        )
+        if item:
+            suggestions.append(item)
+
+    exp = sections.get("experience", "") or _final_best_block(cv_text)
+    if exp:
+        proposed = (
+            f"Esperienza valorizzata{_final_role_phrase(role, company)}, evidenziando attività già presenti nel CV:\n"
+            + (_compact_to_bullets(exp, 5) or f"- {compact(exp, 700).rstrip('.')}.")
+        )
+        item = _make_matcher_action(
+            "experience", "ESPERIENZE PROFESSIONALI", "Valorizza l’esperienza più rilevante",
+            exp, proposed,
+            "Rende il contenuto più leggibile e orientato alla candidatura, senza inventare esperienze.",
+            "alto", 3, present_keywords,
+        )
+        if item:
+            suggestions.append(item)
+
+    projects = sections.get("projects", "")
+    if projects:
+        proposed = f"Progetti valorizzati{_final_role_phrase(role, company)}:\n" + (_compact_to_bullets(projects, 6) or f"- {compact(projects, 700).rstrip('.')}.")
+        item = _make_matcher_action(
+            "project", "PROGETTI", "Rendi i progetti più chiari",
+            projects, proposed,
+            "Organizza i progetti in righe più leggibili, senza inventare dettagli.",
+            "medio", 4, present_keywords,
+        )
+        if item:
+            suggestions.append(item)
+
+    soft = sections.get("soft_skills", "")
+    if soft:
+        soft_items = unique(re.split(r"[,;|•·\n]+", soft))
+        if len(soft_items) >= 2:
+            proposed = "Soft skills: " + ", ".join(soft_items[:8])
+            item = _make_matcher_action(
+                "soft_skills", "SOFT SKILLS", "Rendi più pulita la sezione soft skills",
+                soft, proposed,
+                "Mantiene le soft skill reali e le mostra in modo più ordinato.",
+                "medio", 5, soft_items,
+            )
+            if item:
+                suggestions.append(item)
+
+    clean: List[Dict[str, Any]] = []
+    seen = set()
+    for item in sorted(suggestions, key=lambda x: int(x.get("priority", 99))):
+        # Evita proposte identiche o troppo diagnostiche.
+        original = norm(item.get("original_text") or "")
+        proposed = norm(item.get("proposed_text") or "")
+        if not original or not proposed or original == proposed:
+            continue
+        key = (item.get("section"), original[:220], proposed[:220])
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(item)
+        if len(clean) >= 8:
+            break
     return clean

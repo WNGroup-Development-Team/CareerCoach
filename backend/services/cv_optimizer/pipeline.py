@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -10,6 +11,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from docx.oxml import OxmlElement
 
 
 SECTION_ALIASES = {
@@ -23,12 +26,22 @@ SECTION_ALIASES = {
         "professional experience",
     },
     "formazione": {"formazione", "istruzione", "education"},
-    "competenze": {"competenze", "skills", "hard skills", "soft skills", "competenze tecniche"},
+    "competenze": {"competenze", "skills", "competenze tecniche"},
+    "hard_skills": {"hard skills", "competenze tecniche hard", "tecniche"},
+    "soft_skills": {"soft skills", "competenze trasversali"},
     "lingue": {"lingue", "languages"},
     "certificazioni": {"certificazioni", "certificati", "certifications"},
     "progetti": {"progetti", "projects", "pagina aggiuntiva", "esperienze aggiuntive", "attivita rilevanti"},
     "contatti": {"contatti", "contact", "contacts"},
 }
+
+
+def _cv_rewrite_llm_enabled() -> bool:
+    try:
+        from services.cv_optimizer.structured_cv_engine import CV_REWRITE_LLM_ENABLED as enabled
+        return bool(enabled)
+    except Exception:
+        return False
 
 SECTION_HEADINGS = {heading for values in SECTION_ALIASES.values() for heading in values}
 SECTION_LEAK_MARKERS = {
@@ -77,6 +90,8 @@ def tokenize(value: str) -> List[str]:
 def is_section_heading(line: str) -> bool:
     clean = normalize_text(line).strip(":")
     stripped = (line or "").strip().strip(":")
+    if any(marker in stripped for marker in {"●", "○", "•", "◦"}):
+        return False
     return clean in SECTION_HEADINGS or (
         bool(clean)
         and len(clean) <= 42
@@ -548,41 +563,568 @@ class DocxPreserver:
         self.skipped_source_ids = []
         document = Document(io.BytesIO(original_file_bytes))
         applied = 0
-        for instruction in instructions:
+        for i, instruction in enumerate(instructions):
+            section_name = instruction.section or instruction.category or "unknown"
+            original_preview = (instruction.original or "")[:80].replace('\n', '\\n') if instruction.original else "(no original)"
+            print(f"DEBUG DocxPreserver: istruzione {i}: section={section_name}, original_preview={original_preview}")
+            
             if not self._valid_instruction(instruction):
                 self.skipped_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} scartata (non valida)")
                 continue
             contexts = self._paragraph_contexts(document)
             if self._should_append(instruction):
                 self._append_section(document, instruction)
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _should_append/append_section")
                 continue
             if instruction.original and self._replace_exact(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                continue
-            if instruction.original and self._replace_similar(contexts, instruction):
-                applied += 1
-                self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_exact")
                 continue
             if instruction.original and self._replace_section_block(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_section_block")
+                continue
+            if instruction.original and self._replace_similar(contexts, instruction):
+                applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_similar")
+                continue
+            if instruction.original and self._replace_section_block(contexts, instruction):
+                applied += 1
+                self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_section_block")
                 continue
             if self._replace_in_section(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_in_section")
                 continue
             if self._append_to_target_section(document, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
+                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _append_to_target_section")
                 continue
             self.skipped_source_ids.append(instruction.source_id or instruction.section)
+            print(f"DEBUG DocxPreserver: istruzione {i} scartata (nessun metodo ha funzionato)")
 
         output = io.BytesIO()
         document.save(output)
-        return output.getvalue(), applied
+        result_bytes = output.getvalue()
+        print(f"DEBUG DocxPreserver.apply FINE: applied={applied}, original_size={len(original_file_bytes)}, result_size={len(result_bytes)}, size_changed={len(result_bytes) != len(original_file_bytes)}")
+        return result_bytes, applied
+
+
+@dataclass
+class StructuredRewriteInstruction:
+    suggestion_id: str
+    target_section: str
+    action: str
+    old_text_hint: str
+    new_text: str
+    items: List[str] = field(default_factory=list)
+    reason: str = ""
+    confidence: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "suggestion_id": self.suggestion_id,
+            "target_section": self.target_section,
+            "action": self.action,
+            "old_text_hint": self.old_text_hint,
+            "new_text": self.new_text,
+            "items": list(self.items),
+            "reason": self.reason,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class DocxApplyResult:
+    file_bytes: bytes
+    sections_detected: List[str]
+    applied_ids: List[str]
+    partially_applied_ids: List[str]
+    failed_ids: List[str]
+    duplicate_warnings: List[str]
+    validation_report: Dict[str, Any]
+
+
+class ResumeDocxOptimizationPipeline(DocxPreserver):
+    def __init__(self) -> None:
+        self.rewriter = ResumeRewriter()
+        self.parser = ResumeParser()
+
+    def generate_structured_instructions(
+        self,
+        cv_text: str,
+        role: str,
+        company: str,
+        goal: str,
+        accepted_suggestions: Optional[List[Dict[str, Any]]] = None,
+        user_additional_data: Optional[Dict[str, Any]] = None,
+    ) -> List[StructuredRewriteInstruction]:
+        accepted_suggestions = accepted_suggestions or []
+        normalized_suggestions: List[Dict[str, Any]] = []
+        for index, suggestion in enumerate(accepted_suggestions):
+            if not isinstance(suggestion, dict):
+                continue
+            suggestion_id = str(
+                suggestion.get("suggestion_id")
+                or suggestion.get("id")
+                or suggestion.get("source_id")
+                or f"suggestion_{index + 1}"
+            )
+            target_section = str(suggestion.get("section") or suggestion.get("target_section") or "").strip()
+            if not target_section:
+                continue
+            old_text_hint = str(
+                suggestion.get("original_text")
+                or suggestion.get("original")
+                or suggestion.get("old_text_hint")
+                or ""
+            ).strip()
+            new_text = str(
+                suggestion.get("proposed_text")
+                or suggestion.get("replacement")
+                or suggestion.get("new_text")
+                or ""
+            ).strip()
+            if not new_text:
+                continue
+            items = suggestion.get("items") if isinstance(suggestion.get("items"), list) else []
+            normalized_suggestions.append({
+                "suggestion_id": suggestion_id,
+                "target_section": target_section,
+                "old_text_hint": old_text_hint,
+                "new_text": new_text,
+                "items": [str(item) for item in items if str(item).strip()],
+                "reason": str(suggestion.get("description") or suggestion.get("reason") or "").strip(),
+            })
+
+        prompt = f"""
+Restituisci SOLO JSON valido con una chiave `instructions` che contenga una lista di istruzioni operative.
+Ogni istruzione deve avere: suggestion_id, target_section, action, old_text_hint, new_text, items.
+
+CV originale:
+{cv_text[:6000]}
+
+Ruolo: {role or "Non specificato"}
+Azienda: {company or "Non specificata"}
+Obiettivo: {goal or "Non specificato"}
+
+Suggerimenti accettati:
+{json.dumps(normalized_suggestions, ensure_ascii=False)}
+
+Dati aggiuntivi utente:
+{json.dumps(user_additional_data or {}, ensure_ascii=False)}
+"""
+        instructions: List[StructuredRewriteInstruction] = []
+        if _cv_rewrite_llm_enabled():
+            try:
+                result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1400, json_mode=True), context="structured_docx_instructions")
+                raw_instructions = result.get("instructions") if isinstance(result, dict) else []
+                if isinstance(raw_instructions, list):
+                    for item in raw_instructions:
+                        if not isinstance(item, dict):
+                            continue
+                        instructions.append(StructuredRewriteInstruction(
+                            suggestion_id=str(item.get("suggestion_id") or ""),
+                            target_section=str(item.get("target_section") or ""),
+                            action=str(item.get("action") or "replace").strip() or "replace",
+                            old_text_hint=str(item.get("old_text_hint") or ""),
+                            new_text=str(item.get("new_text") or ""),
+                            items=[str(x) for x in (item.get("items") if isinstance(item.get("items"), list) else []) if str(x).strip()],
+                            reason=str(item.get("reason") or ""),
+                            confidence=float(item.get("confidence") or 0.0),
+                        ))
+            except Exception as exc:
+                print(f"Generazione istruzioni strutturate non disponibile: {exc}")
+
+        if not instructions:
+            print("DEBUG DOCX pipeline: uso fallback locale per le istruzioni strutturate.")
+            for suggestion in normalized_suggestions:
+                instructions.append(StructuredRewriteInstruction(
+                    suggestion_id=suggestion["suggestion_id"],
+                    target_section=suggestion["target_section"],
+                    action="replace",
+                    old_text_hint=suggestion["old_text_hint"],
+                    new_text=suggestion["new_text"],
+                    items=suggestion["items"],
+                    reason=suggestion["reason"],
+                    confidence=0.5,
+                ))
+        return instructions
+
+    def apply_instructions_to_docx(
+        self,
+        original_file_bytes: bytes,
+        instructions: List[StructuredRewriteInstruction],
+    ) -> DocxApplyResult:
+        from docx import Document
+
+        document = Document(io.BytesIO(original_file_bytes))
+        sections_detected = self._detect_sections(document)
+        print("DEBUG DOCX sections detected:", sections_detected)
+        applied_ids: List[str] = []
+        partially_applied_ids: List[str] = []
+        failed_ids: List[str] = []
+
+        for instruction in instructions:
+            outcome = self._apply_single_instruction(document, instruction, sections_detected)
+            if outcome == "applied":
+                applied_ids.append(instruction.suggestion_id)
+            elif outcome == "partial":
+                partially_applied_ids.append(instruction.suggestion_id)
+            else:
+                failed_ids.append(instruction.suggestion_id)
+
+        output = io.BytesIO()
+        document.save(output)
+        file_bytes = output.getvalue()
+        validation_report = self.validate_generated_docx(file_bytes, original_file_bytes, instructions)
+        duplicate_warnings = validation_report.get("duplicate_warnings", [])
+        return DocxApplyResult(
+            file_bytes=file_bytes,
+            sections_detected=sections_detected,
+            applied_ids=applied_ids,
+            partially_applied_ids=partially_applied_ids,
+            failed_ids=failed_ids,
+            duplicate_warnings=duplicate_warnings,
+            validation_report=validation_report,
+        )
+
+    def validate_generated_docx(
+        self,
+        generated_file_bytes: bytes,
+        original_file_bytes: bytes,
+        instructions: List[StructuredRewriteInstruction],
+    ) -> Dict[str, Any]:
+        final_text = self._extract_docx_text_bytes(generated_file_bytes)
+        original_text = self._extract_docx_text_bytes(original_file_bytes)
+        normalized_final = normalize_text(final_text)
+        normalized_original = normalize_text(original_text)
+
+        applied = []
+        partial = []
+        failed = []
+        for instruction in instructions:
+            needle = normalize_text(instruction.new_text)
+            hint = normalize_text(instruction.old_text_hint)
+            if needle and self._semantic_match(normalized_final, needle):
+                applied.append(instruction.suggestion_id)
+            elif hint and self._semantic_match(normalized_final, hint):
+                partial.append(instruction.suggestion_id)
+            else:
+                failed.append(instruction.suggestion_id)
+
+        duplicate_warnings = []
+        for marker in self._duplicate_markers(final_text):
+            duplicate_warnings.append(marker)
+
+        added_sections = self._unexpected_sections(normalized_original, normalized_final)
+        status = "applied"
+        if failed:
+            status = "partially_applied" if (applied or partial) else "failed"
+        if duplicate_warnings and len(failed) > 0:
+            status = "partially_applied" if (applied or partial) else "failed"
+        if applied or partial:
+            status = "applied" if not failed else "partially_applied"
+
+        return {
+            "status": status,
+            "applied": applied,
+            "partially_applied": partial,
+            "failed": failed,
+            "duplicate_warnings": duplicate_warnings,
+            "unexpected_sections": added_sections,
+            "final_text": final_text,
+        }
+
+    def _detect_sections(self, document) -> List[str]:
+        sections: List[str] = []
+        for paragraph in document.paragraphs:
+            text = (paragraph.text or "").strip()
+            if is_section_heading(text):
+                sections.append(canonical_section(text))
+        for table in document.tables:
+            sections.extend(self._detect_sections_from_table(table))
+        seen: List[str] = []
+        for section in sections:
+            if section and section not in seen:
+                seen.append(section)
+        return seen
+
+    def _detect_sections_from_table(self, table) -> List[str]:
+        sections: List[str] = []
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    text = (paragraph.text or "").strip()
+                    if is_section_heading(text):
+                        sections.append(canonical_section(text))
+                for nested in cell.tables:
+                    sections.extend(self._detect_sections_from_table(nested))
+        return sections
+
+    def _apply_single_instruction(self, document, instruction: StructuredRewriteInstruction, sections_detected: List[str]) -> str:
+        target = canonical_section(instruction.target_section)
+        if not target:
+            return "failed"
+        contexts = self._paragraph_contexts(document)
+        matching = [context for context in contexts if context.section == target and self._is_editable_paragraph(context.paragraph)]
+        if not matching:
+            print(f"DEBUG DOCX apply: sezione non trovata per {instruction.suggestion_id}, fallback sicuro")
+            return self._insert_missing_section(document, instruction, sections_detected)
+
+        replacement_lines = [line.strip() for line in instruction.new_text.splitlines() if line.strip()]
+        if not replacement_lines:
+            return "failed"
+        if self._is_high_confidence_section_instruction(instruction):
+            self._rewrite_section_block(document, matching, replacement_lines, instruction)
+        else:
+            self._rewrite_single_anchor(document, matching, replacement_lines, instruction)
+        return "applied"
+
+    def _insert_missing_section(self, document, instruction: StructuredRewriteInstruction, sections_detected: List[str]) -> str:
+        target = canonical_section(instruction.target_section)
+        replacement = (instruction.new_text or "").strip()
+        if not replacement:
+            return "failed"
+        heading = self._section_display_name(target)
+        if not document.paragraphs:
+            self._append_section_block(document, heading, replacement, None)
+            return "applied"
+
+        anchor = self._find_best_section_anchor(document, target, sections_detected)
+        self._append_section_block(document, heading, replacement, anchor)
+        return "applied"
+
+    def _rewrite_section_block(
+        self,
+        document,
+        matching_contexts: List[ParagraphContext],
+        replacement_lines: List[str],
+        instruction: StructuredRewriteInstruction,
+    ) -> None:
+        anchor = None
+        if instruction.old_text_hint:
+            hint_norm = normalize_text(instruction.old_text_hint)
+            for context in matching_contexts:
+                if hint_norm and hint_norm in normalize_text(context.paragraph.text or ""):
+                    anchor = context
+                    break
+        if anchor is None:
+            anchor = matching_contexts[0]
+
+        section_name = anchor.section
+        section_contexts = [context for context in self._paragraph_contexts(document) if context.section == section_name]
+        if not section_contexts:
+            section_contexts = matching_contexts
+
+        # Clear the whole matched section so the new CV contains only the rewritten block.
+        for context in section_contexts:
+            self._replace_paragraph_preserving_style(context.paragraph, "")
+
+        self._replace_paragraph_preserving_style(anchor.paragraph, replacement_lines[0])
+        previous = anchor.paragraph
+        for extra_line in replacement_lines[1:]:
+            new_paragraph = self._insert_paragraph_after(previous, extra_line)
+            self._copy_paragraph_format(previous, new_paragraph)
+            previous = new_paragraph
+
+    def _rewrite_single_anchor(
+        self,
+        document,
+        matching_contexts: List[ParagraphContext],
+        replacement_lines: List[str],
+        instruction: StructuredRewriteInstruction,
+    ) -> None:
+        anchor = None
+        if instruction.old_text_hint:
+            hint_norm = normalize_text(instruction.old_text_hint)
+            for context in matching_contexts:
+                if hint_norm and hint_norm in normalize_text(context.paragraph.text or ""):
+                    anchor = context
+                    break
+        if anchor is None:
+            anchor = matching_contexts[0]
+
+        self._replace_paragraph_preserving_style(anchor.paragraph, replacement_lines[0])
+        previous = anchor.paragraph
+        for extra_line in replacement_lines[1:]:
+            new_paragraph = self._insert_paragraph_after(previous, extra_line)
+            self._copy_paragraph_format(previous, new_paragraph)
+            previous = new_paragraph
+
+    def _is_high_confidence_section_instruction(self, instruction: StructuredRewriteInstruction) -> bool:
+        target = canonical_section(instruction.target_section)
+        if target in {"formazione", "esperienze"}:
+            return True
+        if target in {"hard_skills", "soft_skills"}:
+            return False
+        return len(tokenize(instruction.old_text_hint)) >= 18 or len((instruction.old_text_hint or "").strip()) >= 220
+
+    def _append_section_block(self, document, heading: str, replacement: str, anchor_paragraph) -> None:
+        lines = [line.strip() for line in replacement.splitlines() if line.strip()]
+        if not lines:
+            lines = [replacement.strip()]
+
+        if anchor_paragraph is None:
+            heading_paragraph = document.add_paragraph()
+        else:
+            heading_paragraph = self._insert_paragraph_after(anchor_paragraph, "")
+        self._replace_paragraph_preserving_style(heading_paragraph, heading.upper())
+        self._make_heading_like(heading_paragraph)
+
+        previous = heading_paragraph
+        for line in lines:
+            content_paragraph = self._insert_paragraph_after(previous, line)
+            self._copy_paragraph_format(previous, content_paragraph)
+            previous = content_paragraph
+
+    def _find_best_section_anchor(self, document, target: str, sections_detected: List[str]):
+        contexts = self._paragraph_contexts(document)
+        target_index = self._section_index(sections_detected, target)
+        if target_index > 0:
+            previous_section = sections_detected[target_index - 1]
+            for context in reversed(contexts):
+                if context.section == previous_section and (context.paragraph.text or '').strip():
+                    return context.paragraph
+        for context in reversed(contexts):
+            if (context.paragraph.text or '').strip():
+                return context.paragraph
+        return None
+
+    def _section_index(self, sections_detected: List[str], target: str) -> int:
+        if target in sections_detected:
+            return sections_detected.index(target)
+        if target == "hard_skills" and "competenze" in sections_detected:
+            return sections_detected.index("competenze")
+        if target == "soft_skills" and "competenze" in sections_detected:
+            return sections_detected.index("competenze")
+        return -1
+
+    def _section_display_name(self, section: str) -> str:
+        return {
+            "profilo": "Profilo professionale",
+            "esperienze": "Esperienze professionali",
+            "formazione": "Formazione",
+            "competenze": "Competenze",
+            "hard_skills": "Hard Skills",
+            "soft_skills": "Soft Skills",
+            "lingue": "Lingue",
+            "certificazioni": "Certificazioni",
+            "progetti": "Progetti",
+            "contatti": "Contatti",
+        }.get(section, section.capitalize())
+
+    def _make_heading_like(self, paragraph) -> None:
+        if not paragraph.runs:
+            return
+        run = paragraph.runs[0]
+        try:
+            run.bold = True
+        except Exception:
+            pass
+
+    def _replace_paragraph_preserving_style(self, paragraph, replacement: str) -> None:
+        runs = list(paragraph.runs)
+        if not runs:
+            paragraph.text = replacement
+            return
+        first_run = runs[0]
+        first_run.text = replacement
+        for run in runs[1:]:
+            run.text = ""
+
+    def _copy_paragraph_format(self, source, target) -> None:
+        target.style = source.style
+        target.alignment = source.alignment
+        if source.paragraph_format:
+            target.paragraph_format.left_indent = source.paragraph_format.left_indent
+            target.paragraph_format.right_indent = source.paragraph_format.right_indent
+            target.paragraph_format.space_before = source.paragraph_format.space_before
+            target.paragraph_format.space_after = source.paragraph_format.space_after
+            target.paragraph_format.line_spacing = source.paragraph_format.line_spacing
+
+    def _duplicate_markers(self, final_text: str) -> List[str]:
+        warnings: List[str] = []
+        lines = [line.strip() for line in (final_text or "").splitlines() if line.strip()]
+        counts: Dict[str, int] = {}
+        for line in lines:
+            normalized = normalize_text(line)
+            counts[normalized] = counts.get(normalized, 0) + 1
+        for line, count in counts.items():
+            if count > 2 and len(line) > 25:
+                warnings.append(line[:120])
+        return warnings
+
+    def _unexpected_sections(self, original_text: str, final_text: str) -> List[str]:
+        original_sections = set(self.parser.section_text_map(original_text).keys())
+        final_sections = set(self.parser.section_text_map(final_text).keys())
+        return sorted(section for section in final_sections - original_sections if section not in {"intestazione", "contenuto"})
+
+    def _insert_paragraph_after(self, paragraph, text: str):
+        from docx.text.paragraph import Paragraph
+
+        new_p = OxmlElement("w:p")
+        paragraph._p.addnext(new_p)
+        new_paragraph = Paragraph(new_p, paragraph._parent)
+        new_paragraph.text = text
+        return new_paragraph
+
+    def _extract_docx_text_bytes(self, file_bytes: bytes) -> str:
+        try:
+            from docx import Document
+
+            document = Document(io.BytesIO(file_bytes))
+            parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+            for section in getattr(document, "sections", []):
+                header = getattr(section, "header", None)
+                footer = getattr(section, "footer", None)
+                if header:
+                    parts.extend(paragraph.text for paragraph in header.paragraphs if paragraph.text)
+                    for table in getattr(header, "tables", []):
+                        parts.extend(self._collect_table_text(table))
+                if footer:
+                    parts.extend(paragraph.text for paragraph in footer.paragraphs if paragraph.text)
+                    for table in getattr(footer, "tables", []):
+                        parts.extend(self._collect_table_text(table))
+            seen_cells = set()
+            for table in document.tables:
+                parts.extend(self._collect_table_text(table, seen_cells))
+            return "\n".join(parts)
+        except Exception:
+            return ""
+
+    def _collect_table_text(self, table, seen_cells: Optional[set] = None) -> List[str]:
+        texts: List[str] = []
+        seen_cells = seen_cells or set()
+        for row in table.rows:
+            for cell in row.cells:
+                if id(cell._tc) in seen_cells:
+                    continue
+                seen_cells.add(id(cell._tc))
+                texts.extend(paragraph.text for paragraph in cell.paragraphs if paragraph.text)
+                for nested_table in cell.tables:
+                    texts.extend(self._collect_table_text(nested_table, seen_cells))
+        return texts
+
+    def _semantic_match(self, normalized_final: str, normalized_target: str) -> bool:
+        if not normalized_target:
+            return False
+        if normalized_target in normalized_final:
+            return True
+        target_tokens = [token for token in normalized_target.split() if len(token) > 2]
+        if len(target_tokens) < 3:
+            return False
+        window = " ".join(target_tokens[:6])
+        return window in normalized_final or len(set(target_tokens).intersection(set(normalized_final.split()))) >= max(3, len(target_tokens) // 2)
 
     def _paragraph_contexts(self, document) -> List[ParagraphContext]:
         contexts: List[ParagraphContext] = []
@@ -782,6 +1324,11 @@ class DocxPreserver:
         for index, context in enumerate(contexts):
             value = lines[index] if index < len(lines) else ""
             self._replace_preserving_first_run(context.paragraph, value)
+
+        # Clear any remaining paragraphs when the replacement is shorter than the matched block.
+        if len(lines) < len(contexts):
+            for context in contexts[len(lines):]:
+                self._replace_preserving_first_run(context.paragraph, "")
 
         if len(lines) <= len(contexts):
             return
@@ -1006,12 +1553,27 @@ class DocxPreserver:
 
     def _replace_preserving_first_run(self, paragraph, replacement: str) -> None:
         runs = list(paragraph.runs)
+        original_text = paragraph.text
         if not runs:
             paragraph.add_run(replacement)
+            print(f"DEBUG _replace_preserving_first_run: nessun run, aggiunto nuovo run con replacement")
             return
+        
+        print(f"DEBUG _replace_preserving_first_run PRIMA: replacement_len={len(replacement)}, replacement_preview={replacement[:100].replace(chr(10), '\\n')}")
+        print(f"DEBUG _replace_preserving_first_run PRIMA: paragraph.text_len={len(original_text)}, runs_count={len(runs)}")
+        
         runs[0].text = replacement
+        
+        # Verifica se il testo è stato salvato
+        runs_after = list(paragraph.runs)
+        print(f"DEBUG _replace_preserving_first_run DOPO: runs_count={len(runs_after)}, runs[0].text_len={len(runs_after[0].text) if runs_after else 0}")
+        if runs_after:
+            print(f"DEBUG _replace_preserving_first_run DOPO: runs[0].text_preview={runs_after[0].text[:100].replace(chr(10), '\\n')}")
+        
         for run in runs[1:]:
             run.text = ""
+        new_text = paragraph.text
+        print(f"DEBUG _replace_preserving_first_run FINE: paragraph.text_len={len(new_text)}, matches_replacement={new_text == replacement}")
 
 
 class ExportService:
