@@ -99,6 +99,26 @@ class GroqRateLimitError(Exception):
     pass
 
 
+groq_rate_limited_until: Optional[datetime] = None
+
+
+def groq_is_temporarily_blocked() -> bool:
+    return groq_rate_limited_until is not None and datetime.utcnow() < groq_rate_limited_until
+
+
+def mark_groq_rate_limit(error_text: str) -> None:
+    global groq_rate_limited_until
+    wait_seconds = 30 * 60
+    minutes_match = re.search(r"try again in (\d+)m([0-9.]+)s", error_text or "", re.IGNORECASE)
+    seconds_match = re.search(r"try again in ([0-9.]+)s", error_text or "", re.IGNORECASE)
+    if minutes_match:
+        wait_seconds = int(minutes_match.group(1)) * 60 + int(float(minutes_match.group(2))) + 5
+    elif seconds_match:
+        wait_seconds = int(float(seconds_match.group(1))) + 5
+    groq_rate_limited_until = datetime.utcnow() + timedelta(seconds=max(wait_seconds, 60))
+    print(f"Groq disattivato temporaneamente per rate limit fino a {groq_rate_limited_until.isoformat()} UTC: uso fallback locale.")
+
+
 # =========================
 # APP FASTAPI
 # =========================
@@ -917,6 +937,9 @@ def call_groq(
     timeout: int = 25,
     json_mode: bool = False,
 ) -> str:
+    if groq_is_temporarily_blocked():
+        raise GroqRateLimitError("Groq temporaneamente disattivato per rate limit: uso fallback locale.")
+
     def _completion_kwargs(include_json_mode: bool) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
             "model": GROQ_MODEL,
@@ -971,6 +994,7 @@ def call_groq(
             or "rate_limit_exceeded" in error_text.lower()
         ):
             print("Errore Groq: rate limit rilevato, uso fallback locale deterministico.")
+            mark_groq_rate_limit(error_text)
             raise GroqRateLimitError(error_text)
         if "invalid api key" in error_text.lower() or "invalid_api_key" in error_text.lower():
             print("Errore Groq: chiave API non valida. Aggiorna GROQ_API_KEY nel file .env e riavvia il backend.")
@@ -4021,7 +4045,13 @@ def build_resume_rewrite_result(
 
     coach_engine = CoachSuggestionEngine()
     accepted = coach_engine.accepted_only(accepted_suggestions)
+    try:
+        from services.cv_optimizer.safe_cv_guard import sanitize_accepted_cv_suggestions
+        accepted = sanitize_accepted_cv_suggestions(accepted)
+    except Exception as exc:
+        print(f"Filtro modifiche accettate non disponibile: {exc}")
     confirmed_skill_instructions = build_confirmed_skill_rewrite_instructions(cv_text, user_additional_data or {}, role)
+    additional_instructions = build_additional_rewrite_instructions(user_additional_data or {}, role)
 
     # Raccogliamo anche user_additional_data in modo organizzato
     clean_additional_data = {
@@ -4059,10 +4089,24 @@ def build_resume_rewrite_result(
         instructions = rewriter.instructions_from_suggestions(accepted)
 
     instructions.extend(confirmed_skill_instructions)
+    instructions.extend(additional_instructions)
     if instructions:
         instructions = consolidate_rewrite_instructions(cv_text, instructions, company, role, goal)
 
-    optimized_text = rewriter.apply_to_text(cv_text, instructions)
+    try:
+        from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
+        optimized_text = build_optimized_cv_text(
+            cv_text,
+            accepted,
+            user_additional_data or {},
+            role=role,
+            company=company,
+        )
+        if len((optimized_text or "").strip()) < 200:
+            optimized_text = rewriter.apply_to_text(cv_text, instructions)
+    except Exception as exc:
+        print(f"Generazione CV strutturato non disponibile, uso rewriter esistente: {exc}")
+        optimized_text = rewriter.apply_to_text(cv_text, instructions)
 
     # 5. Genera previewFinalCvContent per il frontend
     previewFinalCvContent = {}
@@ -6818,6 +6862,15 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
         if item.get("name") and not item.get("already_present")
     ]
 
+    try:
+        from services.cv_optimizer.structured_cv_engine import filter_confirmation_items, is_noise_keyword
+        result["confirmation_items"] = filter_confirmation_items(result.get("confirmation_items", []))
+        result["to_confirm"] = [
+            item for item in result.get("to_confirm", [])
+            if not is_noise_keyword(item)
+        ]
+    except Exception as exc:
+        print(f"Filtro skill/keyword non disponibile: {exc}")
     print(f"[build_role_skill_suggestions] final_confirmation_items={len(result['confirmation_items'])}")
     return result
 
@@ -7444,7 +7497,7 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
         if any(term in original_plain or term in proposed_plain for term in blocked):
             return False
     if section_plain == "hard skills":
-        if len(proposed.split()) > 35 or any(term in proposed_plain for term in ["progetto", "tirocinio", "formazione", "esperienza", "contatti"]):
+        if len(proposed.split()) > 90 or any(term in proposed_plain for term in ["contatti", "telefono", "email", "linkedin"]):
             return False
     if "esperienze" in section_plain:
         if any(term in proposed_plain for term in ["contatti", "lingue", "hard skills", "soft skills", "formazione"]):
@@ -8396,124 +8449,20 @@ def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> L
     return sorted(suggestions, key=lambda item: int(item.get("priority", 99)))[:8]
 
 
+
+
+
 def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
-    cv_text = str(evaluation.get("cv_text") or "")
-    section_map = _extract_sections_for_structured_suggestions(cv_text)
-    target_profile = _target_profile_from_evaluation(evaluation)
-    role = target_profile.get("role") or ""
-    suggestions: List[Dict[str, Any]] = []
-
-    # 1) Suggerimenti locali deterministici: sono la base sicura e generalizzabile.
-    suggestions.extend(build_generic_rewrite_fallbacks(section_map, role))
-
-    # 2) LLM solo come arricchimento, mai come unica fonte.
-    section_payload = [
-        {"section": label, "text": text[:1200]}
-        for key, label in [
-            ("profile", "CHI SONO"),
-            ("hard_skills", "HARD SKILLS"),
-            ("soft_skills", "SOFT SKILLS"),
-            ("experience", "ESPERIENZE PROFESSIONALI"),
-            ("education", "FORMAZIONE"),
-            ("projects", "PROGETTI"),
-            ("progetti", "PROGETTI"),
-        ]
-        for text in [section_map.get(key, "")]
-        if text
-    ]
-    prompt = f"""
-Sei un resume editor. Restituisci SOLO JSON valido, senza markdown.
-
-Obiettivo:
-produrre modifiche strutturate, sezione per sezione, per ottimizzare il CV rispetto al ruolo e all'azienda, senza inventare informazioni.
-
-Target:
-{json.dumps(target_profile, ensure_ascii=False)}
-
-Sezioni pulite del CV:
-{json.dumps(section_payload, ensure_ascii=False)}
-
-Schema obbligatorio:
-{{
-  "suggestions": [
-    {{
-      "category": "profile | experience | skills | soft_skills | education | project | ats_keywords",
-      "title": "titolo concreto",
-      "section": "CHI SONO | HARD SKILLS | SOFT SKILLS | ESPERIENZE PROFESSIONALI | FORMAZIONE | PROGETTI",
-      "original_text": "testo originale presente nella sezione",
-      "proposed_text": "testo pronto da inserire nel CV",
-      "reason": "motivo specifico",
-      "impact": "alto | medio | basso",
-      "priority": 1,
-      "keywords_added": []
-    }}
-  ]
-}}
-
-Regole:
-- Non generare consigli generici.
-- original_text deve essere contenuto nelle sezioni fornite.
-- proposed_text deve essere una modifica concreta, non un report.
-- Non aggiungere skill non presenti nel CV. Se una skill manca, non inserirla come posseduta.
-- Non ripetere blocchi di testo.
-- Non includere contatti, telefono, email o link dentro competenze/formazione/esperienze.
-- Non proporre keyword spazzatura tratte dalla frase dell'utente, come "voglio prepararmi", "per un colloquio", "design per google".
-- Massimo 5 suggerimenti, diversi tra loro.
-"""
     try:
-        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=1600, timeout=60, json_mode=True), context="structured_cv_suggestions")
-        generated = result.get("suggestions") if isinstance(result, dict) else []
+        from services.cv_optimizer.safe_cv_guard import build_structured_cv_suggestions
+
+        suggestions = build_structured_cv_suggestions(evaluation)
+        if suggestions:
+            return suggestions[:8]
+        print("Safe CV guard: nessun suggerimento affidabile generato.")
     except Exception as exc:
-        print(f"Suggerimenti CV LLM non disponibili, uso base locale: {exc}")
-        generated = []
-
-    for item in generated if isinstance(generated, list) else []:
-        if not isinstance(item, dict):
-            continue
-        category = str(item.get("category") or "phrases")
-        section = str(item.get("section") or "").strip()
-        original = _clean_section_text(str(item.get("original_text") or ""), section, max_chars=900)
-        proposed = str(item.get("proposed_text") or "").strip()
-        if not section or not original or not proposed:
-            continue
-        _append_suggestion(
-            suggestions,
-            category,
-            str(item.get("title") or "Migliora questa sezione"),
-            str(item.get("reason") or item.get("description") or "Modifica mirata al ruolo mantenendo i fatti reali."),
-            section,
-            original,
-            proposed,
-            str(item.get("impact") or "medio"),
-            int(item.get("priority") or 7),
-            item.get("keywords_added") if isinstance(item.get("keywords_added"), list) else [],
-        )
-
-    unique: List[Dict[str, Any]] = []
-    seen = set()
-    for suggestion in sorted(suggestions, key=lambda item: int(item.get("priority", 99))):
-        if suggestion.get("type") != "actionableEdit":
-            continue
-        if is_cv_noise_keyword(suggestion.get("title")):
-            continue
-        normalized_pair = (
-            canonical_edit_section_name(str(suggestion.get("section") or "")) or str(suggestion.get("section") or ""),
-            normalize_plain_text(str(suggestion.get("original_text") or ""))[:180],
-            normalize_plain_text(str(suggestion.get("proposed_text") or ""))[:180],
-        )
-        if normalized_pair in seen:
-            continue
-        seen.add(normalized_pair)
-        suggestion["keywords_added"] = [
-            keyword for keyword in suggestion.get("keywords_added", [])
-            if not is_cv_noise_keyword(keyword)
-        ][:8]
-        unique.append(suggestion)
-        if len(unique) >= 8:
-            break
-
-    return unique
-
+        print(f"Safe CV guard non disponibile: {exc}")
+    return []
 
 def normalize_accepted_coach_suggestions(value: Any) -> List[Dict]:
     if not isinstance(value, list):

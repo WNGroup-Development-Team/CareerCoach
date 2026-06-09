@@ -410,6 +410,13 @@ Regole:
             original = str(item.get("original") or "").strip()
             raw_replacement = str(item.get("replacement") or "").strip()
             section = canonical_section(str(item.get("section") or ""))
+            if self._is_bad_cv_instruction(section, original, raw_replacement, item):
+                print(
+                    "Istruzione LLM scartata da quality gate: "
+                    f"id={item.get('id') or item.get('title') or 'llm_instruction'}, "
+                    f"section={section}, replacement={raw_replacement[:180]}"
+                )
+                continue
             if not self.is_safe_replacement(section, raw_replacement):
                 print(
                     "Suggerimento riscrittura scartato: "
@@ -438,6 +445,13 @@ Regole:
             section = canonical_section(str(item.get("section") or item.get("category") or ""))
             if not raw_proposed:
                 continue
+            if self._is_bad_cv_instruction(section, original, raw_proposed, item):
+                print(
+                    "Suggerimento coach scartato da quality gate: "
+                    f"id={item.get('id') or item.get('title') or 'coach_suggestion'}, "
+                    f"section={section}, proposed_text={raw_proposed[:180]}"
+                )
+                continue
             if not self.is_safe_replacement(section, raw_proposed):
                 print(
                     "Suggerimento coach scartato: "
@@ -456,6 +470,25 @@ Regole:
                 source_id=str(item.get("id") or item.get("title") or "coach_suggestion").strip(),
             ))
         return instructions[:40]
+
+    def _is_bad_cv_instruction(self, section: str, original: str, proposed: str, item: Any = None) -> bool:
+        try:
+            from services.cv_optimizer.safe_cv_guard import is_bad_suggestion
+            payload = dict(item or {})
+            payload.setdefault("section", section)
+            payload.setdefault("original_text", original)
+            payload.setdefault("proposed_text", proposed)
+            return is_bad_suggestion(payload)
+        except Exception:
+            combined = normalize_text(f"{original} {proposed}")
+            section_name = canonical_section(section)
+            if section_name == "formazione":
+                return True
+            if section_name == "profilo" and any(marker in combined for marker in ["captive portal", "identity provider", "tesi di laurea", "corso di laurea"]):
+                return True
+            if any(marker in combined for marker in ["percorso formativo valorizzato", "percorso formativo coerente"]):
+                return True
+            return False
 
     def is_safe_replacement(self, section: str, replacement: str) -> bool:
         raw = replacement or ""
@@ -591,9 +624,34 @@ class DocxPreserver:
         return contexts
 
     def _valid_instruction(self, instruction: RewriteInstruction) -> bool:
-        if not instruction.replacement.strip():
+        replacement = (instruction.replacement or "").strip()
+        if not replacement:
             return False
-        if not ResumeRewriter().is_safe_replacement(instruction.section, instruction.replacement):
+
+        target = canonical_section(instruction.section or instruction.category or "")
+        is_append = not (instruction.original or "").strip()
+
+        # Profilo/esperienze/formazione sono sezioni narrative: le sostituzioni
+        # sicure devono essere consentite, altrimenti il DOCX finale resta quasi
+        # invariato. Blocchiamo solo gli append liberi/non tracciati.
+        if is_append and target == "profilo":
+            self._log_blocked(
+                instruction,
+                "append vietato nel profilo: serve un testo originale da sostituire",
+            )
+            return False
+
+        if is_append and target in {"formazione", "esperienze"}:
+            source_id = instruction.source_id or ""
+            is_user_confirmed = "user_additional_info" in source_id
+            if not is_user_confirmed:
+                self._log_blocked(
+                    instruction,
+                    "append narrativo bloccato: serve informazione confermata dall'utente",
+                )
+                return False
+
+        if not ResumeRewriter().is_safe_replacement(instruction.section, replacement):
             self._log_blocked(instruction, "replacement non valido per la sezione")
             return False
         return True
