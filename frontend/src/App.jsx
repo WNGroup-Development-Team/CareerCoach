@@ -2334,6 +2334,11 @@ function App() {
   const evaluateAnswer = async () => {
     resetError();
 
+    // Disattiva il microfono se è ancora attivo al momento dell'invio
+    if (isListening) {
+      stopVoiceAnswer();
+    }
+
     if (!answer.trim()) {
       setError("Scrivi o registra una risposta prima di inviarla.");
       return;
@@ -2501,6 +2506,9 @@ function App() {
 
     recognition.onstart = () => {
       setIsListening(true);
+      // Riporta il focus sulla textarea appena il microfono si attiva.
+      // Questo garantisce che il tasto Invio sulla tastiera funzioni immediatamente.
+      answerRef.current?.focus();
     };
 
     recognition.onresult = (event) => {
@@ -5008,7 +5016,8 @@ function App() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
-                    if (!loading && answer.trim()) evaluateAnswer();
+                    // Permettiamo la chiamata anche se il testo è vuoto (sarà validato internamente)
+                    if (!loading) evaluateAnswer();
                   }
                 }}
                 placeholder="Scrivi la tua risposta..."
@@ -5142,8 +5151,14 @@ function App() {
       {step === "interview-summary" && (
         <section className="card">
           <h2>Riepilogo Simulazione</h2>
-          <p className="section-description">
-            Ottimo lavoro! Hai completato tutte le domande per il ruolo di <strong>{profile.target_role}</strong> in <strong>{company}</strong>.
+          <p className="section-description" style={{ marginBottom: '2rem' }}>
+            Ottimo lavoro! Hai completato tutte le domande
+            {profile.target_role && profile.target_role !== "Da definire" && (
+              <> per il ruolo di <strong>{profile.target_role}</strong></>
+            )}
+            {company && company !== "Generica" && (
+              <> in <strong>{company}</strong></>
+            )}.
           </p>
 
           <div className="score-main">
@@ -5211,7 +5226,13 @@ function App() {
                   </button>
 
                   {isQuestionExpanded && (
-                    <div className="history-question-details">
+                    <div className="history-question-details" style={{ marginTop: '1rem' }}>
+                      {item.answer && (
+                        <div className="feedback-block">
+                          <h3>La tua risposta</h3>
+                          <p>{item.answer}</p>
+                        </div>
+                      )}
                       <div className="feedback-block" style={{ marginTop: 0 }}>
                         <h3>Feedback</h3>
                         <p>{item.feedback.feedback}</p>
