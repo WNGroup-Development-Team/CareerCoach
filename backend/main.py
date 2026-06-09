@@ -4163,6 +4163,7 @@ def build_resume_rewrite_result(
     print(f"DEBUG build_resume_rewrite_result: accepted_suggestions type={type(accepted_suggestions).__name__}, len={len(accepted_suggestions) if isinstance(accepted_suggestions, list) else 'N/A'}")
     if isinstance(accepted_suggestions, list) and accepted_suggestions:
         print(f"DEBUG: primo suggerimento = {accepted_suggestions[0]}")
+    print(f"OPTIMIZE DEBUG - accepted_suggestions: {len(accepted_suggestions) if isinstance(accepted_suggestions, list) else 0}")
     
     parser = ResumeParser()
     sections = parser.parse_text(cv_text)
@@ -4222,6 +4223,11 @@ def build_resume_rewrite_result(
         print(f"DEBUG istruzioni generate da suggerimenti: {len(instructions)} istruzioni")
         if instructions:
             print(f"DEBUG prima istruzione: {instructions[0]}")
+
+    grouped_by_section: Dict[str, int] = {}
+    for inst in instructions:
+        grouped_by_section[inst.section] = grouped_by_section.get(inst.section, 0) + 1
+    print(f"OPTIMIZE DEBUG - generated instructions by target_section: {grouped_by_section}")
 
     instructions.extend(confirmed_skill_instructions)
     print(f"DEBUG istruzioni totali (dopo confirmed_skills): {len(instructions)}")

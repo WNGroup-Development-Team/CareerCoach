@@ -834,6 +834,17 @@ Dati aggiuntivi utente:
             status = "partially_applied" if (applied or partial) else "failed"
         if applied or partial:
             status = "applied" if not failed else "partially_applied"
+        objective_targets = {"profilo", "objective", "obiettivo"}
+        education_targets = {"formazione", "education"}
+        if any(canonical_section(inst.target_section) in objective_targets for inst in instructions):
+            original_objective = self._extract_section_text(normalized_original, objective_targets)
+            final_objective = self._extract_section_text(normalized_final, objective_targets)
+            if original_objective and final_objective and SequenceMatcher(None, original_objective, final_objective).ratio() >= 0.88:
+                status = "failed"
+                failed = [inst.suggestion_id for inst in instructions if canonical_section(inst.target_section) in objective_targets]
+        if self._objective_followed_by_education(normalized_final):
+            status = "failed"
+            failed = [inst.suggestion_id for inst in instructions if canonical_section(inst.target_section) in education_targets] or failed
 
         return {
             "status": status,
@@ -875,6 +886,9 @@ Dati aggiuntivi utente:
         target = canonical_section(instruction.target_section)
         if not target:
             return "failed"
+        if not self._is_safe_target_text(instruction):
+            print(f"DOCX APPLY - blocked wrong section injection: suggestion_id={instruction.suggestion_id}, target={instruction.target_section}")
+            return "failed"
         contexts = self._paragraph_contexts(document)
         matching = [context for context in contexts if context.section == target and self._is_editable_paragraph(context.paragraph)]
         if not matching:
@@ -895,14 +909,32 @@ Dati aggiuntivi utente:
         replacement = (instruction.new_text or "").strip()
         if not replacement:
             return "failed"
+        if target in sections_detected:
+            print(f"DOCX APPLY - skipped unsafe fallback insertion: target={target} already exists")
+            return "failed"
         heading = self._section_display_name(target)
         if not document.paragraphs:
             self._append_section_block(document, heading, replacement, None)
             return "applied"
 
         anchor = self._find_best_section_anchor(document, target, sections_detected)
+        if anchor is None:
+            print(f"DOCX APPLY - skipped unsafe fallback insertion: target={target} no safe anchor")
+            return "failed"
         self._append_section_block(document, heading, replacement, anchor)
         return "applied"
+
+    def _is_safe_target_text(self, instruction: StructuredRewriteInstruction) -> bool:
+        section = canonical_section(instruction.target_section)
+        text = normalize_text(instruction.new_text)
+        headings = {"formazione", "esperienze", "progetti", "hard skills", "soft skills", "competenze", "contatti", "lingue", "certificazioni"}
+        if section in {"profilo", "objective", "obiettivo"} and any(title in text for title in headings):
+            return False
+        if section in {"formazione", "education"} and any(title in text for title in {"esperienze", "obiettivo", "profilo", "progetti"}):
+            return False
+        if section in {"esperienze", "experience"} and any(title in text for title in {"formazione", "obiettivo", "profilo"}):
+            return False
+        return True
 
     def _rewrite_section_block(
         self,
@@ -1003,9 +1035,7 @@ Dati aggiuntivi utente:
     def _section_index(self, sections_detected: List[str], target: str) -> int:
         if target in sections_detected:
             return sections_detected.index(target)
-        if target == "hard_skills" and "competenze" in sections_detected:
-            return sections_detected.index("competenze")
-        if target == "soft_skills" and "competenze" in sections_detected:
+        if target in {"hard_skills", "soft_skills"} and "competenze" in sections_detected:
             return sections_detected.index("competenze")
         return -1
 
@@ -1125,6 +1155,30 @@ Dati aggiuntivi utente:
             return False
         window = " ".join(target_tokens[:6])
         return window in normalized_final or len(set(target_tokens).intersection(set(normalized_final.split()))) >= max(3, len(target_tokens) // 2)
+
+    def _objective_followed_by_education(self, normalized_final: str) -> bool:
+        lines = [line.strip() for line in normalized_final.splitlines() if line.strip()]
+        objective_markers = {"obiettivo", "profilo", "profilo professionale", "chi sono", "objective"}
+        education_markers = {"formazione", "istruzione", "education"}
+        for index, line in enumerate(lines[:-1]):
+            if line in objective_markers and lines[index + 1] in education_markers:
+                return True
+        return False
+
+    def _extract_section_text(self, normalized_text: str, section_names: set[str]) -> str:
+        lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+        captured: List[str] = []
+        capture = False
+        stop_markers = {"obiettivo", "profilo", "profilo professionale", "chi sono", "objective", "formazione", "istruzione", "education", "esperienze", "esperienze professionali", "progetti", "hard skills", "soft skills", "competenze", "contatti", "lingue", "certificazioni"}
+        for line in lines:
+            if line in section_names:
+                capture = True
+                continue
+            if capture and line in stop_markers:
+                break
+            if capture:
+                captured.append(line)
+        return " ".join(captured).strip()
 
     def _paragraph_contexts(self, document) -> List[ParagraphContext]:
         contexts: List[ParagraphContext] = []

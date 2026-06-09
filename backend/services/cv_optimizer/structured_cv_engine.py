@@ -5,6 +5,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+import json
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -97,6 +98,8 @@ COMMON_SKILLS = [
     "NLP", "LLM", "Cloud Computing", "Docker", "Git", "GitHub", "PostgreSQL", "MongoDB", "FastAPI",
     "Unity", "Unreal Engine", "Blender", "Figma", "Miro", "Power BI", "Tableau", "Excel", "Jira", "Trello", "Asana"
 ]
+
+OLLAMA_COPYWRITING_TIMEOUT = 20
 
 
 @dataclass
@@ -286,6 +289,118 @@ def build_target_profile(role: str, company: str = "", description: str = "", re
     }
 
 
+def strip_section_titles(text: str) -> str:
+    forbidden = {
+        "profilo", "obiettivo", "esperienze", "esperienze professionali", "esperienza professionale",
+        "formazione", "istruzione", "progetti", "hard skills", "soft skills", "competenze",
+        "contatti", "lingue", "certificazioni",
+    }
+    lines: List[str] = []
+    for raw_line in (text or "").splitlines():
+        line = clean_line(raw_line)
+        normalized = normalize(line).strip(":")
+        if not line:
+            continue
+        if normalized in forbidden:
+            continue
+        if normalized.upper() == normalized and len(normalized) <= 42 and any(char.isalpha() for char in normalized):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def sanitize_rewrite_instruction(instruction: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(instruction, dict):
+        return None
+    section = normalize(str(instruction.get("section") or instruction.get("target_section") or "")).strip()
+    replacement = str(instruction.get("replacement") or instruction.get("proposed_text") or instruction.get("new_text") or "").strip()
+    original = str(instruction.get("original") or instruction.get("original_text") or instruction.get("old_text_hint") or "").strip()
+    if not section or not replacement:
+        return None
+    replacement = strip_section_titles(replacement)
+    if not replacement:
+        return None
+    norm_replacement = normalize(replacement)
+    blocked_pairs = {
+        "profile": ("formazione", "esperienze", "progetti", "hard skills", "soft skills", "competenze", "lingue", "certificazioni"),
+        "objective": ("formazione", "esperienze", "progetti", "hard skills", "soft skills", "competenze", "lingue", "certificazioni"),
+        "obiettivo": ("formazione", "esperienze", "progetti", "hard skills", "soft skills", "competenze", "lingue", "certificazioni"),
+        "education": ("esperienza", "progetti", "profilo", "obiettivo", "hard skills", "soft skills"),
+        "experience": ("formazione", "progetti", "profilo", "obiettivo", "hard skills", "soft skills"),
+        "skills": ("formazione", "esperienze", "progetti", "profilo", "obiettivo"),
+        "hard_skills": ("formazione", "esperienze", "progetti", "profilo", "obiettivo"),
+        "soft_skills": ("formazione", "esperienze", "progetti", "profilo", "obiettivo"),
+    }
+    for marker in blocked_pairs.get(section, ()):
+        if marker in norm_replacement:
+            print(f"SANITIZE INSTRUCTION - blocked wrong section injection: section={section}")
+            return None
+    cleaned = dict(instruction)
+    cleaned["section"] = section
+    cleaned["original"] = original
+    cleaned["replacement"] = replacement
+    cleaned["proposed_text"] = replacement
+    cleaned["new_text"] = replacement
+    return cleaned
+
+
+def _call_ollama_copywriting(prompt: str) -> Optional[Dict[str, Any]]:
+    try:
+        from main import call_ollama
+        print("OLLAMA COPYWRITING - available")
+        raw = call_ollama(prompt, temperature=0.1, max_tokens=1600, timeout=OLLAMA_COPYWRITING_TIMEOUT, json_mode=True)
+    except Exception:
+        print("OLLAMA COPYWRITING - unavailable, using local fallback")
+        return None
+    try:
+        if isinstance(raw, str):
+            return json.loads(raw)
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        print("OLLAMA COPYWRITING - invalid JSON, using local fallback")
+        return None
+    print("OLLAMA COPYWRITING - invalid JSON, using local fallback")
+    return None
+
+
+def _build_copywriting_instruction_json(
+    section_key: str,
+    old_text: str,
+    new_text: str,
+    used_existing_evidence: List[str],
+    forbidden_added_claims: List[str],
+) -> Dict[str, Any]:
+    return {
+        "target_section": section_key,
+        "action": "replace",
+        "old_text_hint": old_text,
+        "new_text": new_text,
+        "used_existing_evidence": used_existing_evidence,
+        "forbidden_added_claims": forbidden_added_claims,
+    }
+
+
+def strip_section_titles(text: str) -> str:
+    forbidden = {
+        "profilo", "obiettivo", "esperienze", "esperienze professionali", "esperienza professionale",
+        "formazione", "istruzione", "progetti", "hard skills", "soft skills", "competenze",
+        "contatti", "lingue", "certificazioni",
+    }
+    cleaned_lines: List[str] = []
+    for raw_line in (text or "").splitlines():
+        line = clean_line(raw_line)
+        normalized = normalize(line).strip(":")
+        if not line:
+            continue
+        if normalized in forbidden:
+            continue
+        if normalized.upper() == normalized and len(normalized) <= 42 and any(char.isalpha() for char in normalized):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
 def extract_skill_terms(text: str) -> List[str]:
     haystack = " " + normalize(text) + " "
     found = []
@@ -368,14 +483,27 @@ def profile_rewrite(original: str, parsed: ParsedCV, target: Dict[str, Any]) -> 
     company = target.get("company") or ""
     cv_all = "\n".join(parsed.sections.values())
     present = []
-    for skill in [*COMMON_SKILLS, *target.get("hard_skills", [])]:
+    for skill in [*COMMON_SKILLS, *target.get("hard_skills", []), *target.get("soft_skills", []), *target.get("tools", [])]:
         if normalize(skill) in normalize(cv_all):
             present.append(skill)
-    present = unique(present)[:6]
-    base = shorten(original, 430).rstrip(".")
-    company_part = f" presso {company}" if company else ""
-    skills_part = f", valorizzando competenze in {', '.join(present)}" if present else ""
-    return f"{base}. Obiettivo professionale: contribuire a iniziative coerenti con il ruolo di {role}{company_part}{skills_part}, con un approccio orientato a progetti, collaborazione e risultati concreti."
+    present = unique(present)[:7]
+    projects = []
+    for key in ("experience", "projects", "education"):
+        snippet = parsed.sections.get(key, "")
+        if snippet and any(token in normalize(snippet) for token in ("python", "sql", "rag", "chatbot", "clustering", "big data", "machine learning", "analisi dati", "transazioni", "documenti")):
+            projects.append(shorten(clean_line(snippet), 120))
+    projects = unique(projects)[:2]
+    company_part = f" per {company}" if company else ""
+    skills_part = f" Competenze chiave: {', '.join(present)}." if present else ""
+    projects_part = f" Esperienze e progetti pertinenti: {'; '.join(projects)}." if projects else ""
+    print(f"OPTIMIZE DEBUG - profile rewrite before: {shorten(original, 200)}")
+    profile_text = (
+        f"{role} con formazione coerente e obiettivo di contribuire in contesti data-driven{company_part}."
+        f"{skills_part}{projects_part}"
+        f" Obiettivo professionale: portare competenze tecniche, attenzione alla qualità del dato e collaborazione."
+    )
+    print(f"OPTIMIZE DEBUG - profile rewrite after: {shorten(profile_text, 200)}")
+    return strip_section_titles(profile_text)
 
 
 def experience_rewrite(original: str, target: Dict[str, Any]) -> str:
@@ -384,8 +512,13 @@ def experience_rewrite(original: str, target: Dict[str, Any]) -> str:
     sentences = [s.strip().rstrip(".") for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
     if not sentences:
         sentences = [text.rstrip(".")]
-    bullets = [f"- {sentence}." for sentence in sentences[:5] if sentence]
-    return f"Esperienza valorizzata per il ruolo di {role}, con focus su attività, strumenti e contributo progettuale:\n" + "\n".join(bullets)
+    bullets: List[str] = []
+    for sentence in sentences[:5]:
+        norm = normalize(sentence)
+        if len(norm) < 20:
+            continue
+        bullets.append(f"- {sentence}.")
+    return f"Esperienza professionale orientata al ruolo di {role}:\n" + "\n".join(bullets)
 
 
 def projects_rewrite(original: str, target: Dict[str, Any]) -> str:
@@ -394,7 +527,9 @@ def projects_rewrite(original: str, target: Dict[str, Any]) -> str:
     for part in re.split(r"\n|·|•", original or ""):
         part = clean_line(part).strip(".")
         if part:
-            parts.append(f"- {part}.")
+            normalized = normalize(part)
+            if any(token in normalized for token in ("python", "sql", "big data", "machine learning", "ml", "rag", "chatbot", "clustering", "analisi dati", "transazioni", "documenti")):
+                parts.append(f"- {part}.")
     parts = unique(parts)[:7]
     if not parts:
         return ""
@@ -407,7 +542,7 @@ def education_rewrite(original: str, parsed: ParsedCV, target: Dict[str, Any]) -
     signals = [skill for skill in COMMON_SKILLS if normalize(skill) in normalize(cv_all)]
     signals = unique(signals)[:5]
     signal_part = f" con focus su {', '.join(signals)}" if signals else ""
-    return f"Percorso formativo coerente con il ruolo di {role}{signal_part}. {shorten(original, 680)}"
+    return strip_section_titles(f"Percorso formativo coerente con il ruolo di {role}{signal_part}. {shorten(original, 680)}")
 
 
 def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -490,7 +625,29 @@ def filter_confirmation_items(items: Any) -> List[Dict[str, Any]]:
 def build_optimized_cv_text(cv_text: str, accepted_suggestions: Any, user_additional_data: Optional[Dict[str, Any]], role: str = "", company: str = "") -> str:
     parsed = parse_cv(cv_text)
     sections = dict(parsed.sections)
+    target = build_target_profile(role, company)
     accepted = [item for item in accepted_suggestions or [] if isinstance(item, dict) and item.get("type") == "actionableEdit"]
+    print(f"OPTIMIZE DEBUG - accepted_suggestions: {len(accepted)}")
+    print(f"TARGETED COPYWRITING - role/company: role={role}, company={company}")
+    accepted_payload: List[Dict[str, Any]] = []
+    section_buckets: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _canonical_section_key(section_label: str) -> str:
+        normalized_label = normalize(section_label)
+        for key, heading in CANONICAL_TO_HEADING.items():
+            if normalized_label == normalize(heading) or normalized_label in SECTION_ALIASES.get(key, set()):
+                return key
+        if normalized_label in {"objective", "obiettivo"}:
+            return "profile"
+        if normalized_label in {"skills", "hard_skills", "soft_skills", "competenze"}:
+            return "hard_skills"
+        if normalized_label in {"experience", "esperienza"}:
+            return "experience"
+        if normalized_label in {"project", "projects", "progetti"}:
+            return "projects"
+        if normalized_label in {"education", "istruzione", "formazione"}:
+            return "education"
+        return "profile"
 
     for item in accepted:
         section_label = str(item.get("section") or "")
@@ -498,25 +655,148 @@ def build_optimized_cv_text(cv_text: str, accepted_suggestions: Any, user_additi
         proposed = str(item.get("proposed_text") or item.get("replacement") or "").strip()
         if not proposed:
             continue
-        section_key = None
-        for key, heading in CANONICAL_TO_HEADING.items():
-            if normalize(section_label) == normalize(heading) or normalize(section_label) in SECTION_ALIASES.get(key, set()):
-                section_key = key
-                break
-        if section_key is None:
-            section_key = "profile"
-        current = sections.get(section_key, "")
-        if original and normalize(original) in normalize(current):
-            sections[section_key] = proposed
-        elif current and SequenceMatcher(None, normalize(original), normalize(current)).ratio() >= 0.55:
-            sections[section_key] = proposed
-        elif section_key in sections:
-            if normalize(proposed) not in normalize(sections[section_key]):
-                sections[section_key] = (sections[section_key].rstrip() + "\n" + proposed).strip()
-        else:
-            sections[section_key] = proposed
-            if section_key not in parsed.order:
-                parsed.order.append(section_key)
+        section_key = _canonical_section_key(section_label)
+        sanitized = sanitize_rewrite_instruction({
+            "section": section_key,
+            "original": original,
+            "replacement": proposed,
+            "id": item.get("id"),
+            "category": item.get("category"),
+        })
+        if not sanitized:
+            continue
+        payload_item = {
+            "target_section": section_key,
+            "action": "replace",
+            "old_text_hint": original[:250],
+            "new_text": sanitized["replacement"][:900],
+            "used_existing_evidence": True,
+            "forbidden_added_claims": [],
+            "source_id": item.get("id"),
+        }
+        accepted_payload.append(payload_item)
+        section_buckets.setdefault(section_key, []).append(payload_item)
+
+    ollama_instructions: List[Dict[str, Any]] = []
+    if role or company or accepted_payload or (user_additional_data or {}):
+        prompt = f"""
+Restituisci SOLO JSON valido, senza markdown, con questa forma:
+{{
+  "instructions": [
+    {{
+      "target_section": "profile | experience | projects | education | skills",
+      "action": "replace",
+      "old_text_hint": "frammento già presente nel CV",
+      "new_text": "testo riscritto professionale",
+      "used_existing_evidence": ["lista di fatti realmente presenti nel CV o nei dati utente"],
+      "forbidden_added_claims": ["lista vuota oppure claim vietati evitati"]
+    }}
+  ]
+}}
+
+Regole:
+- usa solo informazioni presenti nel CV originale, nei suggerimenti accettati e nei dati aggiuntivi utente;
+- non inventare esperienze, numeri, certificazioni, risultati o competenze;
+- non inserire titoli di sezione nel new_text;
+- il DOCX non deve essere generato qui;
+- limita le istruzioni alle sezioni profile, experience, projects, education, skills.
+
+Ruolo target: {role or "Non specificato"}
+Azienda target: {company or "Non specificata"}
+
+CV originale:
+{cv_text[:7000]}
+
+Suggerimenti accettati:
+{json.dumps(accepted_payload, ensure_ascii=False)}
+
+Dati aggiuntivi utente:
+{json.dumps(user_additional_data or {}, ensure_ascii=False)}
+
+Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
+"""
+        raw_ollama = _call_ollama_copywriting(prompt)
+        if raw_ollama and isinstance(raw_ollama.get("instructions"), list):
+            for item in raw_ollama.get("instructions", []):
+                sanitized = sanitize_rewrite_instruction(item)
+                if sanitized:
+                    ollama_instructions.append(sanitized)
+                    section_buckets.setdefault(str(sanitized.get("section") or "profile"), []).append({
+                        "target_section": str(sanitized.get("section") or "profile"),
+                        "action": "replace",
+                        "old_text_hint": str(sanitized.get("original") or "")[:250],
+                        "new_text": str(sanitized.get("replacement") or "")[:900],
+                        "used_existing_evidence": True,
+                        "forbidden_added_claims": [],
+                    })
+        elif raw_ollama is not None:
+            print("OLLAMA COPYWRITING - invalid JSON, using local fallback")
+
+    if not ollama_instructions:
+        print("OLLAMA COPYWRITING - unavailable, using local fallback")
+
+    generated_by_section: Dict[str, int] = {}
+    for section_key, items in section_buckets.items():
+        generated_by_section[section_key] = len(items)
+        for item in items:
+            print(f"TARGETED COPYWRITING - generated instruction: section={section_key}, replacement={shorten(str(item.get('new_text') or ''), 140)}")
+
+    def _merge_unique_lines(*chunks: str) -> str:
+        lines: List[str] = []
+        seen_lines = set()
+        for chunk in chunks:
+            for raw_line in str(chunk or "").splitlines():
+                line = clean_line(raw_line)
+                if not line:
+                    continue
+                marker = normalize(line)
+                if marker in seen_lines:
+                    continue
+                seen_lines.add(marker)
+                lines.append(line)
+        return "\n".join(lines).strip()
+
+    if "profile" in section_buckets:
+        before_profile = sections.get("profile", "")
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["profile"]]
+        after_profile = strip_section_titles(_merge_unique_lines(profile_rewrite(before_profile, parsed, target), *proposed_texts))
+        print(f"OPTIMIZE DEBUG - profile rewrite before: {shorten(before_profile, 160)}")
+        print(f"OPTIMIZE DEBUG - profile rewrite after: {shorten(after_profile, 220)}")
+        if after_profile:
+            sections["profile"] = after_profile
+
+    if "experience" in section_buckets:
+        base = experience_rewrite(sections.get("experience", ""), target)
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["experience"]]
+        merged_experience = strip_section_titles(_merge_unique_lines(base, *proposed_texts))
+        if merged_experience:
+            sections["experience"] = merged_experience
+
+    if "projects" in section_buckets:
+        base = projects_rewrite(sections.get("projects", ""), target)
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["projects"]]
+        merged_projects = strip_section_titles(_merge_unique_lines(base, *proposed_texts))
+        if merged_projects:
+            sections["projects"] = merged_projects
+
+    if "education" in section_buckets:
+        base = education_rewrite(sections.get("education", ""), parsed, target)
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["education"]]
+        merged_education = strip_section_titles(_merge_unique_lines(base, *proposed_texts))
+        if merged_education:
+            sections["education"] = merged_education
+
+    if any(key in section_buckets for key in ("skills", "hard_skills", "soft_skills")):
+        current = sections.get("hard_skills", "")
+        incoming = []
+        for key in ("skills", "hard_skills", "soft_skills"):
+            incoming.extend([str(item.get("new_text") or "") for item in section_buckets.get(key, [])])
+        incoming_text = _merge_unique_lines(*incoming)
+        if incoming_text:
+            existing_terms = extract_skill_terms(current)
+            incoming_terms = extract_skill_terms(incoming_text)
+            merged_terms = unique([*existing_terms, *incoming_terms, *[clean_line(line) for line in incoming_text.splitlines() if clean_line(line)]])
+            sections["hard_skills"] = group_skills(merged_terms) or incoming_text
 
     confirmed = (user_additional_data or {}).get("confirmed_skills", [])
     confirmed_names: List[str] = []
@@ -550,4 +830,6 @@ def build_optimized_cv_text(cv_text: str, accepted_suggestions: Any, user_additi
         else:
             heading = CANONICAL_TO_HEADING.get(key, key.upper())
             rows.append(f"{heading}\n{text}")
-    return "\n\n".join(rows).strip()
+    optimized_text = "\n\n".join(rows).strip()
+    print(f"OPTIMIZE DEBUG - generated instructions by target_section: {generated_by_section}")
+    return optimized_text
