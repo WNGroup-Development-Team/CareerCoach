@@ -487,20 +487,35 @@ def profile_rewrite(original: str, parsed: ParsedCV, target: Dict[str, Any]) -> 
         if normalize(skill) in normalize(cv_all):
             present.append(skill)
     present = unique(present)[:7]
+    
+    target_keywords = unique([
+        *(target.get("hard_skills", [])),
+        *(target.get("tools", [])),
+        *(target.get("keywords", [])),
+    ])
+    target_keywords = [normalize(k) for k in target_keywords if len(normalize(k)) > 2]
+    if not target_keywords:
+        target_keywords = ["gestione", "sviluppo", "analisi", "team", "progetto", "design", "coordinamento"]
+
     projects = []
     for key in ("experience", "projects", "education"):
         snippet = parsed.sections.get(key, "")
-        if snippet and any(token in normalize(snippet) for token in ("python", "sql", "rag", "chatbot", "clustering", "big data", "machine learning", "analisi dati", "transazioni", "documenti")):
+        if snippet and any(token in normalize(snippet) for token in target_keywords):
             projects.append(shorten(clean_line(snippet), 120))
     projects = unique(projects)[:2]
     company_part = f" per {company}" if company else ""
     skills_part = f" Competenze chiave: {', '.join(present)}." if present else ""
     projects_part = f" Esperienze e progetti pertinenti: {'; '.join(projects)}." if projects else ""
+    
+    family = target.get("family") or infer_role_family(role)
+    context_type = "data-driven" if family in ["data analyst", "data scientist"] else "innovativi e strutturati"
+    quality_type = "attenzione alla qualità del dato" if family in ["data analyst", "data scientist"] else "attenzione ai dettagli"
+
     print(f"OPTIMIZE DEBUG - profile rewrite before: {shorten(original, 200)}")
     profile_text = (
-        f"{role} con formazione coerente e obiettivo di contribuire in contesti data-driven{company_part}."
+        f"{role.capitalize()} con formazione coerente e obiettivo di contribuire in contesti {context_type}{company_part}."
         f"{skills_part}{projects_part}"
-        f" Obiettivo professionale: portare competenze tecniche, attenzione alla qualità del dato e collaborazione."
+        f" Obiettivo professionale: portare competenze mirate, {quality_type} e collaborazione nel team."
     )
     print(f"OPTIMIZE DEBUG - profile rewrite after: {shorten(profile_text, 200)}")
     return strip_section_titles(profile_text)

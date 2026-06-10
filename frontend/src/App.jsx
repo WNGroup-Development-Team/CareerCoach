@@ -3,6 +3,7 @@ import "./App.css";
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
 import PersonalizeExperience from "./PersonalizeExperience";
+import TagInput from "./TagInput";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
@@ -2446,6 +2447,35 @@ function App() {
   };
 
   useEffect(() => {
+    if (cvOptimizationStage === 2 && cvOptimizationAnalysis?.suggested_skills) {
+      setCvAdditionalData((current) => {
+        // Only pre-fill if the user hasn't already modified the fields
+        if (current.technical_skills || current.soft_skills || current.tools) {
+          return current;
+        }
+
+        const suggested = cvOptimizationAnalysis.suggested_skills;
+        
+        // Extract names from suggested arrays, which might be objects {name: "Skill", status: "to_confirm"} or strings
+        const extractNames = (items) => {
+          if (!Array.isArray(items)) return "";
+          return items
+            .map(item => typeof item === "string" ? item : item.name)
+            .filter(Boolean)
+            .join(", ");
+        };
+
+        return {
+          ...current,
+          technical_skills: extractNames(suggested.hard_skills),
+          soft_skills: extractNames(suggested.soft_skills),
+          tools: extractNames(suggested.tools),
+        };
+      });
+    }
+  }, [cvOptimizationStage, cvOptimizationAnalysis]);
+
+  useEffect(() => {
     if (step !== "gym" || !userId || history.length > 0) {
       return;
     }
@@ -4259,18 +4289,39 @@ function App() {
               <h3>Informazioni extra</h3>
             </div>
 
+            <TagInput
+              label="Hard Skills"
+              placeholder="Es. Python, Data Analysis, SQL..."
+              value={cvAdditionalData.technical_skills || ""}
+              onChange={(value) => updateCvAdditionalData("technical_skills", value)}
+            />
+
+            <TagInput
+              label="Soft Skills"
+              placeholder="Es. Problem Solving, Teamwork..."
+              value={cvAdditionalData.soft_skills || ""}
+              onChange={(value) => updateCvAdditionalData("soft_skills", value)}
+            />
+
+            <TagInput
+              label="Parole Chiave / Tool"
+              placeholder="Es. Jira, SCRUM, B2B..."
+              value={cvAdditionalData.tools || ""}
+              onChange={(value) => updateCvAdditionalData("tools", value)}
+            />
+
             <label
               className={[
                 "cv-additional-field",
                 cvFieldErrors.additional.additional_notes ? "has-error" : "",
               ].filter(Boolean).join(" ")}
             >
-              <span>Vuoi aggiungere qualcosa?</span>
+              <span>Vuoi aggiungere altre note generali?</span>
               <textarea
                 value={cvAdditionalData.additional_notes}
                 onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
                 placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
-                rows={5}
+                rows={4}
               />
               <small>
                 Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
