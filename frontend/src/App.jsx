@@ -1842,7 +1842,11 @@ function App() {
       if (!response.ok) {
         const detail = typeof data.detail === "string"
           ? data.detail
-          : data.detail?.message || "Errore nell'analisi del CV.";
+          : data.detail?.message
+            || data.detail?.reason
+            || data.detail?.error
+            || (data.detail ? JSON.stringify(data.detail) : null)
+            || "Errore nell'analisi del CV.";
         setError(detail);
         return;
       }
@@ -1978,7 +1982,7 @@ function App() {
           acceptedSkillConfirmations: confirmedSkillPayload,
           rejectedSkillConfirmations: rejectedSkillPayload,
         })
-      }, 210000);
+      }, 420000);
 
       const responseText = await response.text();
       let data = {};
@@ -2684,21 +2688,48 @@ function App() {
       message: "Validazione dei dati in corso...",
     }));
 
-    const response = await fetchWithTimeout(`${API_URL}/job/validate`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        description: personalizeForm.goal.trim(),
-        company: personalizeForm.company.trim(),
-        role: personalizeForm.role.trim(),
-        role_level: personalizeForm.role_level.trim(),
-        sector: personalizeForm.sector.trim(),
-        link: personalizeForm.link.trim(),
-      })
-    }, 30000);
-    const data = await response.json();
+    let response;
+    try {
+      response = await fetchWithTimeout(`${API_URL}/job/validate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          description: personalizeForm.goal.trim(),
+          company: personalizeForm.company.trim(),
+          role: personalizeForm.role.trim(),
+          role_level: personalizeForm.role_level.trim(),
+          sector: personalizeForm.sector.trim(),
+          link: personalizeForm.link.trim(),
+        })
+      }, 30000);
+    } catch (err) {
+      console.error(err);
+      setJobValidation({
+        status: "invalid",
+        errors: {},
+        warnings: [],
+        message: err?.name === "AbortError"
+          ? "La validazione dei dati sta impiegando troppo tempo. Riprova."
+          : "Errore di connessione al backend durante la validazione. Controlla che FastAPI sia avviato.",
+      });
+      return null;
+    }
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (err) {
+      console.error(err);
+      setJobValidation({
+        status: "invalid",
+        errors: {},
+        warnings: [],
+        message: "Il backend ha risposto ma non ha restituito un JSON valido.",
+      });
+      return null;
+    }
 
     if (!response.ok || !data.is_valid) {
       const detail = data.detail && typeof data.detail === "object" ? data.detail : data;
@@ -2823,6 +2854,7 @@ function App() {
   const cvStrategyTargetRole = cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "ruolo target";
   const cvStrategyTargetCompany = cvOptimizationAnalysis?.target?.company || company || "azienda target";
   const cvStrategyOverallScore = cvOptimizationAnalysis?.overall_score || cvOptimizationAnalysis?.score || 0;
+  const cvStrategyScoreExplanation = cvOptimizationAnalysis?.score_explanation || null;
   const cvStrategyScoreItems = [
     { label: "Generale", value: cvStrategyOverallScore },
     { label: "ATS simulato", value: cvOptimizationAnalysis?.ats_score || cvOptimizationAnalysis?.ats_analysis?.ats_score || 0 },
@@ -3906,6 +3938,23 @@ function App() {
             </div>
           </div>
 
+          {cvStrategyScoreExplanation?.summary && (
+            <div className="cv-strategy-section">
+              <div className="cv-strategy-section-title">
+                <span>i</span>
+                <h3>Perché questo punteggio</h3>
+              </div>
+              <p className="cv-strategy-note">{cvStrategyScoreExplanation.summary}</p>
+              {Array.isArray(cvStrategyScoreExplanation.explanation) && cvStrategyScoreExplanation.explanation.length > 0 && (
+                <ul className="cv-score-explanation-list">
+                  {cvStrategyScoreExplanation.explanation.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           {cvOptimizationAnalysis?.ats_analysis && (
             <div className="cv-strategy-section">
               <div className="cv-strategy-section-title">
@@ -4559,6 +4608,9 @@ function App() {
               {cvOptimizationAnalysis?.summary ||
                 "Abbiamo confrontato il tuo CV con ruolo, azienda e dati dell'annuncio per individuare priorita di ottimizzazione."}
             </p>
+            {cvOptimizationAnalysis?.score_explanation?.summary && (
+              <p className="cv-strategy-note">{cvOptimizationAnalysis.score_explanation.summary}</p>
+            )}
           </div>
 
           <div className="cv-strategy-section">

@@ -61,7 +61,9 @@ def test_end_to_end_project_manager():
     
     assert len(hard_skills) >= 3, f"Not enough hard skills: {len(hard_skills)}"
     assert len(soft_skills) >= 3, f"Not enough soft skills: {len(soft_skills)}"
-    assert len(keywords) >= 0, f"Should have keywords: {len(keywords)}"  # Keywords can be 0 for PM
+    assert isinstance(keywords, list), "Keywords should always be returned as a list"
+    assert all(isinstance(keyword, str) and keyword.strip() for keyword in keywords), "Keywords must be non-empty strings"
+    assert len(keywords) <= 10, f"Too many keywords returned: {len(keywords)}"
     
     print("\n✓ PASSED: Project Manager generates sufficient suggestions")
 

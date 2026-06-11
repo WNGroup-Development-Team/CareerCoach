@@ -209,6 +209,27 @@ def parse_sections(cv_text: str) -> Dict[str, str]:
             continue
         sections.setdefault(current, []).append(line)
 
+    profile_lines = sections.get("profile", [])
+    education_start = None
+    for index, line in enumerate(profile_lines):
+        plain = norm(line)
+        academic_start = plain.startswith((
+            "universita ", "università ", "university ", "liceo ", "istituto ",
+        ))
+        degree_with_date = (
+            any(term in plain for term in ("laurea triennale", "laurea magistrale", "master ", "diploma "))
+            and bool(re.search(r"\b(?:19|20)\d{2}\b", line))
+        )
+        if academic_start or degree_with_date:
+            education_start = index
+            break
+    if education_start is not None:
+        sections["profile"] = profile_lines[:education_start]
+        sections["education"] = [
+            *profile_lines[education_start:],
+            *sections.get("education", []),
+        ]
+
     result: Dict[str, str] = {}
     for key, raw_lines in sections.items():
         filtered: List[str] = []
@@ -216,11 +237,18 @@ def parse_sections(cv_text: str) -> Dict[str, str]:
             plain = norm(line)
             if key not in {"header", "contacts"} and looks_like_contact(line):
                 continue
-            if key in {"hard_skills", "soft_skills"} and (
-                heading_key(line)
-                or any(marker in plain for marker in ["obiettivo", "formazione", "esperienza", "progetti", "lingue", "comunicazione"])
-            ):
-                continue
+            if key in {"hard_skills", "soft_skills"}:
+                foreign_section = (
+                    heading_key(line)
+                    or any(marker in plain for marker in [
+                        "obiettivo", "formazione", "esperienza", "progetti", "lingue",
+                        "comunicazione", "universita", "università", "laurea", "diploma",
+                        "tirocinio", "sono una ", "sono un ",
+                    ])
+                )
+                prose_line = len(plain.split()) > 12 and not any(separator in line for separator in [",", ":", "|", "•", "·"])
+                if foreign_section or prose_line:
+                    continue
             if clean_line(line) in {"/", "\\", "-", "•"}:
                 continue
             filtered.append(line)
@@ -366,81 +394,6 @@ def select_relevant_experience(experience_text: str, target: Dict[str, str]) -> 
     return best or compact(experience_text, 850)
 
 
-def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:
-    cv_text = str(evaluation.get("cv_text") or "")
-    target = target_from_evaluation(evaluation)
-    role = target["role"] or "ruolo target"
-    company = target["company"]
-    sections = parse_sections(cv_text)
-    signals = present_signals(sections)
-    suggestions: List[Dict[str, Any]] = []
-
-    profile = sections.get("profile", "")
-    if profile:
-        company_part = f" presso {company}" if company else ""
-        signal_part = f", valorizzando competenze in {', '.join(signals[:5])}" if signals else ""
-        proposed = (
-            f"{profile.rstrip('.')}. Obiettivo professionale: contribuire a iniziative coerenti con il ruolo di {role}{company_part}"
-            f"{signal_part}, con un approccio orientato ad analisi, progetti, collaborazione e risultati concreti."
-        )
-        item = make_action("profile", "PROFILO", "Riscrivi il profilo in funzione del ruolo", profile, proposed, "Rende il profilo più mirato al ruolo usando solo informazioni già presenti nel CV.", "alto", 1, [role])
-        if item:
-            suggestions.append(item)
-
-    hard = sections.get("hard_skills", "")
-    skills = extract_skills(hard)
-    grouped = group_skills(skills)
-    if hard and grouped:
-        item = make_action("skills", "HARD SKILLS", "Riorganizza le competenze tecniche già presenti", hard, grouped, "Rende le competenze più leggibili per recruiter e ATS senza aggiungere competenze non confermate.", "alto", 2, skills)
-        if item:
-            suggestions.append(item)
-
-    exp = sections.get("experience", "")
-    if exp:
-        selected = select_relevant_experience(exp, target)
-        bullets = []
-        for sentence in re.split(r"(?<=[.!?])\s+", compact(selected, 850)):
-            sentence = sentence.strip().rstrip(".")
-            if sentence:
-                bullets.append(f"- {sentence}.")
-        proposed = f"Esperienza rilevante per il ruolo di {role}:\n" + "\n".join(bullets[:5])
-        item = make_action("experience", "ESPERIENZE PROFESSIONALI", "Valorizza l’esperienza più rilevante", selected, proposed, "Trasforma l’esperienza in bullet leggibili e orientati al ruolo, mantenendo i fatti presenti.", "alto", 3, [])
-        if item:
-            suggestions.append(item)
-
-    projects = sections.get("projects", "")
-    if projects:
-        project_lines = []
-        for part in re.split(r"\n|·|•", projects):
-            part = clean_line(part).strip(".")
-            if len(norm(part).split()) >= 5 and part not in {"/", "\\"}:
-                project_lines.append(f"- {part}.")
-        proposed = f"Progetti rilevanti per il ruolo di {role}:\n" + "\n".join(unique(project_lines)[:7])
-        item = make_action("project", "PROGETTI", "Valorizza i progetti più coerenti", projects, proposed, "Rende i progetti più chiari e collegati alla candidatura senza inventare dettagli.", "medio", 4, [])
-        if item:
-            suggestions.append(item)
-
-    soft = sections.get("soft_skills", "")
-    if soft:
-        soft_items = unique(re.split(r"[,;|•·\n]+", soft))
-        if len(soft_items) >= 2:
-            proposed = "Soft skills: " + ", ".join(soft_items[:8])
-            item = make_action("soft_skills", "SOFT SKILLS", "Rendi più chiara la sezione soft skills", soft, proposed, "Mantiene le soft skill reali e le presenta in modo più pulito.", "medio", 5, soft_items)
-            if item:
-                suggestions.append(item)
-
-    clean: List[Dict[str, Any]] = []
-    seen = set()
-    for item in sorted(suggestions, key=lambda x: int(x.get("priority", 99))):
-        if is_bad_suggestion(item):
-            continue
-        key = (item["section"], norm(item["original_text"])[:180], norm(item["proposed_text"])[:180])
-        if key not in seen:
-            seen.add(key)
-            clean.append(item)
-    return clean[:8]
-
-
 def is_bad_suggestion(item: Dict[str, Any]) -> bool:
     section = norm(item.get("section") or item.get("category") or "")
     category = norm(item.get("category") or "")
@@ -471,8 +424,10 @@ def sanitize_accepted_cv_suggestions(suggestions: Any) -> List[Dict[str, Any]]:
     seen = set()
     for item in suggestions:
         if not isinstance(item, dict) or item.get("type") != "actionableEdit":
+            print(f"[safe_cv_guard] suggestion scartato: tipo non valido o non actionableEdit -> {item.get('id') if isinstance(item, dict) else type(item).__name__}")
             continue
         if is_bad_suggestion(item):
+            print(f"[safe_cv_guard] suggestion scartato: is_bad_suggestion -> {item.get('id') or item.get('title') or item.get('section')}")
             continue
         key = (
             norm(item.get("section") or item.get("category") or ""),
@@ -480,6 +435,7 @@ def sanitize_accepted_cv_suggestions(suggestions: Any) -> List[Dict[str, Any]]:
             norm(item.get("proposed_text") or item.get("replacement") or "")[:180],
         )
         if key in seen:
+            print(f"[safe_cv_guard] suggestion scartato: duplicato -> {item.get('id') or item.get('title') or item.get('section')}")
             continue
         seen.add(key)
         clean.append(item)
@@ -547,6 +503,62 @@ ROLE_MATCHER_LIBRARY = {
         "languages": ["Python", "Java", "JavaScript", "C++"],
         "soft_skills": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione"],
     },
+    "frontend developer": {
+        "role_terms": ["frontend developer", "front end", "frontend", "ui", "ux", "web developer", "web design"],
+        "hard_skills": ["HTML/CSS", "JavaScript", "TypeScript", "Responsive design", "Accessibility", "Design systems", "User interface"],
+        "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+        "languages": ["JavaScript", "TypeScript", "React"],
+        "soft_skills": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
+    },
+    "qa tester": {
+        "role_terms": ["qa", "quality assurance", "tester", "software tester", "test engineer", "testing"],
+        "hard_skills": ["Test case", "Test plan", "Bug tracking", "Regression testing", "Manual testing", "Automated testing"],
+        "tools": ["Jira", "TestRail", "Selenium", "Postman", "Git"],
+        "languages": ["Python", "JavaScript", "SQL"],
+        "soft_skills": ["Precisione", "Problem solving", "Collaborazione", "Attenzione ai dettagli"],
+    },
+    "marketing specialist": {
+        "role_terms": ["marketing", "digital marketing", "content marketing", "seo", "sem", "growth"],
+        "hard_skills": ["Content strategy", "Campaign management", "SEO", "SEM", "Analytics", "Copywriting", "Brand positioning"],
+        "tools": ["Google Analytics", "Meta Ads", "Google Ads", "Mailchimp", "HubSpot"],
+        "languages": [],
+        "soft_skills": ["Creatività", "Comunicazione", "Problem solving", "Organizzazione", "Collaborazione"],
+    },
+    "sales specialist": {
+        "role_terms": ["sales", "commerciale", "business development", "account manager", "account", "vendite"],
+        "hard_skills": ["Lead generation", "Pipeline management", "Negotiation", "CRM", "Forecasting", "Account management"],
+        "tools": ["Salesforce", "HubSpot", "Pipedrive", "Excel", "LinkedIn Sales Navigator"],
+        "languages": [],
+        "soft_skills": ["Comunicazione", "Negoziazione", "Orientamento al risultato", "Resilienza", "Collaborazione"],
+    },
+    "hr specialist": {
+        "role_terms": ["hr", "human resources", "recruiter", "talent acquisition", "people operations"],
+        "hard_skills": ["Selezione del personale", "Colloqui", "Employer branding", "Onboarding", "Gestione talenti", "Policy HR"],
+        "tools": ["ATS", "LinkedIn Recruiter", "Excel", "Workday", "BambooHR"],
+        "languages": [],
+        "soft_skills": ["Comunicazione", "Ascolto", "Empatia", "Organizzazione", "Discrezione"],
+    },
+    "finance analyst": {
+        "role_terms": ["finance", "financial", "contabile", "controller", "accounting", "financial analyst"],
+        "hard_skills": ["Analisi finanziaria", "Budgeting", "Forecasting", "Reporting", "Contabilità", "KPI", "Excel avanzato"],
+        "tools": ["Excel", "SAP", "Power BI", "Tableau", "ERP"],
+        "languages": [],
+        "soft_skills": ["Precisione", "Pensiero analitico", "Organizzazione", "Problem solving", "Affidabilità"],
+    },
+    "operations specialist": {
+        "role_terms": ["operations", "operation", "coordinator", "coordinatore", "amministrativo", "back office", "office"],
+        "hard_skills": ["Process management", "Pianificazione", "Reportistica", "Gestione documentale", "Workflow", "KPI"],
+        "tools": ["Excel", "Notion", "Trello", "Jira", "Google Workspace"],
+        "languages": [],
+        "soft_skills": ["Organizzazione", "Precisione", "Comunicazione", "Problem solving", "Affidabilità"],
+    },
+    "consultant": {
+        "role_terms": ["consultant", "consulente", "advisory", "strategy", "business consultant"],
+        "hard_skills": ["Analisi dei processi", "Problem solving", "Stakeholder management", "Reporting", "Pianificazione"],
+        "tools": ["Excel", "PowerPoint", "Power BI", "Miro", "Jira"],
+        "languages": [],
+        "soft_skills": ["Comunicazione", "Pensiero critico", "Collaborazione", "Problem solving", "Adattabilità"],
+    },
 }
 
 
@@ -555,6 +567,22 @@ def matcher_role_family(role: str, description: str = "") -> str:
     for family, payload in ROLE_MATCHER_LIBRARY.items():
         if any(norm(term) in target for term in payload.get("role_terms", [])):
             return family
+    if any(term in target for term in ["ui", "ux", "design", "designer", "graphic", "interaction"]):
+        return "frontend developer"
+    if any(term in target for term in ["qa", "test", "tester", "quality assurance", "validation"]):
+        return "qa tester"
+    if any(term in target for term in ["marketing", "seo", "sem", "content", "growth"]):
+        return "marketing specialist"
+    if any(term in target for term in ["sales", "vendit", "commercial", "business development", "account"]):
+        return "sales specialist"
+    if any(term in target for term in ["human resources", "hr", "recruit", "talent acquisition", "people"]):
+        return "hr specialist"
+    if any(term in target for term in ["finance", "financial", "contabil", "controller", "accounting"]):
+        return "finance analyst"
+    if any(term in target for term in ["operations", "operation", "coordin", "amministr", "back office", "office"]):
+        return "operations specialist"
+    if any(term in target for term in ["consult", "advisory", "strategy", "strategic"]):
+        return "consultant"
     return ""
 
 
@@ -562,6 +590,23 @@ def matcher_library_for(role: str, description: str = "") -> Dict[str, List[str]
     family = matcher_role_family(role, description)
     if family:
         return ROLE_MATCHER_LIBRARY[family]
+    normalized = norm(f"{role or ''} {description or ''}")
+    if any(term in normalized for term in ["ui", "ux", "design", "designer", "graphic", "interaction"]):
+        return ROLE_MATCHER_LIBRARY["frontend developer"]
+    if any(term in normalized for term in ["qa", "test", "tester", "quality assurance", "validation"]):
+        return ROLE_MATCHER_LIBRARY["qa tester"]
+    if any(term in normalized for term in ["marketing", "seo", "sem", "content", "growth"]):
+        return ROLE_MATCHER_LIBRARY["marketing specialist"]
+    if any(term in normalized for term in ["sales", "vendit", "commercial", "business development", "account"]):
+        return ROLE_MATCHER_LIBRARY["sales specialist"]
+    if any(term in normalized for term in ["human resources", "hr", "recruit", "talent acquisition", "people"]):
+        return ROLE_MATCHER_LIBRARY["hr specialist"]
+    if any(term in normalized for term in ["finance", "financial", "contabil", "controller", "accounting"]):
+        return ROLE_MATCHER_LIBRARY["finance analyst"]
+    if any(term in normalized for term in ["operations", "operation", "coordin", "amministr", "back office", "office"]):
+        return ROLE_MATCHER_LIBRARY["operations specialist"]
+    if any(term in normalized for term in ["consult", "advisory", "strategy", "strategic"]):
+        return ROLE_MATCHER_LIBRARY["consultant"]
     return {
         "role_terms": [],
         "hard_skills": ["Competenza tecnica principale", "Competenza tecnica secondaria"],
@@ -680,110 +725,6 @@ def _make_matcher_action(
     return payload
 
 
-def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
-    cv_text = str(evaluation.get("cv_text") or "")
-    target = target_from_evaluation(evaluation)
-    role = target.get("role") or "ruolo target"
-    company = target.get("company") or ""
-    sections = parse_sections(cv_text)
-    present_keywords = _supported_role_keywords(cv_text, role)
-    suggestions: List[Dict[str, Any]] = []
-
-    profile = sections.get("profile", "")
-    if profile and not is_bad_profile_text(profile):
-        company_part = f" presso {company}" if company else ""
-        keyword_part = f", valorizzando competenze già presenti come {', '.join(present_keywords[:4])}" if present_keywords else ""
-        proposed = (
-            f"{profile.rstrip('.')}. Profilo orientato al ruolo di {role}{company_part}"
-            f"{keyword_part}, con attenzione a chiarezza, collaborazione e risultati concreti."
-        )
-        item = _make_matcher_action(
-            "profile", "PROFILO", "Rendi il profilo più mirato alla candidatura",
-            profile, proposed,
-            "Adatta il profilo al ruolo usando solo competenze già presenti nel CV.",
-            "alto", 1, [role, *present_keywords[:4]],
-        )
-        if item:
-            suggestions.append(item)
-
-    hard = sections.get("hard_skills", "")
-    skills = unique([*extract_skills(hard), *present_keywords])
-    grouped = group_skills(skills)
-    if hard and grouped:
-        item = _make_matcher_action(
-            "skills", "HARD SKILLS", "Riorganizza le competenze tecniche",
-            hard, grouped,
-            "Presenta le competenze in gruppi leggibili per ATS e recruiter, senza aggiungere skill non supportate.",
-            "alto", 2, skills,
-        )
-        if item:
-            suggestions.append(item)
-
-    exp = sections.get("experience", "")
-    if exp:
-        selected = select_relevant_experience(exp, target)
-        bullets = _compact_to_bullets(selected, 5)
-        proposed = bullets or selected
-        item = _make_matcher_action(
-            "experience", "ESPERIENZE PROFESSIONALI", "Trasforma l’esperienza in bullet più leggibili",
-            selected, proposed,
-            "Rende l’esperienza più chiara e scansionabile, mantenendo i fatti del CV originale.",
-            "alto", 3, present_keywords,
-        )
-        if item:
-            suggestions.append(item)
-
-    projects = sections.get("projects", "")
-    if projects:
-        bullets = _compact_to_bullets(projects, 6)
-        item = _make_matcher_action(
-            "project", "PROGETTI", "Rendi i progetti più chiari",
-            projects, bullets,
-            "Organizza i progetti in righe più leggibili, senza inventare dettagli.",
-            "medio", 4, present_keywords,
-        )
-        if item:
-            suggestions.append(item)
-
-    soft = sections.get("soft_skills", "")
-    if soft:
-        soft_items = unique(re.split(r"[,;|•·\n]+", soft))
-        if len(soft_items) >= 2:
-            proposed = "Soft skills: " + ", ".join(soft_items[:8])
-            item = _make_matcher_action(
-                "soft_skills", "SOFT SKILLS", "Rendi più pulita la sezione soft skills",
-                soft, proposed,
-                "Mantiene le soft skill reali e le mostra in modo più ordinato.",
-                "medio", 5, soft_items,
-            )
-            if item:
-                suggestions.append(item)
-
-    if not suggestions:
-        block = _best_free_text_block(cv_text)
-        if block:
-            bullets = _compact_to_bullets(block, 4)
-            if bullets:
-                item = _make_matcher_action(
-                    "phrases", "ESPERIENZE PROFESSIONALI", "Rendi più leggibile un blocco del CV",
-                    block, bullets,
-                    "Fallback locale: trasforma un blocco già presente in bullet più chiari e compatibili con ATS.",
-                    "medio", 6, present_keywords,
-                )
-                if item:
-                    suggestions.append(item)
-
-    clean: List[Dict[str, Any]] = []
-    seen = set()
-    for item in sorted(suggestions, key=lambda x: int(x.get("priority", 99))):
-        key = (item.get("section"), norm(item.get("original_text") or "")[:200], norm(item.get("proposed_text") or "")[:200])
-        if key in seen:
-            continue
-        seen.add(key)
-        clean.append(item)
-    return clean[:8]
-
-
 def build_matcher_keyword_snapshot(cv_text: str, role: str, description: str = "") -> Dict[str, List[str]]:
     """Small helper for debug/tests: Resume Matcher style present/missing keywords."""
     return {
@@ -839,16 +780,30 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
     target = target_from_evaluation(evaluation)
     role = target.get("role") or "ruolo target"
     company = target.get("company") or ""
+    description = str(target.get("description") or evaluation.get("description") or "")
     sections = parse_sections(cv_text)
     present_keywords = _supported_role_keywords(cv_text, role)
+    missing_keywords = unique([
+        *evaluation.get("missing_keywords", []),
+        *evaluation.get("missing_hard_skills", []),
+        *evaluation.get("missing_soft_skills", []),
+    ])
+    role_family = matcher_role_family(role, description)
+    library = matcher_library_for(role, description)
     suggestions: List[Dict[str, Any]] = []
 
     profile = sections.get("profile", "")
-    if profile and not is_bad_profile_text(profile):
-        kw = f", valorizzando competenze già presenti come {', '.join(present_keywords[:4])}" if present_keywords else ""
+    prefer_operational_sections = role_family in {"data analyst", "data scientist", "project manager", "software engineer", "backend developer", "frontend developer"}
+    if profile and not is_bad_profile_text(profile) and not (prefer_operational_sections and (sections.get("experience") or sections.get("hard_skills"))):
+        role_terms = [term for term in library.get("role_terms", []) if term and term not in present_keywords][:3]
+        role_focus = ", ".join(role_terms[:2]) if role_terms else (role_family or role or "ruolo target")
+        kw = ""
+        if present_keywords or role_terms:
+            useful_terms = unique([*present_keywords[:3], *role_terms[:2]])
+            kw = f", valorizzando competenze già presenti come {', '.join(useful_terms[:4])}"
         proposed = (
             f"{profile.rstrip('.')}. Profilo orientato{_final_role_phrase(role, company)}{kw}, "
-            "con attenzione a chiarezza, collaborazione e risultati concreti."
+            f"con focus su {role_focus} e con attenzione a chiarezza, collaborazione e risultati concreti."
         )
         item = _make_matcher_action(
             "profile", "PROFILO", "Rendi il profilo più mirato alla candidatura",
@@ -860,17 +815,47 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
             suggestions.append(item)
 
     hard = sections.get("hard_skills", "")
-    skills = unique([*extract_skills(hard), *present_keywords])
+    skills = unique([*extract_skills(hard), *present_keywords, *missing_keywords[:3]])
     grouped = group_skills(skills)
     if hard and grouped:
+        grouped_lines = [line.strip() for line in grouped.splitlines() if line.strip()]
+        if role_family in {"data analyst", "project manager", "software engineer", "backend developer", "frontend developer", "data scientist"}:
+            grouped_lines = grouped_lines[:10]
+            if role_family == "data analyst":
+                preferred = [
+                    line for line in grouped_lines
+                    if any(token in line.lower() for token in ["sql", "python", "excel", "power bi", "tableau", "kpi", "dashboard", "report", "analytics", "machine learning"])
+                ]
+                if preferred:
+                    grouped_lines = preferred + [line for line in grouped_lines if line not in preferred]
         item = _make_matcher_action(
             "skills", "HARD SKILLS", "Riorganizza le competenze tecniche",
             hard, grouped,
-            "Presenta le competenze in gruppi leggibili per ATS e recruiter, senza aggiungere skill non supportate.",
+            f"Presenta le competenze in gruppi leggibili per ATS e recruiter, mettendo in primo piano quelle più utili per {role}.",
             "alto", 2, skills,
         )
         if item:
+            if grouped_lines:
+                item["proposed_text"] = "Competenze tecniche:\n" + "\n".join(f"- {line}" for line in grouped_lines)
             suggestions.append(item)
+
+    if missing_keywords and hard:
+        useful_missing = [kw for kw in missing_keywords if kw and normalize_pair_equal(kw, "") is False][:6]
+        if useful_missing:
+            proposed = (
+                "Competenze tecniche da evidenziare solo se già presenti o confermate:\n"
+                + "\n".join(f"- {kw}" for kw in unique(useful_missing)[:6])
+            )
+            item = _make_matcher_action(
+                "skills", "HARD SKILLS", "Allinea le keyword ATS al ruolo",
+                hard,
+                proposed,
+                f"Rende più visibili le keyword richieste per {role} senza inventare competenze nuove.",
+                "medio", 2,
+                unique([*present_keywords, *useful_missing]),
+            )
+            if item:
+                suggestions.append(item)
 
     exp = sections.get("experience", "") or _final_best_block(cv_text)
     if exp:
@@ -903,15 +888,48 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
     if soft:
         soft_items = unique(re.split(r"[,;|•·\n]+", soft))
         if len(soft_items) >= 2:
-            proposed = "Soft skills: " + ", ".join(soft_items[:8])
+            soft_priority_map = {
+                "data analyst": ["Pensiero analitico", "Attenzione ai dettagli", "Comunicazione dei risultati", "Problem solving", "Collaborazione"],
+                "project manager": ["Organizzazione", "Gestione priorità", "Comunicazione", "Leadership", "Negoziazione"],
+                "software engineer": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico"],
+                "backend developer": ["Problem solving", "Precisione", "Collaborazione", "Documentazione tecnica", "Comunicazione tecnica"],
+                "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
+                "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+            }
+            soft_priority = soft_priority_map.get(role_family, [])
+            ordered_soft = unique([*soft_priority, *soft_items, *missing_keywords[:3]])
+            proposed = "Soft skills rilevanti:\n" + "\n".join(
+                f"- {skill.strip().rstrip('.')}"
+                for skill in ordered_soft[:8]
+                if skill.strip()
+            )
             item = _make_matcher_action(
                 "soft_skills", "SOFT SKILLS", "Rendi più pulita la sezione soft skills",
                 soft, proposed,
-                "Mantiene le soft skill reali e le mostra in modo più ordinato.",
+                f"Metti in evidenza le soft skill più utili per {role}, mantenendo solo competenze realmente supportate dal CV.",
                 "medio", 5, soft_items,
             )
             if item:
                 suggestions.append(item)
+
+    if missing_keywords and not any(item.get("category") == "ats_keywords" for item in suggestions):
+        suggested_terms = unique([kw for kw in missing_keywords if kw][:6])
+        if suggested_terms:
+            source_block = sections.get("profile") or sections.get("experience") or sections.get("hard_skills") or _final_best_block(cv_text)
+            if source_block:
+                item = _make_matcher_action(
+                    "ats_keywords", "HARD SKILLS", "Collega il CV alle keyword del ruolo",
+                    source_block,
+                    (
+                        f"Keyword da coprire nel CV per il ruolo di {role}:\n"
+                        + "\n".join(f"- {kw}" for kw in suggested_terms)
+                    ),
+                    f"Mostra al recruiter quali termini del ruolo sono già parzialmente rappresentati o da confermare per {role}.",
+                    "medio", 6,
+                    suggested_terms,
+                )
+                if item:
+                    suggestions.append(item)
 
     clean: List[Dict[str, Any]] = []
     seen = set()
@@ -928,4 +946,60 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
         clean.append(item)
         if len(clean) >= 8:
             break
+    if clean:
+        return clean
+
+    # Fallback finale: se le regole sopra non trovano nulla, genera almeno una
+    # modifica conservativa a partire dalla prima sezione utile del CV.
+    fallback_sources = [
+        ("profile", "CHI SONO", "Rendi il profilo più mirato alla candidatura", "Adatta il profilo al ruolo usando solo informazioni già presenti nel CV."),
+        ("experience", "ESPERIENZE PROFESSIONALI", "Rendi più chiara l’esperienza più rilevante", "Riscrivi la sezione in modo più leggibile e orientato al ruolo, senza aggiungere fatti nuovi."),
+        ("projects", "PROGETTI", "Rendi i progetti più leggibili", "Organizza i progetti in modo più chiaro, mantenendo solo informazioni già presenti."),
+        ("hard_skills", "HARD SKILLS", "Riorganizza le competenze tecniche", "Raggruppa le competenze in blocchi più leggibili per ATS e recruiter."),
+        ("soft_skills", "SOFT SKILLS", "Rendi più pulita la sezione soft skills", "Metti in evidenza le soft skill già presenti in modo più chiaro."),
+        ("education", "FORMAZIONE", "Rendi la formazione più leggibile", "Riformula la sezione in modo più ordinato, senza aggiungere dati nuovi."),
+    ]
+    for section_key, section_name, title, reason in fallback_sources:
+        original = sections.get(section_key, "")
+        if not original.strip():
+            continue
+        if section_key == "hard_skills":
+            proposed = _skills_rewrite(original, {"role": role, "company": company, "role_family": role_family})
+        elif section_key == "soft_skills":
+            soft_values = [item.strip() for item in re.split(r"[,;|•·\n]+", original) if item.strip()]
+            if soft_values:
+                preferred = {
+                    "data analyst": ["Pensiero analitico", "Attenzione ai dettagli", "Comunicazione", "Problem solving", "Collaborazione"],
+                    "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+                    "project manager": ["Organizzazione", "Gestione priorità", "Comunicazione", "Leadership", "Negoziazione"],
+                    "software engineer": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico"],
+                    "backend developer": ["Problem solving", "Precisione", "Collaborazione", "Documentazione tecnica", "Comunicazione tecnica"],
+                    "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
+                    "game design": ["Creatività", "Collaborazione", "Problem solving", "Iterazione su feedback", "Comunicazione"],
+                }.get(role_family, [])
+                proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in unique([*preferred, *soft_values])[:8])
+            else:
+                proposed = ""
+        elif section_key == "experience":
+            proposed = _experience_rewrite(original, {"role": role, "company": company})
+        elif section_key == "projects":
+            proposed = _projects_rewrite(original, {"role": role, "company": company})
+        elif section_key == "education":
+            proposed = _education_rewrite(original, {"role": role}, cv_text)
+        else:
+            proposed = _profile_rewrite(original, {"role": role, "company": company}, cv_text)
+
+        item = _make_matcher_action(
+            section_key,
+            section_name,
+            title,
+            original,
+            proposed or _shorten_cv_text(original, 500),
+            reason,
+            "medio" if section_key in {"experience", "projects"} else "basso",
+            99,
+            present_keywords[:4],
+        )
+        if item and suggestion_targets_current_cv(item, cv_text):
+            return [item]
     return clean

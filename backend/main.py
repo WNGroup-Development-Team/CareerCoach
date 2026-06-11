@@ -57,7 +57,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 #GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 LLM_PROVIDER = ENV_FILE_VALUES.get("LLM_PROVIDER", "groq").strip().lower()
-OLLAMA_TEXT_MODEL = ENV_FILE_VALUES.get("OLLAMA_TEXT_MODEL", "qwen2.5:3b")
+OLLAMA_TEXT_MODEL = ENV_FILE_VALUES.get("OLLAMA_TEXT_MODEL", "gemma3:4b")
 OLLAMA_TEXT_TIMEOUT = int(ENV_FILE_VALUES.get("OLLAMA_TEXT_TIMEOUT", "120"))
 OLLAMA_TEXT_NUM_CTX = int(ENV_FILE_VALUES.get("OLLAMA_TEXT_NUM_CTX", "8192"))
 OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
@@ -66,7 +66,7 @@ OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip(
 OLLAMA_VISION_MODEL = ENV_FILE_VALUES.get("OLLAMA_VISION_MODEL", "moondream")
 OPENAI_VISION_MODEL = ENV_FILE_VALUES.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip() or None
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173")
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -88,9 +88,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
-CV_LLM_ENABLED = _env_bool("CV_LLM_ENABLED", default=(LLM_PROVIDER == "ollama"))
-CV_REWRITE_LLM_ENABLED = _env_bool("CV_REWRITE_LLM_ENABLED", default=(LLM_PROVIDER == "ollama"))
-CV_QUALITY_LLM_ENABLED = _env_bool("CV_QUALITY_LLM_ENABLED", default=(LLM_PROVIDER == "ollama"))
+CV_LLM_ENABLED = _env_bool("CV_LLM_ENABLED", default=True)
+CV_REWRITE_LLM_ENABLED = _env_bool("CV_REWRITE_LLM_ENABLED", default=True)
+CV_QUALITY_LLM_ENABLED = _env_bool("CV_QUALITY_LLM_ENABLED", default=True)
 OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL", "http://localhost:8000")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -1124,6 +1124,243 @@ def call_groq(
     return _call_groq_impl(prompt, temperature, max_tokens, timeout, json_mode)
 
 
+def call_structured_llm(
+    prompt: str,
+    context: str = "",
+    temperature: float = 0.2,
+    max_tokens: int = 1200,
+    timeout: int = 25,
+    preferred_order: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Structured JSON call with local-first fallback.
+    Groq can reject strict JSON on some prompts; this helper retries with Ollama
+    and always routes the result through extract_json for normalization.
+    """
+    last_error: Optional[Exception] = None
+    order = [item for item in (preferred_order or ["groq", "ollama"]) if item in {"groq", "ollama"}]
+    attempts = []
+    for source in order:
+        if source == "groq":
+            attempts.append(("groq-json", lambda: call_groq(prompt, temperature=temperature, max_tokens=max_tokens, timeout=timeout, json_mode=True)))
+            attempts.append(("groq-plain", lambda: call_groq(prompt, temperature=temperature, max_tokens=max_tokens, timeout=timeout, json_mode=False)))
+        elif source == "ollama":
+            attempts.append(("ollama", lambda: call_ollama(prompt, temperature=temperature, max_tokens=max_tokens, timeout=timeout, json_mode=True)))
+    for source, runner in attempts:
+        try:
+            return extract_json(runner(), context=context or source)
+        except Exception as exc:
+            last_error = exc
+            print(f"Structured LLM fallback from {source} for {context or 'generic'}: {exc}")
+    raise RuntimeError(f"Nessun modello strutturato disponibile per {context or 'generic'}: {last_error}")
+
+
+def call_analysis_llm(
+    prompt: str,
+    context: str = "",
+    temperature: float = 0.15,
+    max_tokens: int = 1100,
+    timeout: int = 45,
+) -> Dict[str, Any]:
+    return call_structured_llm(
+        prompt,
+        context=context,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        preferred_order=["groq", "ollama"],
+    )
+
+
+def call_lightweight_analysis_llm(
+    prompt: str,
+    context: str = "",
+    temperature: float = 0.1,
+    max_tokens: int = 700,
+    timeout: int = 35,
+) -> Dict[str, Any]:
+    return call_structured_llm(
+        prompt,
+        context=context,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        preferred_order=["ollama", "groq"],
+    )
+
+
+def build_cv_analysis_prompt(
+    company: str,
+    role: str,
+    description: str,
+    required_skills: str,
+    link: str,
+    sources_prompt: str,
+    ats_analysis: Dict[str, Any],
+    cv_text: str,
+    compact: bool = False,
+) -> str:
+    sources_excerpt = sources_prompt[:500] if compact else sources_prompt[:900]
+    ats_excerpt = (
+        json.dumps(ats_analysis, ensure_ascii=False, separators=(",", ":"))[:450]
+        if compact
+        else json.dumps(ats_analysis, ensure_ascii=False, indent=2)[:900]
+    )
+    cv_excerpt = cv_text[:900] if compact else cv_text[:1400]
+    if compact:
+        return f"""
+Sei un recruiter senior. Restituisci SOLO JSON valido.
+
+Valuta il CV per il ruolo {role or "non specificato"} presso {company or "azienda non specificata"}.
+
+Descrizione: {description[:450]}
+Competenze richieste: {required_skills or "Non specificate"}
+Link: {link or "Non inserito"}
+
+ATS:
+{ats_excerpt}
+
+CV:
+{cv_excerpt}
+
+Schema:
+{{
+  "overall_score": 0,
+  "ats_score": 0,
+  "job_match_score": 0,
+  "role_match_score": 0,
+  "company_fit_score": 0,
+  "clarity_score": 0,
+  "completeness_score": 0,
+  "strengths": ["..."],
+  "weaknesses": ["..."],
+  "present_keywords": ["..."],
+  "missing_keywords": ["..."],
+  "sections_to_improve": [{{"section":"...","suggestion":"..."}}],
+  "questions_for_user": [{{"question":"...","reason":"...","category":"..."}}],
+  "summary": "..."
+}}
+
+Regole:
+- Italiano.
+- Solo JSON.
+- Frasi brevi.
+"""
+    return f"""
+Sei un recruiter senior. Restituisci SOLO JSON valido.
+
+Valuta il CV rispetto alla candidatura.
+
+Contesto:
+- Azienda: {company}
+- Ruolo: {role}
+- Descrizione: {description}
+- Competenze richieste: {required_skills or "Non specificate"}
+- Link: {link or "Non inserito"}
+
+Fonti:
+{sources_excerpt}
+
+ATS preliminare:
+{ats_excerpt}
+
+CV:
+{cv_excerpt}
+
+Schema minimo:
+{{
+  "overall_score": 0,
+  "ats_score": 0,
+  "job_match_score": 0,
+  "role_match_score": 0,
+  "company_fit_score": 0,
+  "clarity_score": 0,
+  "completeness_score": 0,
+  "strengths": ["..."],
+  "weaknesses": ["..."],
+  "present_keywords": ["..."],
+  "missing_keywords": ["..."],
+  "sections_to_improve": [{{"section": "...", "suggestion": "..."}}],
+  "questions_for_user": [{{"question": "...", "reason": "...", "category": "..."}}],
+  "summary": "..."
+}}
+
+Regole:
+- Italiano, frasi brevi, niente testo fuori dal JSON.
+- Usa punteggi conservativi.
+"""
+
+def build_cv_rewrite_prompt(
+    cv_text: str,
+    company: str,
+    role: str,
+    goal: str,
+    job_link: str,
+    sources: List[Dict[str, str]],
+    cv_evaluation: Optional[Any] = None,
+    strategic_analysis: Optional[Any] = None,
+    recommended_adaptations: Optional[Any] = None,
+    accepted_coach_suggestions: Optional[List[Dict[str, Any]]] = None,
+    clean_additional_data: Optional[Dict[str, Any]] = None,
+) -> str:
+    compact_suggestions = []
+    for item in (accepted_coach_suggestions or [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        compact_suggestions.append({
+            "section": str(item.get("section") or item.get("category") or "").strip(),
+            "title": str(item.get("title") or item.get("message") or "").strip()[:90],
+            "proposed_text": str(item.get("proposed_text") or item.get("replacement") or "").strip()[:280],
+            "keywords_added": [str(x).strip() for x in (item.get("keywords_added") or [])[:5] if str(x).strip()],
+        })
+    return f"""
+Sei un resume editor. Restituisci SOLO JSON valido.
+
+Obiettivo: riscrivi il CV per il ruolo indicato usando solo contenuti presenti.
+
+Contesto:
+- Azienda: {company or "Non specificata"}
+- Ruolo: {role or "Non specificato"}
+- Obiettivo: {goal or "Non specificato"}
+
+Modifiche accettate:
+{json.dumps(compact_suggestions, ensure_ascii=False)[:1100]}
+
+Dati confermati:
+{json.dumps(clean_additional_data or {}, ensure_ascii=False)[:700]}
+
+CV:
+{cv_text[:2200]}
+
+Schema:
+{{
+  "optimized_cv_text": "testo completo del CV ottimizzato"
+}}
+
+Regole:
+- Mantieni tono naturale e professionale.
+- Integra le modifiche senza perderle.
+- Non aggiungere spiegazioni.
+"""
+
+
+def call_rewrite_llm(
+    prompt: str,
+    context: str = "",
+    temperature: float = 0.1,
+    max_tokens: int = 1100,
+    timeout: int = 60,
+) -> Dict[str, Any]:
+    return call_structured_llm(
+        prompt,
+        context=context,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        preferred_order=["ollama", "groq"],
+    )
+
+
 def extract_json(text: str, context: str = ""):
     raw_text = text or ""
     if not raw_text.strip():
@@ -1637,6 +1874,109 @@ def compute_total_score(
     return round(sum(scores) / len(scores))
 
 
+def compute_weighted_cv_job_score(payload: Dict[str, Any]) -> int:
+    role_match = clamp_score(payload.get("role_match_score", 0))
+    company_fit = clamp_score(payload.get("company_fit_score", 0))
+    completeness = clamp_score(payload.get("completeness_score", 0))
+    ats_score = clamp_score(payload.get("ats_score", 0))
+    format_score = clamp_score(payload.get("format_score", 0))
+    clarity = clamp_score(payload.get("clarity_score", 0))
+    professionalism = clamp_score(payload.get("professionalism_score", 0))
+
+    ats_quality = round((ats_score * 0.7) + (format_score * 0.3))
+
+    weighted = (
+        role_match * 0.34 +
+        company_fit * 0.10 +
+        completeness * 0.18 +
+        ats_quality * 0.20 +
+        clarity * 0.09 +
+        professionalism * 0.09
+    )
+    return clamp_score(round(weighted))
+
+
+def build_cv_score_explanation(payload: Dict[str, Any]) -> Dict[str, Any]:
+    role_match = clamp_score(payload.get("role_match_score", 0))
+    company_fit = clamp_score(payload.get("company_fit_score", 0))
+    completeness = clamp_score(payload.get("completeness_score", 0))
+    ats_score = clamp_score(payload.get("ats_score", 0))
+    format_score = clamp_score(payload.get("format_score", 0))
+    clarity = clamp_score(payload.get("clarity_score", 0))
+    professionalism = clamp_score(payload.get("professionalism_score", 0))
+    keyword_score = clamp_score(payload.get("keyword_score", ats_score))
+    ats_quality = round((ats_score * 0.7) + (format_score * 0.3))
+    overall = clamp_score(payload.get("overall_score", compute_weighted_cv_job_score(payload)))
+
+    strongest = sorted(
+        [
+            ("Coerenza col ruolo", role_match),
+            ("Struttura e completezza", completeness),
+            ("Compatibilità ATS", ats_quality),
+            ("Adattamento all'azienda", company_fit),
+            ("Chiarezza", clarity),
+            ("Professionalità", professionalism),
+        ],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    weakest = sorted(
+        [
+            ("Coerenza col ruolo", role_match),
+            ("Struttura e completezza", completeness),
+            ("Compatibilità ATS", ats_quality),
+            ("Adattamento all'azienda", company_fit),
+            ("Chiarezza", clarity),
+            ("Professionalità", professionalism),
+        ],
+        key=lambda item: item[1],
+    )
+
+    summary_parts = []
+    if strongest:
+        top_label, top_value = strongest[0]
+        summary_parts.append(f"punto più forte: {top_label.lower()} ({top_value}/100)")
+    if weakest:
+        low_label, low_value = weakest[0]
+        summary_parts.append(f"area più debole: {low_label.lower()} ({low_value}/100)")
+
+    return {
+        "overall_score": overall,
+        "weighted_components": {
+            "role_match_score": role_match,
+            "company_fit_score": company_fit,
+            "completeness_score": completeness,
+            "ats_score": ats_score,
+            "format_score": format_score,
+            "ats_quality_score": ats_quality,
+            "keyword_score": keyword_score,
+            "clarity_score": clarity,
+            "professionalism_score": professionalism,
+        },
+        "top_strengths": [
+            {"label": label, "score": value}
+            for label, value in strongest[:3]
+        ],
+        "top_gaps": [
+            {"label": label, "score": value}
+            for label, value in weakest[:3]
+        ],
+        "summary": (
+            f"Punteggio complessivo {overall}/100. "
+            + "; ".join(summary_parts)
+            + "."
+        ).strip(),
+        "explanation": [
+            f"Il punteggio finale pesa soprattutto la coerenza col ruolo, la completezza e la qualità ATS, evitando di contare due volte keyword e struttura.",
+            f"Coerenza col ruolo: {role_match}/100.",
+            f"Compatibilità ATS: {ats_quality}/100 (ATS {ats_score}/100, formato {format_score}/100).",
+            f"Completezza: {completeness}/100.",
+            f"Adattamento all'azienda: {company_fit}/100.",
+            f"Chiarezza: {clarity}/100, professionalità: {professionalism}/100.",
+        ],
+    }
+
+
 def build_speaking_feedback_from_metrics(metrics: SpeechMetrics) -> str:
     """
     Costruisce un feedback testuale sul parlato usando le metriche ricevute dal frontend.
@@ -1724,18 +2064,14 @@ def normalize_answer_text(text: str) -> str:
 
 
 def get_zero_answer_reason(answer: str, question: str = "") -> Optional[str]:
-    """
-    Restituisce il motivo per cui una risposta deve prendere 0.
-    Se la risposta è valutabile, restituisce None.
-
-    Serve per bloccare prima dell'LLM risposte come:
-    - "che criterio usi per valutarmi?";
-    - "quanto mi dai?";
-    - "qual è la risposta giusta?";
-    - "boh", "non lo so";
-    - testo casuale o troppo breve.
-    """
-
+    # Restituisce il motivo per cui una risposta deve prendere 0.
+    # Se la risposta e valutabile, restituisce None.
+    # Serve per bloccare prima dell'LLM risposte come:
+    # - "che criterio usi per valutarmi?";
+    # - "quanto mi dai?";
+    # - "qual e la risposta giusta?";
+    # - "boh", "non lo so";
+    # - testo casuale o troppo breve.
     if not answer:
         return "Risposta vuota"
 
@@ -4143,7 +4479,7 @@ Regole obbligatorie:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, json_mode=True), context="optimize_cv_text")
+        result = call_rewrite_llm(prompt, context="optimize_cv_text", temperature=0.15, max_tokens=1100)
         optimized_text = clean_extracted_text(result.get("optimized_cv_text", ""))
         if len(optimized_text) < 200:
             return fallback
@@ -4161,22 +4497,15 @@ def build_resume_rewrite_result(
     accepted_suggestions: Optional[Any] = None,
     user_additional_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    print(f"DEBUG build_resume_rewrite_result: accepted_suggestions type={type(accepted_suggestions).__name__}, len={len(accepted_suggestions) if isinstance(accepted_suggestions, list) else 'N/A'}")
-    if isinstance(accepted_suggestions, list) and accepted_suggestions:
-        print(f"DEBUG: primo suggerimento = {accepted_suggestions[0]}")
-    print(f"OPTIMIZE DEBUG - accepted_suggestions: {len(accepted_suggestions) if isinstance(accepted_suggestions, list) else 0}")
-    
     parser = ResumeParser()
     sections = parser.parse_text(cv_text)
 
     coach_engine = CoachSuggestionEngine()
     accepted = coach_engine.accepted_only(accepted_suggestions)
-    print(f"DEBUG accepted dopo coach_engine.accepted_only: type={type(accepted).__name__}, len={len(accepted) if isinstance(accepted, list) else 'N/A'}")
     
     try:
         from services.cv_optimizer.safe_cv_guard import sanitize_accepted_cv_suggestions
         accepted = sanitize_accepted_cv_suggestions(accepted)
-        print(f"DEBUG accepted dopo sanitizzazione: len={len(accepted) if isinstance(accepted, list) else 'N/A'}")
     except Exception as exc:
         print(f"Filtro modifiche accettate non disponibile: {exc}")
     
@@ -4196,48 +4525,36 @@ def build_resume_rewrite_result(
     }
 
     rewriter = ResumeRewriter(parser)
-    prompt = rewriter.build_prompt(
+    prompt = build_cv_rewrite_prompt(
         cv_text=cv_text,
-        target=target_info,
-        accepted_suggestions=accepted,
-        user_data=clean_additional_data,
-        sections=sections
+        company=company,
+        role=role,
+        goal=goal,
+        job_link="",
+        sources=[],
+        cv_evaluation=None,
+        strategic_analysis=None,
+        recommended_adaptations=None,
+        accepted_coach_suggestions=accepted,
+        clean_additional_data=clean_additional_data,
     )
 
-    if CV_REWRITE_LLM_ENABLED:
+    if CV_REWRITE_LLM_ENABLED and (accepted or confirmed_skill_instructions):
         try:
-            result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500, json_mode=True), context="resume_rewrite_instructions")
+            result = call_rewrite_llm(prompt, context="resume_rewrite_instructions", temperature=0.08, max_tokens=700, timeout=45)
             instructions = rewriter.instructions_from_result(result)
-            print(f"DEBUG istruzioni da LLM: {len(instructions)} istruzioni")
 
             if not instructions and accepted:
                 print("Nessuna istruzione generata dal LLM, uso fallback basato sui suggerimenti diretti.")
                 instructions = rewriter.instructions_from_suggestions(accepted)
-                print(f"DEBUG istruzioni da fallback: {len(instructions)} istruzioni")
         except Exception as exc:
             print(f"Errore nella generazione istruzioni LLM: {exc}")
             instructions = rewriter.instructions_from_suggestions(accepted)
-            print(f"DEBUG istruzioni da fallback (errore): {len(instructions)} istruzioni")
     else:
-        print(f"Generazione istruzioni CV: uso suggerimenti locali, LLM disabilitato.")
+        print("Generazione istruzioni CV: uso suggerimenti locali o nessuna modifica applicabile.")
         instructions = rewriter.instructions_from_suggestions(accepted)
-        print(f"DEBUG istruzioni generate da suggerimenti: {len(instructions)} istruzioni")
-        if instructions:
-            print(f"DEBUG prima istruzione: {instructions[0]}")
-
-    grouped_by_section: Dict[str, int] = {}
-    for inst in instructions:
-        grouped_by_section[inst.section] = grouped_by_section.get(inst.section, 0) + 1
-    print(f"OPTIMIZE DEBUG - generated instructions by target_section: {grouped_by_section}")
-
     instructions.extend(confirmed_skill_instructions)
-    print(f"DEBUG istruzioni totali (dopo confirmed_skills): {len(instructions)}")
-    print(f"DEBUG istruzioni dettagliate (prima di structured_cv_engine):")
-    for i, inst in enumerate(instructions[:5]):
-        replacement_preview = inst.replacement[:80] if inst.replacement else 'N/A'
-        replacement_preview = replacement_preview.replace('\n', '\\n')
-        print(f"  {i}: section={inst.section}, orig_len={len(inst.original)}, repl_len={len(inst.replacement)}, repl={replacement_preview}")
-    
+
     if instructions and CV_REWRITE_LLM_ENABLED:
         instructions = consolidate_rewrite_instructions(cv_text, instructions, company, role, goal)
 
@@ -4249,15 +4566,46 @@ def build_resume_rewrite_result(
             for i, item in enumerate(accepted[:3]):
                 print(f"  {i}: type={item.get('type')}, category={item.get('category')}, title={item.get('title', '')[:50]}")
         
+        structured_suggestions = list(accepted)
+        existing_instruction_keys = {
+            (
+                normalize_plain_text(str(item.get("section") or item.get("target_section") or "")),
+                normalize_plain_text(str(item.get("proposed_text") or item.get("replacement") or item.get("new_text") or "")),
+            )
+            for item in structured_suggestions
+            if isinstance(item, dict)
+        }
+        for index, instruction in enumerate(instructions):
+            instruction_key = (
+                normalize_plain_text(instruction.section),
+                normalize_plain_text(instruction.replacement),
+            )
+            if not instruction_key[1] or instruction_key in existing_instruction_keys:
+                continue
+            structured_suggestions.append({
+                "id": instruction.source_id or f"rewrite-instruction-{index + 1}",
+                "type": "actionableEdit",
+                "category": instruction.category or instruction.section,
+                "section": instruction.section,
+                "original_text": instruction.original,
+                "proposed_text": instruction.replacement,
+                "description": instruction.reason,
+                "supported_by_cv": True,
+                "requires_confirmation": False,
+            })
+            existing_instruction_keys.add(instruction_key)
+
         optimized_text = build_optimized_cv_text(
             cv_text,
-            accepted,
+            structured_suggestions,
             user_additional_data or {},
             role=role,
             company=company,
+            use_llm=False,
         )
-        print(f"DEBUG optimized_text da structured_cv_engine: len={len(optimized_text)}, identico all'originale={len(optimized_text.strip()) == len(cv_text.strip())}")
-        if len((optimized_text or "").strip()) < 200:
+        is_semantically_unchanged = normalize_plain_text(optimized_text) == normalize_plain_text(cv_text)
+        print(f"DEBUG optimized_text da structured_cv_engine: len={len(optimized_text)}, identico all'originale={is_semantically_unchanged}")
+        if len((optimized_text or "").strip()) < 200 or is_semantically_unchanged:
             optimized_text = rewriter.apply_to_text(cv_text, instructions)
             print(f"DEBUG optimized_text da rewriter.apply_to_text (fallback): len={len(optimized_text)}")
     except Exception as exc:
@@ -4265,15 +4613,41 @@ def build_resume_rewrite_result(
         optimized_text = rewriter.apply_to_text(cv_text, instructions)
         print(f"DEBUG optimized_text da rewriter.apply_to_text (exception): len={len(optimized_text)}")
 
-    # 5. Genera previewFinalCvContent per il frontend
+    if instructions and normalize_plain_text(optimized_text) == normalize_plain_text(cv_text):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Le modifiche validate non hanno prodotto alcuna variazione nel CV. "
+                "Nessun file identico all'originale verrà salvato."
+            ),
+        )
+
+    # 5. Genera previewFinalCvContent per il frontend a partire dal testo finale
     previewFinalCvContent = {}
-    for inst in instructions:
-        section_name = (inst.section or "Altro").capitalize()
-        # Per la preview evitiamo duplicati
-        if section_name not in previewFinalCvContent:
-            previewFinalCvContent[section_name] = inst.replacement
-        else:
-            previewFinalCvContent[section_name] += "\n\n" + inst.replacement
+    heading_fallbacks = {
+        "profile": "PROFILO",
+        "experience": "ESPERIENZE PROFESSIONALI",
+        "education": "FORMAZIONE",
+        "hard_skills": "HARD SKILLS",
+        "soft_skills": "SOFT SKILLS",
+        "languages": "LINGUE",
+        "projects": "PROGETTI",
+        "certifications": "CERTIFICAZIONI",
+        "contacts": "CONTATTI",
+    }
+    for section_key, section_text in extract_resume_sections(optimized_text).items():
+        if not section_text.strip():
+            continue
+        section_name = (heading_fallbacks.get(section_key) or section_key.replace("_", " ").title()).strip()
+        previewFinalCvContent[section_name] = section_text.strip()
+
+    if not previewFinalCvContent:
+        for inst in instructions:
+            section_name = (inst.section or "Altro").capitalize()
+            if section_name not in previewFinalCvContent:
+                previewFinalCvContent[section_name] = inst.replacement
+            else:
+                previewFinalCvContent[section_name] += "\n\n" + inst.replacement
 
     return {
         "optimized_text": optimized_text,
@@ -4413,9 +4787,12 @@ Criteri obbligatori:
 - score deve essere un intero da 0 a 100.
 """
     try:
-        result = extract_json(
-            call_groq(prompt, temperature=0.05, max_tokens=1500, timeout=60, json_mode=True),
+        result = call_analysis_llm(
+            prompt,
             context="final_cv_quality_review",
+            temperature=0.05,
+            max_tokens=1500,
+            timeout=60,
         )
     except Exception as exc:
         print(f"Revisione finale CV non disponibile: {exc}")
@@ -4542,29 +4919,29 @@ def build_professional_extra_text(user_additional_data: Dict[str, Any], role: st
     support = flatten_cv_support_data(user_additional_data)
     if not support:
         return ""
-    prompt = f"""
-Sei un resume editor. Restituisci SOLO JSON valido.
-
-Ruolo target:
-{role or "Non specificato"}
-
-Informazioni vere inserite dall'utente:
-{support[:3500]}
-
-Schema:
-{{
-  "text": "testo breve direttamente utilizzabile in un CV"
-}}
-
-Regole:
-- Usa esclusivamente i fatti presenti nelle informazioni dell'utente.
-- Non dedurre che si tratti di universita, lavoro, tirocinio o progetto se non e scritto.
-- Non inventare strumenti, risultati, contesti, aziende, date o responsabilita.
-- Migliora solo grammatica, chiarezza e tono professionale.
-- Mantieni la prima persona implicita e non aggiungere etichette o spiegazioni.
-"""
+    prompt = "\n".join(
+        [
+            "Sei un resume editor. Restituisci SOLO JSON valido.",
+            "",
+            f"Ruolo target:\n{role or 'Non specificato'}",
+            "",
+            f"Informazioni vere inserite dall utente:\n{support[:3500]}",
+            "",
+            "Schema:",
+            "{",
+            '  "text": "testo breve direttamente utilizzabile in un CV"',
+            "}",
+            "",
+            "Regole:",
+            "- Usa esclusivamente i fatti presenti nelle informazioni dell'utente.",
+            "- Non dedurre che si tratti di universita, lavoro, tirocinio o progetto se non e scritto.",
+            "- Non inventare strumenti, risultati, contesti, aziende, date o responsabilita.",
+            "- Migliora solo grammatica, chiarezza e tono professionale.",
+            "- Mantieni la prima persona implicita e non aggiungere etichette o spiegazioni.",
+        ]
+    )
     try:
-        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=400, json_mode=True), context="professional_extra_text")
+        result = call_rewrite_llm(prompt, context="professional_extra_text", temperature=0.05, max_tokens=250, timeout=20)
         text = clean_extracted_text(str(result.get("text") or ""))
         if text:
             return text[:700]
@@ -4703,9 +5080,12 @@ Regole obbligatorie:
         replacement = ""
         applied_ids: List[str] = []
         try:
-            result = extract_json(
-                call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=60, json_mode=True),
+            result = call_rewrite_llm(
+                prompt,
                 context="consolidate_rewrite_instructions",
+                temperature=0.05,
+                max_tokens=1200,
+                timeout=60,
             )
             replacement = str(result.get("replacement") or "").strip()
             applied_ids = [
@@ -4852,9 +5232,9 @@ def format_skill_list_like_original(original: str, skills: List[str]) -> str:
         if separator.strip() in original:
             return separator.join(clean_skills)
 
-    # A space-only skill list becomes unreadable as it grows. Keep the existing
-    # content intact and place each newly confirmed skill on its own line.
-    return "\n".join(clean_skills)
+    # Se l'originale è una riga compatta, manteniamo una lista compatta per non
+    # rompere la sidebar: i separatori brevi preservano meglio il layout.
+    return " · ".join(clean_skills)
 
 
 def build_skill_detail_rewrite_instructions(
@@ -4908,7 +5288,7 @@ Regole:
 - Ogni testo deve essere breve e direttamente utilizzabile nel CV, senza note, spiegazioni o titoli interni.
 """
     try:
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1000, json_mode=True), context="skill_detail_rewrite")
+        result = call_rewrite_llm(prompt, context="skill_detail_rewrite", temperature=0.1, max_tokens=700, timeout=30)
         raw_items = result.get("items") if isinstance(result, dict) else []
     except Exception as exc:
         print(f"Collocazione dettagli skill non riuscita, uso fallback: {exc}")
@@ -5040,18 +5420,26 @@ def create_plain_optimized_pdf(optimized_text: str) -> tuple[bytes, str, str]:
         doc = fitz.open()
         page = doc.new_page()
         margin_x = 48
-        y = 46
-        line_height = 13.5
-        paragraph_gap = 5
-        page_bottom = 790
+        y = 50
+        line_height = 13.2
+        paragraph_gap = 4
+        page_bottom = 800
         heading_color = (0.15, 0.22, 0.30)
         body_color = (0.18, 0.24, 0.31)
+        accent_color = (0.11, 0.42, 0.67)
+
+        lines = [line.rstrip() for line in (optimized_text or "").splitlines()]
+        title_line = next((line.strip() for line in lines if line.strip() and len(line.strip()) <= 70 and not line.strip().startswith("-")), "")
+        if title_line:
+            page.insert_text((margin_x, y), title_line, fontsize=15.5, fontname="helv", color=accent_color)
+            y += 22
+            lines = lines[1:] if lines and lines[0].strip() == title_line else lines
 
         def is_heading(value: str) -> bool:
             stripped = value.strip()
             return bool(stripped) and len(stripped) <= 42 and stripped.upper() == stripped and any(char.isalpha() for char in stripped)
 
-        for paragraph in optimized_text.splitlines():
+        for paragraph in lines:
             stripped = paragraph.strip()
             if not stripped:
                 y += paragraph_gap
@@ -5059,14 +5447,14 @@ def create_plain_optimized_pdf(optimized_text: str) -> tuple[bytes, str, str]:
             heading = is_heading(stripped)
             font_size = 12 if heading else 10.2
             font_name = "helv" if not heading else "helv"
-            wrap_width = 78 if heading else 94
+            wrap_width = 76 if heading else 92
             wrapped_lines = textwrap.wrap(stripped, width=wrap_width) or [stripped]
             if heading:
-                y += 8
+                y += 6
             for line in wrapped_lines:
                 if y > page_bottom:
                     page = doc.new_page()
-                    y = 46
+                    y = 50
                 page.insert_text(
                     (margin_x, y),
                     line,
@@ -5075,7 +5463,7 @@ def create_plain_optimized_pdf(optimized_text: str) -> tuple[bytes, str, str]:
                     color=heading_color if heading else body_color,
                 )
                 y += line_height if not heading else 15
-            y += paragraph_gap
+            y += paragraph_gap + (2 if heading else 0)
 
         pdf_bytes = doc.write()
         doc.close()
@@ -5456,7 +5844,6 @@ def get_question_type_instructions(interview_type: str, role: str, company: str)
     Restituisce istruzioni specifiche per generare domande diverse
     in base alla tipologia scelta dall'utente.
     """
-
     if interview_type == "conoscitive_motivazionali":
         return f"""
 TIPOLOGIA: DOMANDE CONOSCITIVE E MOTIVAZIONALI
@@ -5595,8 +5982,6 @@ LIVELLO: INTERMEDIO
 
 Le domande devono essere realistiche, coerenti con il ruolo e abbastanza sfidanti.
 """
-
-
 def save_sources_for_question(cursor, question_id: int, sources: List[Dict[str, str]]):
     for source in sources:
         title = source.get("title", "").strip()
@@ -6954,7 +7339,11 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                 "type": "skillConfirmation",
                 "name": skill,
                 "category": category,
-                "reason": f"Competenza utile per il ruolo {role or family}; puo essere valorizzata solo se confermata e coerente con il CV.",
+                "reason": (
+                    f"Competenze utili per il ruolo futuro {role or family}; confermala solo se l'hai davvero usata in studio, progetto o lavoro."
+                    if not present
+                    else f"Competenze già presenti nel CV e utili per il ruolo futuro {role or family}."
+                ),
                 "already_present": present,
                 "requires_confirmation": True,
                 "status": "pending",
@@ -6979,7 +7368,7 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
             "type": "keywordConfirmation",
             "name": keyword,
             "category": "keyword",
-            "reason": f"Keyword specifica utile per rendere il CV piu coerente con {role or family}.",
+            "reason": f"Keyword utile per rendere il CV più coerente con il ruolo futuro {role or family}; confermala solo se supportata da esperienza reale.",
             "already_present": False,
             "requires_confirmation": True,
             "status": "pending",
@@ -7158,7 +7547,8 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
 
     suggestions = [
         "Usa titoli di sezione semplici e riconoscibili: Esperienze, Formazione, Competenze, Progetti, Certificazioni.",
-        "Inserisci parole chiave dell'offerta solo se corrispondono a competenze o attività reali.",
+        "Metti in alto 3-6 hard skills davvero rilevanti per il ruolo e raggruppale per tema: linguaggi, strumenti, metodi.",
+        "Inserisci le soft skills solo se puoi sostenerle con esempi concreti in esperienza, progetto o studio.",
         "Evita testo in immagini, colonne troppo complesse e formattazioni difficili da leggere per ATS.",
     ]
     if missing_keywords:
@@ -7366,18 +7756,18 @@ def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -
 
     if len(detected_tokens) >= 2 and confidence < 0.50:
         return {
-            "matches_user": False,
-            "confidence": round(1 - confidence, 2),
+            "matches_user": None,
+            "confidence": round(confidence, 2),
             "detected_name": detected.get("name", ""),
-            "message": "Il nome presente nel CV non corrisponde al nome del profilo.",
+            "message": "Non sono riuscito a verificare con certezza il nome nel CV. Controlla che il documento sia corretto.",
         }
 
     if detected.get("confidence", 0) >= 0.65 and confidence < 0.60:
         return {
-            "matches_user": False,
-            "confidence": round(1 - confidence, 2),
+            "matches_user": None,
+            "confidence": round(confidence, 2),
             "detected_name": detected.get("name", ""),
-            "message": "Il nome presente nel CV non corrisponde al nome del profilo.",
+            "message": "Non sono riuscito a verificare con certezza il nome nel CV. Controlla che il documento sia corretto.",
         }
 
     return {
@@ -7687,7 +8077,9 @@ def suggestion_targets_current_cv(suggestion: Dict, cv_text: str) -> bool:
     if not original_tokens or not section_tokens:
         return False
     coverage = len(original_tokens.intersection(section_tokens)) / len(original_tokens)
-    return coverage >= 0.85
+    # Suggestions generated locally are conservative but often paraphrase the original.
+    # Accept a lower overlap when the section clearly exists in the current CV.
+    return coverage >= 0.55 or len(original_tokens.intersection(section_tokens)) >= 4
 
 
 def _structured_target_profile(evaluation: Dict, section_map: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -8417,6 +8809,15 @@ def _append_suggestion(
 
 def _extract_sections_for_structured_suggestions(cv_text: str) -> Dict[str, str]:
     base_sections = extract_resume_sections(cv_text)
+    try:
+        from services.cv_optimizer.structured_cv_engine import parse_cv
+
+        parsed_sections = parse_cv(cv_text).sections
+        for key, value in parsed_sections.items():
+            if value and key != "header":
+                base_sections[key] = value
+    except Exception as exc:
+        print(f"Parser CV strutturato non disponibile per i suggerimenti: {exc}")
     sections: Dict[str, str] = {}
     section_keys = {
         "profile": "CHI SONO",
@@ -8440,36 +8841,61 @@ def _extract_sections_for_structured_suggestions(cv_text: str) -> Dict[str, str]
             sections[key] = _clean_section_text(raw_value, canonical, max_chars=900)
         if canonical == "PROGETTI" and "projects" not in sections and "progetti" not in sections:
             sections["projects"] = _clean_section_text(raw_value, canonical, max_chars=900)
+    hard = sections.get("hard_skills", "")
+    hard_plain = normalize_plain_text(hard)
+    if len(hard) > 500 or any(marker in hard_plain for marker in [
+        "universita", "università", "laurea", "diploma", "tirocinio",
+        "sono una", "sono un", "esperienze professionali",
+    ]):
+        sections.pop("hard_skills", None)
+
     return {key: value for key, value in sections.items() if value}
 
 
 def _profile_rewrite(original: str, target_profile: Dict[str, Any], cv_text: str) -> str:
     role = target_profile.get("role") or "ruolo target"
     company = target_profile.get("company") or ""
-    cv_plain = normalize_plain_text(cv_text)
-    signals = []
-    for signal in ["Data Engineering", "Data Analysis", "Big Data", "Cloud Computing", "Artificial Intelligence", "Machine Learning", "RAG", "NLP", "LLM", "Networking", "sviluppo software"]:
-        if normalize_plain_text(signal) in cv_plain:
-            signals.append(signal)
-    signals = _unique_preserve_order(signals)[:5]
     base = _shorten_cv_text(original, 420).rstrip(".")
-    signal_text = f", con competenze in {', '.join(signals)}" if signals else ""
+    cv_plain = normalize_plain_text(cv_text)
+    role_family = target_profile.get("role_family") or infer_role_family(role)
+    library = ROLE_SKILL_LIBRARY.get(role_family) or infer_skill_library_from_role(role)
+    candidates = [
+        *library.get("hard_skills", []),
+        *library.get("tools", []),
+        *library.get("programming_languages", []),
+    ]
+    signals = _unique_preserve_order([
+        signal for signal in candidates
+        if normalize_plain_text(signal) and normalize_plain_text(signal) in cv_plain
+    ])[:4]
+    signal_text = f", valorizzando competenze già presenti come {', '.join(signals)}" if signals else ""
     company_text = f" in contesti come {company}" if company else ""
     return (
-        f"{base}. Obiettivo: valorizzare il percorso informatico e tecnico per il ruolo di {role}{company_text}"
-        f"{signal_text}, mantenendo un approccio orientato a progetti, collaborazione e risultati concreti."
+        f"{base}. Obiettivo professionale: contribuire nel ruolo di {role}{company_text}"
+        f"{signal_text}, con un approccio collaborativo e orientato alla qualità."
     )
 
 
 def _experience_rewrite(original: str, target_profile: Dict[str, Any]) -> str:
-    role = target_profile.get("role") or "ruolo target"
-    text = _shorten_cv_text(original, 650)
+    text = re.sub(r"\r\n?", "\n", original or "")
+    lines = [re.sub(r"\s+", " ", line).strip(" -•·") for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    header_lines: List[str] = []
+    body_text_parts: List[str] = []
+    for index, line in enumerate(lines):
+        plain = normalize_plain_text(line)
+        if index < 2 and len(plain.split()) <= 18:
+            header_lines.append(line)
+            continue
+        body_text_parts.append(line)
+    body_text = _shorten_cv_text(" ".join(body_text_parts) if body_text_parts else " ".join(lines), 650)
     sentences = [
         sentence.strip()
-        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        for sentence in re.split(r"(?<=[.!?])\s+", body_text)
         if sentence.strip()
     ]
-    selected = sentences[:4] if sentences else [text]
+    selected = sentences[:4] if sentences else [body_text]
     bullets = []
     for sentence in selected:
         sentence = sentence.rstrip(".")
@@ -8478,8 +8904,11 @@ def _experience_rewrite(original: str, target_profile: Dict[str, Any]) -> str:
         bullets.append(f"- {sentence}.")
     if not bullets:
         return ""
-    intro = f"Esperienza valorizzata per il ruolo di {role}, evidenziando attività tecniche, responsabilità progettuali e impatto operativo:"
-    return intro + "\n" + "\n".join(bullets[:5])
+    block = []
+    if header_lines:
+        block.extend(header_lines[:2])
+    block.extend(bullets[:5])
+    return "\n".join(block)
 
 
 def _projects_rewrite(original: str, target_profile: Dict[str, Any]) -> str:
@@ -8497,17 +8926,10 @@ def _projects_rewrite(original: str, target_profile: Dict[str, Any]) -> str:
 
 
 def _education_rewrite(original: str, target_profile: Dict[str, Any], cv_text: str) -> str:
-    role = target_profile.get("role") or "ruolo target"
     text = _shorten_cv_text(original, 700)
     if len(text.split()) < 18:
         return ""
-    cv_plain = normalize_plain_text(cv_text)
-    signals = []
-    for signal in ["Data Engineering", "Data Analysis", "Big Data", "Cloud Computing", "Artificial Intelligence", "Machine Learning", "RAG", "Networking"]:
-        if normalize_plain_text(signal) in cv_plain:
-            signals.append(signal)
-    signal_phrase = f" con focus su {', '.join(_unique_preserve_order(signals)[:4])}" if signals else ""
-    return f"Percorso formativo coerente con il ruolo di {role}{signal_phrase}. {text}"
+    return text
 
 
 def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> List[Dict]:
@@ -8627,6 +9049,12 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
         from services.cv_optimizer.safe_cv_guard import build_structured_cv_suggestions
 
         suggestions = build_structured_cv_suggestions(evaluation)
+        cv_text = str(evaluation.get("cv_text") or "")
+        suggestions = [
+            item for item in suggestions
+            if is_valid_actionable_suggestion(item)
+            and suggestion_targets_current_cv(item, cv_text)
+        ]
         if suggestions:
             return suggestions[:8]
         print("Safe CV guard: nessun suggerimento affidabile generato, uso fallback locale applicabile.")
@@ -8639,53 +9067,156 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict) -> List[Dict]:
         role = str(target.get("role") or evaluation.get("role") or "").strip()
         section_map = _extract_sections_for_structured_suggestions(cv_text)
         fallback_suggestions = build_generic_rewrite_fallbacks(section_map, role)
+        fallback_suggestions = [
+            item for item in fallback_suggestions
+            if is_valid_actionable_suggestion(item)
+            and suggestion_targets_current_cv(item, cv_text)
+        ]
         if fallback_suggestions:
             return fallback_suggestions[:8]
     except Exception as exc:
         print(f"Fallback suggerimenti CV non riuscito: {exc}")
+
+    try:
+        cv_text = str(evaluation.get("cv_text") or "")
+        target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+        role = str(target.get("role") or evaluation.get("role") or "ruolo target").strip() or "ruolo target"
+        weaknesses = [str(item).strip() for item in (evaluation.get("weaknesses") or []) if str(item).strip()]
+        missing_keywords = [str(item).strip() for item in (evaluation.get("missing_keywords") or []) if str(item).strip()]
+        relevant_skills = [str(item).strip() for item in (evaluation.get("relevant_skills_found") or []) if str(item).strip()]
+
+        if missing_keywords and relevant_skills:
+            section_map = _extract_sections_for_structured_suggestions(cv_text)
+            original = section_map.get("hard_skills", "")
+            proposed = (
+                "Competenze e parole chiave già presenti nel CV riorganizzate in una sezione più leggibile: "
+                + ", ".join(relevant_skills[:8])
+            )
+            item = make_coach_suggestion(
+                "ats_keywords",
+                "Evidenzia keyword e competenze",
+                "Rende più visibili le competenze già emerse dal CV e le collega meglio alla candidatura.",
+                section="HARD SKILLS",
+                original_text=original,
+                proposed_text=proposed[:950],
+                supported_by_cv=True,
+                suggestion_type="actionableEdit",
+            )
+            if item and is_valid_actionable_suggestion(item) and suggestion_targets_current_cv(item, cv_text):
+                item["impact"] = "medio"
+                item["priority"] = 2
+                return [item]
+    except Exception as exc:
+        print(f"Fallback suggerimenti operativi CV non riuscito: {exc}")
 
     # Ultimo fallback: prendi un blocco reale del CV e rendilo più leggibile.
     try:
         cv_text = str(evaluation.get("cv_text") or "")
         target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
         role = str(target.get("role") or evaluation.get("role") or "ruolo target").strip() or "ruolo target"
-        lines = [line.strip() for line in re.sub(r"\r\n?", "\n", cv_text).splitlines() if line.strip()]
-        candidate_lines = []
-        for line in lines:
-            plain = normalize_plain_text(line)
-            if (
-                len(plain.split()) >= 5
-                and "@" not in line
-                and "linkedin" not in plain
-                and not re.search(r"\+?\d[\d\s().-]{7,}", line)
-                and not canonical_edit_section_name(line)
-            ):
-                candidate_lines.append(line)
-            if len(" ".join(candidate_lines)) > 450:
-                break
-        original = _shorten_cv_text(" ".join(candidate_lines), 700)
-        if original:
+        section_map = _extract_sections_for_structured_suggestions(cv_text)
+        for section_key, section_name in [
+            ("profile", "CHI SONO"),
+            ("hard_skills", "HARD SKILLS"),
+            ("soft_skills", "SOFT SKILLS"),
+            ("experience", "ESPERIENZE PROFESSIONALI"),
+            ("projects", "PROGETTI"),
+            ("education", "FORMAZIONE"),
+        ]:
+            original = section_map.get(section_key, "")
+            if not original.strip():
+                continue
             proposed = (
-                f"Testo riformulato per il ruolo di {role}: "
-                + original.rstrip(".")
-                + ". Ho evidenziato attività, competenze e risultati già presenti nel CV in forma più chiara e leggibile."
+                _experience_rewrite(original, {"role": role})
+                if section_key in {"experience", "projects"}
+                else _profile_rewrite(original, {"role": role, "company": ""}, cv_text)
             )
+            if section_key == "hard_skills":
+                proposed = _skills_rewrite(original, {"role": role, "company": "", "role_family": infer_role_family(role)})
+            elif section_key == "soft_skills":
+                soft_values = [item.strip() for item in re.split(r"[,;|•·\n]+", original) if item.strip()]
+                if soft_values:
+                    preferred = {
+                        "software engineer": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico"],
+                        "backend developer": ["Problem solving", "Precisione", "Collaborazione", "Documentazione tecnica", "Comunicazione tecnica"],
+                        "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
+                        "data analyst": ["Pensiero analitico", "Attenzione ai dettagli", "Comunicazione", "Problem solving", "Collaborazione"],
+                        "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+                        "project manager": ["Organizzazione", "Gestione priorità", "Comunicazione", "Leadership", "Negoziazione"],
+                    }.get(infer_role_family(role), [])
+                    proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in _unique_preserve_order([*preferred, *soft_values])[:8])
+            elif section_key == "education":
+                proposed = _education_rewrite(original, {"role": role}, cv_text)
+            elif section_key == "projects":
+                proposed = _projects_rewrite(original, {"role": role, "company": ""})
+            elif section_key == "experience":
+                proposed = _experience_rewrite(original, {"role": role})
             item = make_coach_suggestion(
-                "phrases",
-                "Rendi più chiaro un blocco del CV",
-                "Fallback locale: riformula un testo già presente per renderlo più leggibile e orientato al ruolo.",
-                section="ESPERIENZE PROFESSIONALI",
+                "experience" if section_key == "experience" else "profile",
+                "Rendi più leggibile e mirata questa sezione",
+                "Riformula esclusivamente fatti già presenti nel CV.",
+                section=section_name,
                 original_text=original,
                 proposed_text=proposed,
                 supported_by_cv=True,
                 suggestion_type="actionableEdit",
             )
-            item["impact"] = "medio"
-            item["priority"] = 99
-            if is_valid_actionable_suggestion(item):
+            if item and is_valid_actionable_suggestion(item) and suggestion_targets_current_cv(item, cv_text):
+                item["impact"] = "medio"
+                item["priority"] = 99
                 return [item]
     except Exception as exc:
         print(f"Fallback minimo suggerimenti CV non riuscito: {exc}")
+
+    # Se anche il fallback minimo non trova una sezione pulita, crea un suggerimento
+    # estremamente conservativo sulla prima parte utile del CV.
+    try:
+        cv_text = str(evaluation.get("cv_text") or "")
+        target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+        role = str(target.get("role") or evaluation.get("role") or "ruolo target").strip() or "ruolo target"
+        section_map = _extract_sections_for_structured_suggestions(cv_text)
+        first_section_key = next((key for key in ["profile", "hard_skills", "experience", "projects", "education", "soft_skills"] if section_map.get(key, "").strip()), "")
+        if first_section_key:
+            original = section_map.get(first_section_key, "")
+            proposed = _shorten_cv_text(original, 700)
+            if first_section_key == "hard_skills":
+                proposed = _skills_rewrite(original, {"role": role, "company": "", "role_family": infer_role_family(role)})
+            elif first_section_key == "soft_skills":
+                soft_values = [item.strip() for item in re.split(r"[,;|•·\n]+", original) if item.strip()]
+                if soft_values:
+                    preferred = {
+                        "software engineer": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico"],
+                        "backend developer": ["Problem solving", "Precisione", "Collaborazione", "Documentazione tecnica", "Comunicazione tecnica"],
+                        "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
+                        "data analyst": ["Pensiero analitico", "Attenzione ai dettagli", "Comunicazione", "Problem solving", "Collaborazione"],
+                        "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+                        "project manager": ["Organizzazione", "Gestione priorità", "Comunicazione", "Leadership", "Negoziazione"],
+                    }.get(infer_role_family(role), [])
+                    proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in _unique_preserve_order([*preferred, *soft_values])[:8])
+            elif first_section_key == "experience":
+                proposed = _experience_rewrite(original, {"role": role})
+            elif first_section_key == "projects":
+                proposed = _projects_rewrite(original, {"role": role, "company": ""})
+            elif first_section_key == "education":
+                proposed = _education_rewrite(original, {"role": role}, cv_text)
+            else:
+                proposed = _profile_rewrite(original, {"role": role, "company": ""}, cv_text)
+            item = make_coach_suggestion(
+                f"{first_section_key}-fallback",
+                "Ottimizza questa sezione per il ruolo target",
+                "Suggerimento conservativo basato su testo già presente nel CV.",
+                section=(first_section_key.upper().replace("_", " ")),
+                original_text=original,
+                proposed_text=proposed or _shorten_cv_text(original, 500),
+                supported_by_cv=True,
+                suggestion_type="actionableEdit",
+            )
+            if item and is_valid_actionable_suggestion(item) and suggestion_targets_current_cv(item, cv_text):
+                item["impact"] = "basso"
+                item["priority"] = 100
+                return [item]
+    except Exception as exc:
+        print(f"Fallback conservativo suggerimenti CV non riuscito: {exc}")
 
     return []
 
@@ -8760,12 +9291,20 @@ def build_fallback_cv_job_evaluation(
         company_fit = 35
     clarity = clamp_score(55 + min(len(cv_text) // 600, 18))
     professionalism = clamp_score(58 + (10 if "contatti" in heuristic["detected_sections"] else 0))
-    overall = clamp_score(round((role_match * 0.32) + (company_fit * 0.18) + (completeness * 0.22) + (clarity * 0.14) + (professionalism * 0.14)))
 
     required_skill_tokens = tokenize_meaningful(required_skills)
     relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens).union(required_skill_tokens))))[:8]
     missing = filter_cv_keyword_list(sorted(list((role_tokens.union(description_tokens).union(required_skill_tokens)) - cv_tokens)))[:8]
     ats_analysis = analyze_cv_ats(cv_text, role, description, required_skills)
+    overall = compute_weighted_cv_job_score({
+        "role_match_score": role_match,
+        "company_fit_score": company_fit,
+        "completeness_score": completeness,
+        "ats_score": ats_analysis["ats_score"],
+        "format_score": ats_analysis["format_score"],
+        "clarity_score": clarity,
+        "professionalism_score": professionalism,
+    })
     suggested_skills = build_role_skill_suggestions(cv_text, role, description, required_skills)
     questions_for_user = generate_cv_optimization_questions(cv_text, {
         "weaknesses": [],
@@ -8820,11 +9359,13 @@ def build_fallback_cv_job_evaluation(
         "cv_text": cv_text,
         "summary": "Il CV e valido e analizzabile. Per renderlo piu competitivo, va personalizzato meglio rispetto a ruolo, azienda e descrizione inseriti.",
     }
+    evaluation["score_explanation"] = build_cv_score_explanation(evaluation)
     evaluation["coach_suggestions"] = build_coach_suggestions_from_evaluation(evaluation)
     return evaluation
 
 
 def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
+    result = result if isinstance(result, dict) else {}
     normalized = {}
     for key in [
         "overall_score", "ats_score", "role_match_score", "company_fit_score",
@@ -8850,6 +9391,20 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
     if fallback.get("role_match_score", 0) > 0:
         normalized["role_match_score"] = max(normalized["role_match_score"], clamp_score(fallback["role_match_score"] - 8))
         normalized["job_match_score"] = max(normalized["job_match_score"], clamp_score(fallback.get("job_match_score", fallback["role_match_score"]) - 8))
+
+    normalized["overall_score"] = compute_weighted_cv_job_score({
+        "role_match_score": normalized["role_match_score"],
+        "company_fit_score": normalized["company_fit_score"],
+        "completeness_score": normalized["completeness_score"],
+        "ats_score": normalized["ats_score"],
+        "format_score": normalized["format_score"],
+        "clarity_score": normalized["clarity_score"],
+        "professionalism_score": normalized["professionalism_score"],
+    })
+    normalized["score_explanation"] = build_cv_score_explanation({
+        **normalized,
+        "keyword_score": result.get("keyword_score", fallback.get("keyword_score", normalized["ats_score"])),
+    })
 
     if "strengths" not in result and isinstance(result.get("strong_points"), list):
         result["strengths"] = result["strong_points"]
@@ -8904,7 +9459,10 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
         normalized["ats_analysis"].get("missing_sections", normalized["sections_to_improve"])
     )
     actionable_from_model = []
-    for item in result.get("coach_suggestions") if isinstance(result.get("coach_suggestions"), list) else []:
+    raw_coach_suggestions = result.get("coach_suggestions")
+    if not isinstance(raw_coach_suggestions, list):
+        raw_coach_suggestions = []
+    for item in raw_coach_suggestions:
         if not isinstance(item, dict) or item.get("type") != "actionableEdit":
             continue
         section = str(item.get("section") or "").strip()
@@ -8920,7 +9478,15 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
             actionable_from_model.append(item)
         else:
             print(f"coach_suggestion AI ignorato perche non applicabile: {item.get('id') or item.get('title')}")
-    generated_actionable = build_coach_suggestions_from_evaluation(normalized)
+    fallback_actionable = fallback.get("coach_suggestions")
+    safe_fallback_actionable = [
+        item
+        for item in (fallback_actionable if isinstance(fallback_actionable, list) else [])
+        if isinstance(item, dict)
+        and is_valid_actionable_suggestion(item)
+        and suggestion_targets_current_cv(item, fallback.get("cv_text", ""))
+    ]
+    generated_actionable = safe_fallback_actionable or build_coach_suggestions_from_evaluation(normalized)
     normalized["coach_suggestions"] = []
     seen_suggestion_ids = set()
     for item in actionable_from_model + generated_actionable:
@@ -8931,6 +9497,12 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
         normalized["coach_suggestions"].append(item)
         if len(normalized["coach_suggestions"]) >= 8:
             break
+    if not normalized["coach_suggestions"]:
+        normalized["coach_suggestions"] = build_coach_suggestions_from_evaluation({
+            **fallback,
+            **normalized,
+            "cv_text": fallback.get("cv_text", ""),
+        })[:8]
     normalized["strong_points"] = normalized["strengths"]
     normalized["weak_points"] = normalized["weaknesses"]
     return normalized
@@ -8958,107 +9530,52 @@ def evaluate_cv_for_job(
         return fallback
 
     prompt = f"""
-Sei un recruiter senior e career coach.
+Sei un recruiter senior. Restituisci solo JSON valido.
 
-Valuta questo CV rispetto a una candidatura specifica.
-Questa e una simulazione interna: parla sempre di "ATS simulato" o "compatibilita ATS stimata", mai dell'ATS reale dell'azienda.
+Input:
+- Azienda: {company}
+- Ruolo: {role}
+- Descrizione: {description}
+- Competenze richieste: {required_skills or "Non specificate"}
+- Link: {link or "Non inserito"}
+- Fonti: {sources_prompt}
+- ATS: {json.dumps(ats_analysis, ensure_ascii=False)}
+- CV: {cv_text[:2200]}
 
-Azienda: {company}
-Ruolo desiderato: {role}
-Descrizione/annuncio inserito dall'utente:
-{description}
-Competenze richieste indicate dall'utente:
-{required_skills or "Non specificate"}
-Link annuncio/azienda: {link or "Non inserito"}
-
-Fonti web disponibili:
-{sources_prompt}
-
-Analisi ATS preliminare:
-{json.dumps(ats_analysis, ensure_ascii=False)}
-
-Testo CV:
-{cv_text[:3500]}
-
-Restituisci SOLO JSON valido con questa struttura:
+Output JSON richiesto:
 {{
   "overall_score": 0,
   "ats_score": 0,
   "job_match_score": 0,
-  "keyword_score": 0,
-  "format_score": 0,
   "role_match_score": 0,
   "company_fit_score": 0,
   "clarity_score": 0,
   "completeness_score": 0,
   "professionalism_score": 0,
-  "strengths": ["..."],
-  "weaknesses": ["..."],
-  "strong_points": ["..."],
-  "weak_points": ["..."],
-  "relevant_skills_found": ["..."],
-  "missing_skills_for_role": ["..."],
-  "present_keywords": ["..."],
-  "missing_keywords": ["..."],
-  "missing_hard_skills": ["..."],
-  "missing_soft_skills": ["..."],
-  "sections_to_improve": [{{"section": "...", "suggestion": "..."}}],
-  "questions_for_user": [{{"question": "...", "reason": "...", "category": "..."}}],
-  "coach_suggestions": [
-    {{
-      "id": "unique_id",
-      "type": "actionableEdit",
-      "category": "profile | experience | skills | education | ats_keywords | missing_info",
-      "section": "nome sezione CV",
-      "original_text": "testo originale esatto da sostituire",
-      "proposed_text": "testo migliorato da inserire",
-      "reason": "motivo del miglioramento",
-      "requires_confirmation": false,
-      "supported_by_cv": true,
-      "keywords_added": ["keyword1"]
-    }}
-  ],
-  "relevant_experiences": ["..."],
-  "suggestions": ["..."],
-  "ats_analysis": {{
-    "ats_score": 0,
-    "keyword_score": 0,
-    "format_score": 0,
-    "keyword_coverage": 0,
-    "keywords_present": ["..."],
-    "keywords_missing": ["..."],
-    "present_keywords": ["..."],
-    "missing_keywords": ["..."],
-    "missing_hard_skills": ["..."],
-    "missing_soft_skills": ["..."],
-    "missing_sections": [{{"section": "...", "suggestion": "..."}}],
-    "sections_to_improve": [{{"section": "...", "suggestion": "..."}}],
-    "issues": ["..."],
-    "suggestions": ["..."]
-  }},
-  "summary": "..."
+  "strengths": [],
+  "weaknesses": [],
+  "present_keywords": [],
+  "missing_keywords": [],
+  "sections_to_improve": [],
+  "questions_for_user": [],
+  "coach_suggestions": [],
+  "summary": ""
 }}
 
 Regole:
-- Rispondi sempre e solo in italiano. Tutti i campi mostrati all'utente devono essere scritti in italiano.
-- Tutti i punteggi devono essere interi da 0 a 100.
-- Non essere generico: collega ogni giudizio a ruolo, azienda, descrizione e fonti.
-- Considera ogni richiesta indipendente: usa esclusivamente il CV, la candidatura e le fonti contenute in questo prompt.
-- Non usare nomi, aziende, ruoli, competenze o esperienze ricordati, dedotti o provenienti da altre richieste.
-- Ogni affermazione sul candidato deve essere direttamente supportata dal testo del CV corrente.
-- Distingui competenze presenti da competenze mancanti.
-- Non inventare esperienze non presenti nel CV.
-- Valuta compatibilita ATS stimata: sezioni leggibili, keyword, struttura, completezza, testo estraibile.
-- Non affermare che il punteggio rappresenti il vero ATS dell'azienda.
-- coach_suggestions deve contenere SOLO modifiche realmente applicabili al CV con type="actionableEdit": original_text deve essere una frase o un paragrafo presente nel CV, proposed_text deve essere la versione migliorata.
-- Non mettere in coach_suggestions frasi diagnostiche o consigli generici come "Alcune parole chiave..." o "I risultati misurabili...": quelle vanno in weaknesses o suggestions, senza checkbox.
-- Ogni coach_suggestion deve avere section, original_text e proposed_text non vuoti.
-- Non inserire keyword in proposed_text se non sono gia presenti nel CV o nelle competenze confermate.
-- Se una modifica richiede conferma dell'utente e non hai un proposed_text sicuro, non inserirla in coach_suggestions: mettila tra weaknesses o suggestions.
+- Solo italiano.
+- Solo il JSON sopra, niente markdown, niente introduzioni.
+- Usa stringhe vuote o liste vuote quando non hai evidenza.
+- `coach_suggestions` puo restare vuoto.
+- Se presenti, massimo 3 elementi.
+- Ogni suggerimento deve usare solo testo realmente presente nel CV.
+- `original_text` deve essere copiato testualmente da una singola sezione del CV.
+- `proposed_text` deve conservare i fatti e migliorare solo chiarezza, struttura, sintesi e pertinenza.
+- Non inserire competenze mancanti in `proposed_text`; riportale in `missing_keywords` o `questions_for_user`.
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, timeout=60, json_mode=True), context="cv_job_evaluation")
+        result = call_analysis_llm(prompt, context="cv_job_evaluation", temperature=0.2, max_tokens=1100, timeout=45)
         normalized = normalize_cv_job_evaluation(result, fallback)
         questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
         normalized["optimization_questions"] = questions
@@ -9077,15 +9594,12 @@ Regole:
             cv_text=cv_text,
         )
         try:
-            result = extract_json(
-                call_groq(
-                    lightweight_prompt,
-                    temperature=0.2,
-                    max_tokens=1200,
-                    timeout=OLLAMA_TEXT_TIMEOUT,
-                    json_mode=True,
-                ),
+            result = call_lightweight_analysis_llm(
+                lightweight_prompt,
                 context="cv_job_evaluation_light",
+                temperature=0.1,
+                max_tokens=700,
+                timeout=min(45, OLLAMA_TEXT_TIMEOUT),
             )
             print("Valutazione CV per candidatura fallback leggero riuscita.")
             normalized = normalize_cv_job_evaluation(result, fallback)
@@ -9111,34 +9625,17 @@ def build_lightweight_cv_evaluation_prompt(
     ats_analysis: Dict[str, Any],
     cv_text: str,
 ) -> str:
-    return f"""
-Sei un recruiter senior e career coach. Valuta il CV per questa candidatura con un'analisi rapida e puntuale.
-
-Azienda: {company}
-Ruolo desiderato: {role}
-Descrizione annunciata: {description}
-Competenze richieste: {required_skills or 'Non specificate'}
-Link annuncio: {link or 'Non inserito'}
-
-Fonti web disponibili:
-{sources_prompt}
-
-Dati ATS preliminari:
-{json.dumps(ats_analysis, ensure_ascii=False, indent=2)[:1200]}
-
-Testo CV:
-{cv_text[:2500]}
-
-Restituisci SOLO JSON valido con struttura simile a quella richiesta nel prompt principale, con almeno i campi:
-"overall_score", "ats_score", "job_match_score", "keyword_score", "format_score", "role_match_score", "company_fit_score", "clarity_score", "completeness_score", "professionalism_score", "strengths", "weaknesses", "present_keywords", "missing_keywords", "missing_hard_skills", "missing_soft_skills", "sections_to_improve", "questions_for_user", "coach_suggestions", "ats_analysis", "summary".
-
-Regole:
-- Rispondi in italiano.
-- Usa solo informazioni presenti nel CV e nei dati forniti.
-- Non inventare esperienze o competenze.
-- Fornisci coach_suggestions solo se sono modifiche applicabili.
-- Se non riesci a generare coach_suggestions affidabili, lascia l'array vuoto.
-"""
+    return build_cv_analysis_prompt(
+        company=company,
+        role=role,
+        description=description,
+        required_skills=required_skills,
+        link=link,
+        sources_prompt=sources_prompt,
+        ats_analysis=ats_analysis,
+        cv_text=cv_text,
+        compact=True,
+    )
 
 
 @app.post("/job/validate")
@@ -9226,10 +9723,10 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
         raise HTTPException(status_code=400, detail="Carica un CV valido prima di avviare la valutazione.")
 
     cv_check = is_probably_cv(cv_text)
+    warnings = []
     if not cv_check["is_cv"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Il file caricato non sembra essere un CV valido. Carica un curriculum contenente esperienze, formazione e competenze.",
+        warnings.append(
+            "Il CV salvato non supera uno dei controlli automatici di plausibilità, ma verrà comunque analizzato perché il caricamento iniziale è andato a buon fine."
         )
 
     public_user = user_to_response(existing_user)
@@ -9239,8 +9736,9 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
         name_parts[0] if name_parts else "",
         " ".join(name_parts[1:]) if len(name_parts) > 1 else "",
     )
+    identity_warning = None
     if identity_check["matches_user"] is False:
-        raise HTTPException(status_code=400, detail=identity_check["message"])
+        identity_warning = identity_check["message"]
 
     description = (data.description or "").strip()
     company = (data.company or "").strip()
@@ -9251,7 +9749,7 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
     required_skills = (data.required_skills or "").strip()
     job_validation = validate_job_input(description, company, role, link, sector, required_skills)
     if not job_validation["is_valid"]:
-        raise HTTPException(status_code=400, detail=job_validation)
+        warnings.append(job_validation.get("message") or "I dati del lavoro non sono completi o coerenti, ma l'analisi continuerà con i campi disponibili.")
 
     role_context = f"{role} ({role_level})" if role_level else role
     direct_job_link = job_validation.get("normalized_link") or link
@@ -9265,10 +9763,11 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
     return {
         "is_valid_cv": True,
         "identity_check": identity_check,
+        "identity_warning": identity_warning,
         "job_validation": job_validation,
         "cv_evaluation": cv_evaluation,
         "cv_fingerprint": cv_content_fingerprint(cv_text),
-        "warnings": job_validation.get("warnings", []),
+        "warnings": [*warnings, *(job_validation.get("warnings", []) or [])],
     }
 
 
@@ -9337,10 +9836,6 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         raw_additional_data["confirmed_skills"] = confirmed_skill_payload
     user_additional_data, rejected_additional_fields = sanitize_cv_additional_data(raw_additional_data)
     accepted_suggestions = normalize_accepted_coach_suggestions(data.accepted_suggestions)
-    print("DEBUG OPTIMIZE - accepted_suggestions iniziali:", len(accepted_suggestions))
-    print("DEBUG OPTIMIZE - selected_suggestion_ids:", data.selected_suggestion_ids)
-    print("DEBUG OPTIMIZE - acceptedSuggestionIds:", data.acceptedSuggestionIds)
-    print("DEBUG OPTIMIZE - accepted_suggestions raw type:", type(data.accepted_suggestions).__name__)
     rejected_suggestions = data.rejected_suggestions if isinstance(data.rejected_suggestions, list) else []
     rejected_suggestion_ids = [
         str(suggestion_id).strip()
@@ -9370,10 +9865,11 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     if not accepted_suggestions and not selected_ids:
         evaluation_for_suggestions = data.cv_evaluation if isinstance(data.cv_evaluation, dict) else {}
         if not isinstance(evaluation_for_suggestions.get("target"), dict):
-            evaluation_for_suggestions["target"] = {"company": company, "role": role_context}
+            evaluation_for_suggestions["target"] = {"company": company, "role": role, "role_level": role_level}
         else:
             evaluation_for_suggestions["target"].setdefault("company", company)
-            evaluation_for_suggestions["target"].setdefault("role", role_context)
+            evaluation_for_suggestions["target"].setdefault("role", role)
+            evaluation_for_suggestions["target"].setdefault("role_level", role_level)
         evaluation_for_suggestions["cv_text"] = cv_text
         auto_suggestions = build_coach_suggestions_from_evaluation(evaluation_for_suggestions)
         accepted_suggestions = normalize_accepted_coach_suggestions(auto_suggestions[:4])
@@ -9420,11 +9916,8 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     role=role_context,
     goal=goal,
     accepted_suggestions=accepted_suggestions,
-    user_additional_data=user_additional_data,
-)
-    print("DEBUG OPTIMIZE - instructions:", len(rewrite_result.get("instructions", [])))
-    print("DEBUG OPTIMIZE - accepted_suggestions finali:", len(rewrite_result.get("accepted_suggestions", [])))
-    print("DEBUG OPTIMIZE - previewFinalCvContent keys:", list((rewrite_result.get("previewFinalCvContent") or {}).keys()))
+        user_additional_data=user_additional_data,
+    )
     optimized_text = rewrite_result["optimized_text"]
 
     hallucination_warnings = detect_unsupported_optimized_claims(
@@ -9447,8 +9940,6 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     alternatives = []
     format_warnings = []
     applied_changes_count = 0
-    print("DEBUG OPTIMIZE - applied_changes_count:", applied_changes_count)
-    print("DEBUG OPTIMIZE - optimized_text diverso da cv_text:", normalize_plain_text(optimized_text) != normalize_plain_text(cv_text))
     quality_review: Dict[str, Any] = {
         "ready_to_send": False,
         "score": 0,
@@ -9459,17 +9950,27 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     if original_filename.endswith(".docx") and original_file_bytes:
         try:
             docx_pipeline = ResumeDocxOptimizationPipeline()
-            print("DEBUG DOCX pipeline - accepted_suggestions iniziali:", len(accepted_suggestions))
-            print("DEBUG DOCX pipeline - user_additional_data keys:", list(user_additional_data.keys())[:20] if isinstance(user_additional_data, dict) else [])
+            rewrite_instructions = rewrite_result.get("instructions") or []
+            docx_suggestions = [
+                {
+                    "suggestion_id": instruction.source_id or f"rewrite-instruction-{index + 1}",
+                    "target_section": instruction.section,
+                    "old_text_hint": instruction.original,
+                    "new_text": instruction.replacement,
+                    "reason": instruction.reason,
+                }
+                for index, instruction in enumerate(rewrite_instructions)
+                if instruction.replacement and instruction.section
+            ]
             structured_instructions = docx_pipeline.generate_structured_instructions(
                 cv_text=cv_text,
                 role=role_context,
                 company=company,
                 goal=goal,
-                accepted_suggestions=accepted_suggestions,
+                accepted_suggestions=docx_suggestions,
                 user_additional_data=user_additional_data,
+                use_llm=False,
             )
-            print("DEBUG DOCX pipeline - istruzioni generate:", len(structured_instructions))
             for i, instruction in enumerate(structured_instructions[:5]):
                 print(
                     f"DEBUG DOCX instruction {i}: suggestion_id={instruction.suggestion_id}, "
@@ -9482,12 +9983,12 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             extension = "docx"
             applied_changes_count = len(apply_result.applied_ids)
-            print("DEBUG DOCX pipeline - sections rilevate nel DOCX:", apply_result.sections_detected)
-            print("DEBUG DOCX pipeline - applied:", apply_result.applied_ids)
-            print("DEBUG DOCX pipeline - partially_applied:", apply_result.partially_applied_ids)
-            print("DEBUG DOCX pipeline - failed:", apply_result.failed_ids)
-            print("DEBUG DOCX pipeline - validation report:", apply_result.validation_report)
             final_docx_text = apply_result.validation_report.get("final_text", "")
+            if normalize_plain_text(final_docx_text) == normalize_plain_text(cv_text):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Il motore non è riuscito ad applicare modifiche reali al DOCX. Il file originale non è stato salvato come ottimizzato.",
+                )
             if apply_result.validation_report.get("status") == "failed":
                 raise HTTPException(
                     status_code=422,
@@ -9501,11 +10002,27 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         except Exception as exc:
             print(f"Errore nella pipeline DOCX strutturata: {exc}")
             raise HTTPException(status_code=500, detail="Impossibile ottimizzare il DOCX originale in modo sicuro.")
-    if extension == "docx" and original_file_bytes:
-        print(f"DEBUG PRE-SAVE: file_bytes == original_file_bytes? {file_bytes == original_file_bytes}")
-        print(f"DEBUG PRE-SAVE: file_bytes diverso? {len(file_bytes) != len(original_file_bytes)}")
-        if file_bytes == original_file_bytes:
-            print("⚠️ ATTENZIONE: file_bytes è identico al file originale!")
+
+    final_cv_text = apply_result.validation_report.get("final_text", "") if original_filename.endswith(".docx") and original_file_bytes else optimized_text
+    if not final_cv_text.strip():
+        raise HTTPException(status_code=422, detail="Il CV finale non contiene testo valido.")
+
+    quality_review = review_generated_cv_quality(
+        final_text=final_cv_text,
+        original_cv_text=cv_text,
+        role=role_context,
+        company=company,
+        accepted_instructions=rewrite_result.get("instructions") or [],
+    )
+    if not quality_review.get("ready_to_send", False):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Il motore di ottimizzazione non ha prodotto un CV pronto da inviare.",
+                "quality_review": quality_review,
+            },
+        )
+
     filename = get_target_optimized_cv_filename(public_user.get("name", "CV"), role_context, company, extension)
     file_base64 = base64.b64encode(file_bytes).decode("ascii") if file_bytes else ""
     docx_file = {
@@ -9638,18 +10155,11 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[s
     filename, content_type, file_base64, docx_filename, docx_content_type, docx_file_base64, pdf_filename, pdf_content_type, pdf_file_base64 = row
     requested_format = (format or "").lower().strip(".")
     
-    print(f"DEBUG DOWNLOAD: optimized_cv_id={optimized_cv_id}, format={format}")
-    print(f"DEBUG DOWNLOAD: available - main: {bool(file_base64)}, docx: {bool(docx_file_base64)}, pdf: {bool(pdf_file_base64)}")
-    
     if requested_format == "docx" and docx_file_base64:
         filename, content_type, file_base64 = docx_filename, docx_content_type, docx_file_base64
-        print(f"DEBUG DOWNLOAD: usando DOCX, size={len(base64.b64decode(file_base64)) if file_base64 else 0}")
     elif requested_format == "pdf" and pdf_file_base64:
         filename, content_type, file_base64 = pdf_filename, pdf_content_type, pdf_file_base64
-        print(f"DEBUG DOWNLOAD: usando PDF, size={len(base64.b64decode(file_base64)) if file_base64 else 0}")
-    else:
-        print(f"DEBUG DOWNLOAD: usando main file, size={len(base64.b64decode(file_base64)) if file_base64 else 0}")
-    
+
     if not filename or not file_base64:
         raise HTTPException(status_code=500, detail="File CV ottimizzato non leggibile.")
 
@@ -9658,7 +10168,6 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[s
     except Exception:
         raise HTTPException(status_code=500, detail="File CV ottimizzato non leggibile.")
 
-    print(f"DEBUG DOWNLOAD: ritornando file, filename={filename}, type={content_type}, bytes={len(file_bytes)}")
     return Response(
         content=file_bytes,
         media_type=content_type or "application/octet-stream",
@@ -9918,7 +10427,7 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
 
     if len(normalized_text) == 0:
         print(
-            f"DEBUG CV validation: file={filename}, extraction_method={extraction_method}, text_length=0, reason=no_text"
+            f"CV validation rejected: file={filename}, extraction_method={extraction_method}, text_length=0, reason=no_text"
         )
         return {
             "is_cv": False,
@@ -9933,13 +10442,12 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
         }
 
     print(
-        f"DEBUG CV validation: file={filename}, extension={extension}, extraction_method={extraction_method}, text_length={len(normalized_text)}"
+        f"CV validation inspected: file={filename}, extension={extension}, extraction_method={extraction_method}, text_length={len(normalized_text)}"
     )
-    print(f"DEBUG CV validation: sample_text={repr(normalized_text[:200])}")
 
     disallowed = detect_disallowed_cv_content(normalized_text)
     if disallowed["blocked"]:
-        print(f"DEBUG CV validation: disallowed_content=True, reason={disallowed['reason']}")
+        print(f"CV validation rejected: disallowed_content=True, reason={disallowed['reason']}")
         return {
             "is_cv": False,
             "confidence": 0,
@@ -9999,7 +10507,7 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
 
     if not is_cv:
         print(
-            f"DEBUG CV validation: file={filename}, is_cv=False, heuristic_score={heuristic_score}, detected_sections={heuristic['detected_sections']}, reason={reason}"
+            f"CV validation rejected: file={filename}, heuristic_score={heuristic_score}, detected_sections={heuristic['detected_sections']}, reason={reason}"
         )
         return {
             "is_cv": False,
@@ -10041,7 +10549,7 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
 
     if visual_validation.get("blocked"):
         categories = ", ".join(visual_validation.get("blocked_categories") or [])
-        print(f"DEBUG CV validation: visual_blocked=True, categories={categories}")
+        print(f"CV validation rejected: visual_blocked=True, categories={categories}")
         return {
             "is_cv": False,
             "confidence": 0,
@@ -10054,7 +10562,6 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
             "debug": debug,
         }
 
-    print(f"DEBUG CV validation: heuristic_score={heuristic_score},detected_sections={heuristic['detected_sections']} visual_validation={visual_validation} final_reason={visual_warning or reason}")
     return {
         "is_cv": True,
         "confidence": clamp_score(confidence),
@@ -10109,10 +10616,6 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
     if not existing_user:
         conn.close()
         raise HTTPException(status_code=404, detail="Utente non trovato.")
-
-    print(
-        f"DEBUG CV upload: user_id={user_id}, file={filename}, profile_name={existing_user[1]!r}, extracted_text_length={len(clean_extracted_text(extracted_text))}, extraction_method={_extraction_method}"
-    )
 
     profile_name_parts = (existing_user[1] or "").split()
     first_name = profile_name_parts[0] if profile_name_parts else ""
@@ -10497,8 +11000,6 @@ def search_interview_questions(data: SearchInterviewQuestionsRequest):
 
 @app.post("/generate-question")
 def generate_question(data: GenerateQuestionRequest):
-    print("Endpoint /generate-question chiamato.")
-
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -10676,13 +11177,7 @@ La struttura deve essere ESATTAMENTE questa:
     try:
         raw_questions = call_groq(prompt, temperature=0.3, max_tokens=1400)
 
-        print("OUTPUT GREZZO GROQ DOMANDE:")
-        print(raw_questions)
-
         questions_list = extract_questions_list(raw_questions)
-
-        print("DOMANDE ESTRATTE:")
-        print(questions_list)
 
     except Exception as e:
         conn.close()
@@ -11193,8 +11688,6 @@ Regole di valutazione:
     conn.commit()
     conn.close()
 
-    print("Valutazione salvata e restituita al frontend.")
-
     return final_result
 
 
@@ -11354,13 +11847,12 @@ def get_question_sources(question_id: int):
         "question_id": question_id,
         "sources": sources
     }
-from fastapi import UploadFile, File
-from io import BytesIO
-import fitz
-from pypdf import PdfReader
-
 @app.post("/debug-cv-read")
 async def debug_cv_read(file: UploadFile = File(...)):
+    from io import BytesIO
+    import fitz
+    from pypdf import PdfReader
+
     file_bytes = await file.read()
 
     result = {
@@ -11408,3 +11900,5 @@ async def debug_cv_read(file: UploadFile = File(...)):
         result["pypdf_error"] = str(e)
 
     return result
+
+

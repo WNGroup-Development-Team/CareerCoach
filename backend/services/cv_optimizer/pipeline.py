@@ -38,7 +38,7 @@ SECTION_ALIASES = {
 
 def _cv_rewrite_llm_enabled() -> bool:
     try:
-        from services.cv_optimizer.structured_cv_engine import CV_REWRITE_LLM_ENABLED as enabled
+        from main import CV_REWRITE_LLM_ENABLED as enabled
         return bool(enabled)
     except Exception:
         return False
@@ -559,6 +559,15 @@ class DocxPreserver:
     def apply(self, original_file_bytes: bytes, instructions: List[RewriteInstruction]) -> tuple[bytes, int]:
         from docx import Document
 
+        # The specialized pipeline owns the section-aware replacement helpers.
+        # Keep the public base class compatible for callers and tests that use it directly.
+        if type(self) is DocxPreserver:
+            delegate = ResumeDocxOptimizationPipeline()
+            result = delegate.apply(original_file_bytes, instructions)
+            self.applied_source_ids = list(delegate.applied_source_ids)
+            self.skipped_source_ids = list(delegate.skipped_source_ids)
+            return result
+
         self.applied_source_ids = []
         self.skipped_source_ids = []
         document = Document(io.BytesIO(original_file_bytes))
@@ -566,56 +575,44 @@ class DocxPreserver:
         for i, instruction in enumerate(instructions):
             section_name = instruction.section or instruction.category or "unknown"
             original_preview = (instruction.original or "")[:80].replace('\n', '\\n') if instruction.original else "(no original)"
-            print(f"DEBUG DocxPreserver: istruzione {i}: section={section_name}, original_preview={original_preview}")
-            
             if not self._valid_instruction(instruction):
                 self.skipped_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} scartata (non valida)")
                 continue
             contexts = self._paragraph_contexts(document)
             if self._should_append(instruction):
                 self._append_section(document, instruction)
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _should_append/append_section")
                 continue
             if instruction.original and self._replace_exact(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_exact")
                 continue
             if instruction.original and self._replace_section_block(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_section_block")
                 continue
             if instruction.original and self._replace_similar(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_similar")
                 continue
             if instruction.original and self._replace_section_block(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_section_block")
                 continue
             if self._replace_in_section(contexts, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _replace_in_section")
                 continue
             if self._append_to_target_section(document, instruction):
                 applied += 1
                 self.applied_source_ids.append(instruction.source_id or instruction.section)
-                print(f"DEBUG DocxPreserver: istruzione {i} applicata tramite _append_to_target_section")
                 continue
             self.skipped_source_ids.append(instruction.source_id or instruction.section)
-            print(f"DEBUG DocxPreserver: istruzione {i} scartata (nessun metodo ha funzionato)")
 
         output = io.BytesIO()
         document.save(output)
         result_bytes = output.getvalue()
-        print(f"DEBUG DocxPreserver.apply FINE: applied={applied}, original_size={len(original_file_bytes)}, result_size={len(result_bytes)}, size_changed={len(result_bytes) != len(original_file_bytes)}")
         return result_bytes, applied
 
 
@@ -667,6 +664,7 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
         goal: str,
         accepted_suggestions: Optional[List[Dict[str, Any]]] = None,
         user_additional_data: Optional[Dict[str, Any]] = None,
+        use_llm: bool = True,
     ) -> List[StructuredRewriteInstruction]:
         accepted_suggestions = accepted_suggestions or []
         normalized_suggestions: List[Dict[str, Any]] = []
@@ -724,7 +722,7 @@ Dati aggiuntivi utente:
 {json.dumps(user_additional_data or {}, ensure_ascii=False)}
 """
         instructions: List[StructuredRewriteInstruction] = []
-        if _cv_rewrite_llm_enabled():
+        if use_llm and _cv_rewrite_llm_enabled():
             try:
                 result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1400, json_mode=True), context="structured_docx_instructions")
                 raw_instructions = result.get("instructions") if isinstance(result, dict) else []
@@ -746,7 +744,6 @@ Dati aggiuntivi utente:
                 print(f"Generazione istruzioni strutturate non disponibile: {exc}")
 
         if not instructions:
-            print("DEBUG DOCX pipeline: uso fallback locale per le istruzioni strutturate.")
             for suggestion in normalized_suggestions:
                 instructions.append(StructuredRewriteInstruction(
                     suggestion_id=suggestion["suggestion_id"],
@@ -769,7 +766,6 @@ Dati aggiuntivi utente:
 
         document = Document(io.BytesIO(original_file_bytes))
         sections_detected = self._detect_sections(document)
-        print("DEBUG DOCX sections detected:", sections_detected)
         applied_ids: List[str] = []
         partially_applied_ids: List[str] = []
         failed_ids: List[str] = []
@@ -892,7 +888,6 @@ Dati aggiuntivi utente:
         contexts = self._paragraph_contexts(document)
         matching = [context for context in contexts if context.section == target and self._is_editable_paragraph(context.paragraph)]
         if not matching:
-            print(f"DEBUG DOCX apply: sezione non trovata per {instruction.suggestion_id}, fallback sicuro")
             return self._insert_missing_section(document, instruction, sections_detected)
 
         replacement_lines = [line.strip() for line in instruction.new_text.splitlines() if line.strip()]
@@ -1610,24 +1605,14 @@ Dati aggiuntivi utente:
         original_text = paragraph.text
         if not runs:
             paragraph.add_run(replacement)
-            print(f"DEBUG _replace_preserving_first_run: nessun run, aggiunto nuovo run con replacement")
             return
-        
-        print(f"DEBUG _replace_preserving_first_run PRIMA: replacement_len={len(replacement)}, replacement_preview={replacement[:100].replace(chr(10), '\\n')}")
-        print(f"DEBUG _replace_preserving_first_run PRIMA: paragraph.text_len={len(original_text)}, runs_count={len(runs)}")
-        
+
         runs[0].text = replacement
         
         # Verifica se il testo è stato salvato
         runs_after = list(paragraph.runs)
-        print(f"DEBUG _replace_preserving_first_run DOPO: runs_count={len(runs_after)}, runs[0].text_len={len(runs_after[0].text) if runs_after else 0}")
-        if runs_after:
-            print(f"DEBUG _replace_preserving_first_run DOPO: runs[0].text_preview={runs_after[0].text[:100].replace(chr(10), '\\n')}")
-        
         for run in runs[1:]:
             run.text = ""
-        new_text = paragraph.text
-        print(f"DEBUG _replace_preserving_first_run FINE: paragraph.text_len={len(new_text)}, matches_replacement={new_text == replacement}")
 
 
 class ExportService:

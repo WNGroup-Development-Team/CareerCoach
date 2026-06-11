@@ -4,6 +4,7 @@ import unittest
 from docx import Document
 
 from main import build_confirmed_skill_rewrite_instructions
+from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
 from services.cv_optimizer.pipeline import (
     DocxPreserver,
     ResumeParser,
@@ -23,10 +24,10 @@ class ResumeParserLayoutTests(unittest.TestCase):
         sections = {section.name: section.text for section in ResumeParser().parse_text(text)}
 
         self.assertIn("profilo", sections)
-        self.assertIn("competenze", sections)
+        self.assertIn("hard_skills", sections)
         self.assertIn("formazione", sections)
         self.assertIn("esperienze", sections)
-        self.assertEqual(sections["competenze"], "Python SQL Power BI")
+        self.assertEqual(sections["hard_skills"], "Python SQL Power BI")
 
 
 class ResumeRewriterTests(unittest.TestCase):
@@ -55,6 +56,47 @@ class ResumeRewriterTests(unittest.TestCase):
             optimized,
         )
         self.assertNotEqual(optimized, original)
+
+    def test_build_optimized_cv_text_applies_accepted_edits(self):
+        original = (
+            "SILVIA MUCCI\n"
+            "CHI SONO\n"
+            "Sono una studentessa magistrale in Ingegneria Informatica.\n\n"
+            "HARD SKILLS\n"
+            "Python SQL Java\n\n"
+            "ESPERIENZE PROFESSIONALI\n"
+            "Supporto all'analisi legislativa tramite LLM."
+        )
+
+        accepted = [
+            {
+                "id": "profile-1",
+                "type": "actionableEdit",
+                "section": "CHI SONO",
+                "original_text": "Sono una studentessa magistrale in Ingegneria Informatica.",
+                "proposed_text": "Sono una studentessa magistrale in Ingegneria Informatica orientata all'analisi dei dati e allo sviluppo di soluzioni digitali.",
+            },
+            {
+                "id": "skills-1",
+                "type": "actionableEdit",
+                "section": "HARD SKILLS",
+                "original_text": "Python SQL Java",
+                "proposed_text": "Python, SQL, Java, Machine Learning",
+            },
+        ]
+
+        optimized = build_optimized_cv_text(
+            original,
+            accepted,
+            user_additional_data={},
+            role="Data Analyst",
+            company="Google",
+            use_llm=False,
+        )
+
+        self.assertNotEqual(optimized, original)
+        self.assertIn("orientata all'analisi dei dati", optimized)
+        self.assertIn("Machine Learning", optimized)
 
 
 class DocxPreserverLayoutTests(unittest.TestCase):

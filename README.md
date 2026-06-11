@@ -118,7 +118,7 @@ TAVILY_API_KEY=your_tavily_api_key_here
 Sempre dentro `backend`, con il virtual environment attivo:
 
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --reload --reload-exclude "test_*.py" --reload-exclude "*debug*"
 ```
 
 Se tutto funziona, compare:
@@ -182,7 +182,7 @@ Per usare l’app devono essere attivi **due terminali**.
 ```bash
 cd backend
 venv\Scripts\Activate.ps1
-uvicorn main:app --reload
+uvicorn main:app --reload --reload-exclude "test_*.py" --reload-exclude "*debug*"
 ```
 
 Backend:
@@ -246,7 +246,7 @@ cd backend
 python -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn main:app --reload
+uvicorn main:app --reload --reload-exclude "test_*.py" --reload-exclude "*debug*"
 ```
 
 Frontend, in un altro terminale:
