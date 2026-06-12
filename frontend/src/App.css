@@ -476,6 +476,278 @@ textarea {
   width: min(100%, 540px);
 }
 
+/* ====== Digital redesign boxes (Collega i tuoi profili online) ====== */
+
+.digital-redesign-cards {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+
+.digital-card {
+  border: 1px solid #dceffa;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+  padding: 18px 18px 16px;
+}
+
+.digital-card-title {
+  margin: 0 0 6px;
+  color: #0f5f94;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.digital-card-subtitle {
+  margin: 0 0 14px;
+  color: #6d7784;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.digital-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.digital-field-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #263548;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.digital-field-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: #eaf4ff;
+  color: #0f76a8;
+  flex: 0 0 auto;
+}
+
+.digital-field-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.digital-input {
+  border: 1px solid #d8e1ea;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 800;
+  color: #1f2933;
+  outline: none;
+}
+
+.digital-input:focus {
+  border-color: #0f76a8;
+  box-shadow: 0 0 0 3px rgba(15, 118, 168, 0.14);
+}
+
+.digital-field-hint {
+  margin: -4px 0 6px;
+  color: #6d7784;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.optional-pill {
+  margin-left: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef4ff;
+  border: 1px solid #cfe2f2;
+  color: #4f6b86;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.digital-export-dropzone {
+  border: 1px dashed #bfe3fb;
+  border-radius: 14px;
+  background: #f8fcff;
+  padding: 12px 12px;
+  margin-top: 6px;
+}
+
+.digital-export-zone-copy {
+  display: block;
+  cursor: pointer;
+}
+
+.digital-export-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  background: #eaf4ff;
+  color: #0f76a8;
+  margin-right: 10px;
+}
+
+.digital-export-drop-hint {
+  display: block;
+  margin-top: 6px;
+  color: #7b8794;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.digital-analysis-score {
+  width: 132px;
+  height: 132px;
+  margin: 0 auto 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  box-shadow: 0 18px 40px rgba(15, 118, 187, 0.10);
+}
+
+.digital-analysis-score span {
+  color: #0f76a8;
+  font-size: 34px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+
+.digital-file-input {
+  display: none;
+}
+
+.digital-export-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid #0f76bb;
+  background: #ffffff;
+  color: #0f76bb;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.digital-cta-button {
+  width: 100%;
+  margin-top: 16px;
+  min-height: 54px;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(120deg, #139ff2 0%, #0f76bb 100%);
+  color: #ffffff;
+  font-weight: 900;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.24);
+}
+
+/* Palestra colloqui: forma esterna condivisa tra “Genera 10 domande” e “Vedi storico” (colori/simboli restano quelli delle classi originali) */
+.gym-cta-shape {
+  min-height: 54px;
+  border-radius: 999px;
+  padding: 0 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.24);
+}
+
+.gym-cta-shape:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+  box-shadow: none;
+}
+
+
+.digital-cta-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  background: #d9e6f0;
+  color: #7c8b99;
+  box-shadow: none;
+}
+
+.digital-skip-link {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin-top: 12px;
+  color: #0f76a8;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+/* Screenshot dropzone */
+.screenshot-dropzone {
+  border: 1px dashed #bfe3fb;
+  border-radius: 14px;
+  background: #f8fcff;
+  padding: 12px;
+}
+
+.screenshot-dropzone-content {
+  display: grid;
+  gap: 10px;
+}
+
+.screenshot-dropzone-content h4 {
+  margin: 0;
+  color: #17395d;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.screenshot-dropzone-content p {
+  margin: 0;
+  color: #6d7784;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.digital-card--main,
+.digital-card--screens {
+  position: relative;
+}
+
+/* Forza colonna singola anche su schermi grandi (UI web più leggibile) */
+@media (min-width: 900px) {
+  .digital-redesign-cards {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+}
+
+
+
+
 .cv-loaded-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -954,6 +1226,47 @@ textarea {
 .cv-upload-card input[type="file"] {
   display: none;
 }
+
+.cv-drop-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 24px;
+  background: rgba(15, 118, 168, 0.08);
+  border: 2px dashed #139ff2;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.cv-drop-overlay-inner {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(19, 159, 242, 0.35);
+  border-radius: 16px;
+  padding: 14px 18px;
+  text-align: center;
+  box-shadow: 0 18px 40px rgba(15, 118, 187, 0.14);
+}
+
+.cv-file-choose-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.cv-file-choose-hint {
+  color: #4b6a82;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.digital-export-dropzone--linkedin {
+  position: relative;
+  overflow: hidden;
+}
+
+.digital-export-dropzone--linkedin:has(.digital-file-drag-hint) {}
 
 .browse-file-btn,
 .cv-next-button,
@@ -4742,5 +5055,4 @@ textarea {
   color: #8c96a3;
   margin-top: 2px;
 }
- 
- 
+

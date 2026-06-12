@@ -1,0 +1,7 @@
+- [ ] Redesign step === "cv-digital" UI (LinkedIn+export+extra URL+Instagram grouped into 1 card; screenshots into a separate card below)
+- [ ] Update copy exactly as requested (titles/subtitles, hints, privacy note placement, CTA + sparkle icon, “Salta per ora” link)
+- [ ] Add icons in field labels and convert “opzionale” to muted pill badges (no parentheses)
+- [ ] Success banner at top: green background + checkmark circle icon
+- [ ] Update visual style: light gray page bg, white flat cards, 0.5px border, 12px rounded corners, no gradients/shadows, solid blue CTA (#1a73e8), subtle gray inputs
+- [ ] Ensure existing functionality/handlers/refs remain unchanged (uploadLinkedinProfile, analyzeSocialScreenshots, analyzeDigitalPresence, file inputs)
+- [ ] Verify build/lint in frontend
