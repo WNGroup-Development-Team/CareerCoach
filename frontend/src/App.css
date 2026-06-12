@@ -2153,6 +2153,58 @@ textarea {
   line-height: 1.5;
 }
 
+.cv-preview-structured {
+  display: grid;
+  gap: 14px;
+}
+
+.cv-preview-section {
+  padding: 16px;
+  border: 1px solid #dceffa;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fafdff 0%, #f4f9fe 100%);
+  box-shadow: 0 8px 24px rgba(15, 118, 168, 0.06);
+}
+
+.cv-preview-section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.cv-preview-section-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #e7f4fb;
+  color: #0f76a8;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cv-preview-section-header h3 {
+  margin: 0;
+  color: #263548;
+  font-size: 1rem;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.cv-preview-section-content {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 0.96em;
+  line-height: 1.55;
+  color: #263548;
+}
+
 .cv-word-preview {
   padding: 18px;
   border: 1px dashed #b7cde4;
@@ -4742,5 +4794,5 @@ textarea {
   color: #8c96a3;
   margin-top: 2px;
 }
- 
- 
+
+

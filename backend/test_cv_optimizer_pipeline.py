@@ -1,10 +1,12 @@
 import io
 import unittest
+from unittest.mock import patch
 
 from docx import Document
 from docx.shared import Pt
 
 from main import build_confirmed_skill_rewrite_instructions
+from services.cv_optimizer.rewrite import build_resume_rewrite_result
 from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
 from services.cv_optimizer.pipeline import (
     DocxPreserver,
@@ -13,6 +15,7 @@ from services.cv_optimizer.pipeline import (
     ResumeRewriter,
     RewriteInstruction,
     StructuredRewriteInstruction,
+    canonical_section,
 )
 
 
@@ -101,6 +104,142 @@ class ResumeRewriterTests(unittest.TestCase):
         self.assertIn("orientata all'analisi dei dati", optimized)
         self.assertIn("Machine Learning", optimized)
 
+    def test_build_optimized_cv_text_preserves_experience_rewrite_when_merge_is_sparse(self):
+        original = (
+            "Luca Zerella\n"
+            "ESPERIENZE PROFESSIONALI\n"
+            "Utilizzato in esame di basi di dati per analisi e manipolazione di dati relazionali.\n\n"
+            "PROGETTI\n"
+            "Progetto Machine Learning\n"
+            "Implementazione di pipeline ML per analisi predittiva.\n"
+        )
+
+        accepted = [
+            {
+                "id": "experience-1",
+                "type": "actionableEdit",
+                "section": "ESPERIENZE PROFESSIONALI",
+                "original_text": "Utilizzato in esame di basi di dati per analisi e manipolazione di dati relazionali.",
+                "proposed_text": (
+                    "Esperienza orientata ad analisi dati, automazione e valutazione dei risultati per il ruolo di Data Analyst:\n"
+                    "- Utilizzato in esame di basi di dati per analisi e manipolazione di dati relazionali."
+                ),
+            }
+        ]
+
+        optimized = build_optimized_cv_text(
+            original,
+            accepted,
+            user_additional_data={},
+            role="Data Analyst",
+            company="",
+            use_llm=False,
+        )
+
+        self.assertNotIn("Esperienza orientata ad analisi dati", optimized)
+        self.assertNotIn("Utilizzato in esame di basi di dati", optimized)
+        self.assertIn("PROGETTI", optimized)
+
+    def test_build_resume_rewrite_result_converts_informal_notes_and_deduplicates_skills(self):
+        with patch("main.CV_REWRITE_LLM_ENABLED", False):
+            result = build_resume_rewrite_result(
+                cv_text=(
+                    "PROFILO\n"
+                    "Studente magistrale in Ingegneria Informatica.\n\n"
+                    "HARD SKILLS\n"
+                    "Python, SQL, Data visualization\n\n"
+                    "PROGETTI\n"
+                    "Progetto Machine Learning\n"
+                    "Implementazione di pipeline ML per analisi predittiva.\n"
+                ),
+                company="",
+                role="Data Analyst",
+                goal="Ottimizzazione CV",
+                accepted_suggestions=[],
+                user_additional_data={
+                    "adaptation_answers": [
+                        {
+                            "question": "Hai usato database a lezione?",
+                            "answer": "Database l'ho visto all'esame di basi dati.",
+                            "category": "experience",
+                        },
+                        {
+                            "question": "Hai usato data visualization?",
+                            "answer": "Ho applicato la data visualization in progetti di analisi dati, creando grafici e dashboard.",
+                            "category": "project",
+                        },
+                    ],
+                    "confirmed_skills": [
+                        {
+                            "id": "dup-sql",
+                            "name": "SQL",
+                            "target_section": "HARD SKILLS",
+                            "category": "hard_skill",
+                        },
+                        {
+                            "id": "dup-sql-2",
+                            "name": "SQL",
+                            "target_section": "HARD SKILLS",
+                            "category": "hard_skill",
+                        },
+                        {
+                            "id": "database-relazionali",
+                            "name": "Database relazionali",
+                            "target_section": "HARD SKILLS",
+                            "category": "hard_skill",
+                        },
+                    ],
+                },
+            )
+
+        text = result["optimized_text"]
+        lowered = text.lower()
+        self.assertNotIn("l'ho visto", lowered)
+        self.assertNotIn("ho applicato", lowered)
+        self.assertIn("data visualization", lowered)
+        self.assertIn("database relazionali", lowered)
+        self.assertEqual(lowered.count("sql"), 1)
+        self.assertTrue("competenze tecniche" in lowered or "progetti" in lowered)
+        self.assertNotIn("esperienza orientata", lowered)
+
+    def test_resume_rewrite_result_includes_additional_screen_inputs(self):
+        with patch("main.CV_REWRITE_LLM_ENABLED", False):
+            result = build_resume_rewrite_result(
+                cv_text=(
+                    "PROFILO\n"
+                    "Studente magistrale in Ingegneria Informatica.\n\n"
+                    "HARD SKILLS\n"
+                    "Python, SQL\n"
+                ),
+                company="Poste Italiane",
+                role="Project Manager",
+                goal="Ottimizzazione CV",
+                accepted_suggestions=[],
+                user_additional_data={
+                    "adaptation_answers": [
+                        {
+                            "question": "Hai gestito attività o progetti?",
+                            "answer": "Ho coordinato un progetto universitario con divisione attività e scadenze.",
+                            "category": "experience",
+                        }
+                    ],
+                    "confirmed_skills": [
+                        {
+                            "id": "pm-jira",
+                            "name": "Jira",
+                            "detail": "Usato per organizzare attività e priorità.",
+                            "target_section": "HARD SKILLS",
+                            "type": "skillConfirmation",
+                        }
+                    ],
+                },
+            )
+
+        text = result["optimized_text"]
+        self.assertIn("progetto universitario", text.lower())
+        self.assertIn("jira", text.lower())
+        self.assertTrue(result["instructions"])
+
 
 class DocxPreserverLayoutTests(unittest.TestCase):
     def _docx_bytes(self, document: Document) -> bytes:
@@ -140,6 +279,114 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         )
 
         self.assertFalse(pipeline._is_safe_target_text(instruction))
+
+    def test_structured_instruction_guard_removes_unsupported_pm_content(self):
+        cv_text = (
+            "PROFILO\n"
+            "Studente magistrale in Ingegneria Informatica.\n"
+            "HARD SKILLS\n"
+            "Python, Java\n"
+            "SOFT SKILLS\n"
+            "Problem solving, organizzazione\n"
+            "PROGETTI\n"
+            "Progetto Software\n"
+            "Sviluppo di un'applicazione Java con lavoro in team.\n"
+        )
+        pipeline = ResumeDocxOptimizationPipeline()
+        instructions = pipeline.generate_structured_instructions(
+            cv_text=cv_text,
+            role="Project Manager",
+            company="",
+            goal="",
+            accepted_suggestions=[
+                {
+                    "id": "invented-experience",
+                    "section": "ESPERIENZE PROFESSIONALI",
+                    "original_text": "",
+                    "proposed_text": "Esperienza professionale come Project Manager.",
+                },
+                {
+                    "id": "unsupported-skills",
+                    "section": "HARD SKILLS",
+                    "original_text": "Python, Java",
+                    "proposed_text": "Python, Java, Gestione budget, Microsoft Project, Monday.com, Notion",
+                },
+                {
+                    "id": "projects-with-note",
+                    "section": "PROGETTI",
+                    "original_text": "Progetto Software\nSviluppo di un'applicazione Java con lavoro in team.",
+                    "proposed_text": (
+                        "Progetto Software\n"
+                        "Sviluppo di un'applicazione Java con lavoro in team.\n"
+                        "Usata in progetto di sviluppo software per allineare requisiti e aspettative."
+                    ),
+                },
+            ],
+            user_additional_data={
+                "confirmed_skills": [
+                    {
+                        "name": "Gestione requisiti",
+                        "detail": "Usata in progetto di sviluppo software per allineare requisiti e aspettative.",
+                    }
+                ]
+            },
+            use_llm=False,
+        )
+
+        joined = "\n".join(item.new_text for item in instructions)
+        targets = {canonical_section(item.target_section) for item in instructions}
+        self.assertNotIn("esperienze", targets)
+        self.assertNotIn("Gestione budget", joined)
+        self.assertNotIn("Microsoft Project", joined)
+        self.assertNotIn("Monday.com", joined)
+        self.assertNotIn("Notion", joined)
+        self.assertNotIn("Usata in progetto", joined)
+        self.assertIn("Progetto Software", joined)
+
+    def test_project_rewrite_keeps_title_description_pairs(self):
+        original = (
+            "PROFILO\nStudente magistrale.\n"
+            "PROGETTI\n"
+            "Progetto Machine Learning\n"
+            "Implementazione di pipeline di analisi predittiva con feature engineering.\n"
+            "Progetto Big Data\n"
+            "Elaborazione distribuita di dataset con Hadoop, Hive e Spark.\n"
+            "Progetto Deep Learning\n"
+            "Sviluppo e addestramento di reti neurali per classificazione.\n"
+        )
+        accepted = [{
+            "id": "projects-clean",
+            "type": "actionableEdit",
+            "section": "PROGETTI",
+            "original_text": (
+                "Progetto Machine Learning\n"
+                "Implementazione di pipeline di analisi predittiva con feature engineering.\n"
+                "Progetto Big Data\n"
+                "Elaborazione distribuita di dataset con Hadoop, Hive e Spark.\n"
+                "Progetto Deep Learning\n"
+                "Sviluppo e addestramento di reti neurali per classificazione."
+            ),
+            "proposed_text": (
+                "Progetto Machine Learning\n"
+                "Implementazione di pipeline di analisi predittiva con feature engineering.\n"
+                "Progetto Big Data\n"
+                "Elaborazione distribuita di dataset con Hadoop, Hive e Spark.\n"
+                "Progetto Deep Learning\n"
+                "Sviluppo e addestramento di reti neurali per classificazione."
+            ),
+        }]
+
+        optimized = build_optimized_cv_text(
+            original,
+            accepted,
+            user_additional_data={},
+            role="Project Manager",
+            use_llm=False,
+        )
+
+        self.assertIn("Progetto Machine Learning\nImplementazione", optimized)
+        self.assertIn("Progetto Big Data\nElaborazione", optimized)
+        self.assertIn("Progetto Deep Learning\nSviluppo", optimized)
 
     def test_structured_pipeline_applies_profile_and_skill_updates_together(self):
         document = Document()
@@ -264,6 +511,79 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         project_body = next(paragraph for paragraph in updated.paragraphs if paragraph.text == "Progetto uno")
 
         self.assertTrue(project_heading.runs[0].bold)
+
+    def test_structured_pipeline_formats_project_titles_and_descriptions(self):
+        document = Document()
+        document.add_paragraph("PROGETTI")
+        document.add_paragraph("Progetto precedente")
+        document.add_paragraph("Descrizione precedente.")
+
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="projects-readable",
+            target_section="PROGETTI",
+            action="replace",
+            old_text_hint="Progetto precedente\nDescrizione precedente.",
+            new_text=(
+                "Progetto Machine Learning\n"
+                "Implementazione di una pipeline di analisi predittiva.\n"
+                "Progetto Big Data\n"
+                "Elaborazione distribuita di dataset con Hadoop e Spark."
+            ),
+            items=[],
+            reason="Rende i progetti leggibili.",
+            confidence=0.9,
+        )
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [instruction],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        projects = {
+            paragraph.text: paragraph
+            for paragraph in updated.paragraphs
+            if paragraph.text.startswith(("Progetto ", "Implementazione ", "Elaborazione "))
+        }
+
+        self.assertTrue(projects["Progetto Machine Learning"].runs[0].bold)
+        self.assertFalse(projects["Implementazione di una pipeline di analisi predittiva."].runs[0].bold)
+        self.assertTrue(projects["Progetto Big Data"].paragraph_format.keep_with_next)
+
+    def test_structured_pipeline_harmonizes_arial_mt_without_replacing_custom_fonts(self):
+        document = Document()
+        arial_body = document.add_paragraph("Testo principale")
+        arial_body.runs[0].font.name = "Arial MT"
+        custom_heading = document.add_paragraph("PROGETTI")
+        custom_heading.runs[0].font.name = "Montserrat"
+        document.add_paragraph("Progetto Software")
+        document.add_paragraph("Sviluppo di una applicazione.")
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+
+        self.assertEqual(updated.paragraphs[0].runs[0].font.name, "Arial")
+        self.assertEqual(updated.paragraphs[1].runs[0].font.name, "Montserrat")
+
+    def test_structured_pipeline_removes_orphan_section_heading(self):
+        document = Document()
+        document.add_paragraph("COMPETENZE TECNICHE")
+        document.add_paragraph("")
+        document.add_paragraph("PROGETTI")
+        document.add_paragraph("Progetto Software")
+        document.add_paragraph("Sviluppo di una applicazione Java.")
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text.strip()]
+
+        self.assertNotIn("COMPETENZE TECNICHE", texts)
+        self.assertIn("PROGETTI", texts)
 
     def test_structured_pipeline_minimizes_trailing_paragraph_after_table(self):
         document = Document()

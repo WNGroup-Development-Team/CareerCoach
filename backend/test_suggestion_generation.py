@@ -8,6 +8,8 @@ sys.path.insert(0, '.')
 
 from main import (
     build_coach_suggestions_from_evaluation,
+    build_cv_job_suggestions,
+    build_generic_rewrite_fallbacks,
     canonical_skill_identity,
     build_role_skill_suggestions,
     call_ollama,
@@ -96,6 +98,22 @@ class TestSuggestionGeneration(unittest.TestCase):
 
         self.assertIsInstance(suggestions, list)
 
+    def test_education_only_cv_gets_a_safe_local_suggestion(self):
+        evaluation = {
+            "cv_text": (
+                "Luca Zerella\n"
+                "FORMAZIONE\n"
+                "Laurea magistrale in Ingegneria Informatica, curriculum Intelligenza Artificiale."
+            ),
+            "target": {"role": "Software Engineer", "company": "TIM"},
+        }
+
+        suggestions = build_cv_job_suggestions(evaluation, allow_llm=False)
+
+        self.assertGreaterEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0].get("section"), "FORMAZIONE")
+        self.assertIn("Percorso accademico", suggestions[0].get("proposed_text", ""))
+
     def test_skill_source_stops_before_cross_column_education_text(self):
         source = (
             "Python ML & AI C++ SQL Java\n"
@@ -131,6 +149,117 @@ class TestSuggestionGeneration(unittest.TestCase):
         self.assertIn("Creatività", skills)
         self.assertIn("Problem solving", skills)
         self.assertNotIn("SILVIA MUCCI", " ".join(skills))
+
+    def test_rewrite_generators_stay_generic_about_role_and_company(self):
+        section_map = {
+            "profile": "Profilo breve con esperienza in analisi e progettazione.",
+            "experience": "Supporto su dati, documenti e automazione dei processi.",
+        }
+        suggestions = build_generic_rewrite_fallbacks(section_map, "Game Design")
+        combined = " ".join(
+            f"{item.get('title', '')} {item.get('description', '')} {item.get('proposed_text', '')}"
+            for item in suggestions
+        )
+
+        self.assertNotIn("Datewave", combined)
+        self.assertNotIn("Game Design presso", combined)
+        self.assertIn("ruolo target", combined)
+
+    def test_backend_generates_actionable_coach_suggestions_for_generic_role_context(self):
+        evaluation = {
+            "cv_text": (
+                "PROFILO\n"
+                "Studente magistrale in Ingegneria Informatica.\n"
+                "HARD SKILLS\n"
+                "Python, SQL, Java\n"
+                "ESPERIENZE PROFESSIONALI\n"
+                "Supporto su dati e automazione dei processi."
+            ),
+            "role": "Game Design",
+            "company": "Datewave",
+            "missing_keywords": [],
+            "relevant_skills_found": ["Python", "SQL"],
+            "sections_to_improve": ["profile", "experience"],
+            "coach_suggestions": [],
+            "suggestions": [],
+        }
+
+        suggestions = build_coach_suggestions_from_evaluation(evaluation, allow_llm=False)
+
+        self.assertGreaterEqual(len(suggestions), 1)
+        self.assertTrue(all(item.get("type") == "actionableEdit" for item in suggestions))
+        joined = " ".join(
+            f"{item.get('description', '')} {item.get('proposed_text', '')}"
+            for item in suggestions
+        ).lower()
+        self.assertNotIn("datewave", joined)
+        self.assertNotIn("game design presso", joined)
+        self.assertTrue(any("profilo" in (item.get("section") or "").lower() or "esperienz" in (item.get("section") or "").lower() for item in suggestions))
+
+    def test_software_engineering_cv_always_gets_applicable_suggestions(self):
+        evaluation = {
+            "cv_text": (
+                "Luca Zerella\n"
+                "PROFILO\n"
+                "Studente magistrale in Ingegneria Informatica con curriculum in Intelligenza Artificiale.\n"
+                "COMPETENZE TECNICHE\n"
+                "Python, C, Java, TensorFlow, PyTorch, scikit-learn, Apache Spark\n"
+                "PROGETTI\n"
+                "Progetto Machine Learning\n"
+                "Implementazione di pipeline di analisi predittiva con scikit-learn.\n"
+                "Progetto Big Data\n"
+                "Elaborazione distribuita di dataset con Hadoop, Hive e Spark.\n"
+            ),
+            "target": {
+                "role": "Software Engineer",
+                "company": "TIM",
+                "description": "Sviluppo software, testing, Git e collaborazione in team.",
+            },
+            "missing_keywords": ["Git", "Unit testing"],
+            "relevant_skills_found": ["Python", "Java"],
+        }
+
+        suggestions = build_cv_job_suggestions(evaluation, allow_llm=False)
+
+        self.assertGreaterEqual(len(suggestions), 1)
+        self.assertTrue(all(item.get("original_text") for item in suggestions))
+        self.assertTrue(all(item.get("proposed_text") for item in suggestions))
+        self.assertTrue(all(count_section_markers(item.get("proposed_text", "")) == 0 for item in suggestions))
+
+    def test_backend_uses_additional_screen_data_when_cv_section_is_missing(self):
+        evaluation = {
+            "cv_text": "PROFILO\nStudente magistrale in Ingegneria Informatica.\nHARD SKILLS\nPython, SQL",
+            "target": {"role": "Project Manager", "company": "Poste Italiane"},
+            "user_additional_data": {
+                "adaptation_answers": [
+                    {
+                        "question": "Hai gestito attività o progetti?",
+                        "answer": "Ho coordinato un progetto universitario con divisione attività e scadenze.",
+                        "category": "experience",
+                    }
+                ],
+                "confirmed_skills": [
+                    {
+                        "id": "pm-jira",
+                        "name": "Jira",
+                        "detail": "Usato per organizzare attività e priorità.",
+                        "target_section": "HARD SKILLS",
+                        "type": "skillConfirmation",
+                    }
+                ],
+            },
+            "coach_suggestions": [],
+            "suggestions": [],
+        }
+
+        suggestions = build_coach_suggestions_from_evaluation(evaluation, allow_llm=False)
+
+        self.assertGreaterEqual(len(suggestions), 1)
+        joined = " ".join(
+            f"{item.get('description', '')} {item.get('proposed_text', '')}"
+            for item in suggestions
+        ).lower()
+        self.assertTrue(any(item.get("section") for item in suggestions))
 
     def test_compact_skill_mini_shot_builds_actionable_fields_locally(self):
         evaluation = {

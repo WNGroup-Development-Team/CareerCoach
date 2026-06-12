@@ -99,6 +99,14 @@ COMMON_SKILLS = [
     "Unity", "Unreal Engine", "Blender", "Figma", "Miro", "Power BI", "Tableau", "Excel", "Jira", "Trello", "Asana"
 ]
 
+INFORMAL_REPLACEMENTS = (
+    (r"\b(visto|vista|visti|viste)\s+(all'?esame|in esame|durante l'?esame)\b", ""),
+    (r"\b(ho|abbiamo)\s+(usato|utilizzato|applicato|sperimentato|lavorato con)\b", ""),
+    (r"\b(l'?ho|lo|la|li|le)\s+(usato|utilizzato|applicato)\b", ""),
+    (r"\bin esame di basi dati\b", "basi di dati"),
+    (r"\bin esame di basi di dati\b", "basi di dati"),
+)
+
 OLLAMA_COPYWRITING_TIMEOUT = 20
 
 
@@ -207,7 +215,21 @@ def unique(values: Any) -> List[str]:
     return result
 
 
-def prepare_lines(cv_text: str) -> List[str]:
+def normalize_professional_language(text: str) -> str:
+    cleaned_lines: List[str] = []
+    for raw_line in re.sub(r"\r\n?", "\n", text or "").splitlines():
+        line = re.sub(r"[ \t]+", " ", raw_line).strip()
+        if not line:
+            continue
+        for pattern, replacement in INFORMAL_REPLACEMENTS:
+            line = re.sub(pattern, replacement, line, flags=re.IGNORECASE)
+        line = re.sub(r"\s{2,}", " ", line).strip(" ,;:-")
+        if line:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
+def _legacy_prepare_lines_with_repeated_aliases(cv_text: str) -> List[str]:
     prepared = re.sub(r"\r\n?", "\n", cv_text or "")
     for aliases in SECTION_ALIASES.values():
         for heading in sorted(aliases, key=len, reverse=True):
@@ -270,13 +292,41 @@ def parse_cv(cv_text: str) -> ParsedCV:
                 continue
             if key in {"hard_skills", "soft_skills"} and any(marker in plain for marker in ["obiettivo", "formazione", "esperienza", "progetti", "lingue", "comunicazione"]):
                 continue
+            if key == "projects":
+                word_count = len(plain.split())
+                if (
+                    word_count <= 3
+                    and len(plain) <= 28
+                    and not re.search(r"[.!?:;]", line)
+                    and not any(term in plain for term in ["progetto", "project", "tesi", "stage", "tirocinio", "thesis"])
+                ):
+                    continue
+                if extract_skill_terms(line) and not any(term in plain for term in ["progetto", "project", "tesi", "stage", "tirocinio", "thesis", "svilupp", "implement", "analisi", "dataset", "pipeline"]):
+                    continue
             filtered.append(line)
         text = "\n".join(unique(filtered)) if key in {"hard_skills", "soft_skills"} else "\n".join(filtered)
-        text = shorten(text, 1100)
+        if key != "projects":
+            text = shorten(text, 1100)
         if text:
             cleaned_sections[key] = text
 
     return ParsedCV(sections=cleaned_sections, order=[key for key in order if key in cleaned_sections])
+
+
+def prepare_lines(cv_text: str) -> List[str]:
+    """Split headings once, preferring longer aliases over partial matches."""
+    prepared = re.sub(r"\r\n?", "\n", cv_text or "")
+    heading_pattern = "|".join(
+        re.escape(heading)
+        for heading in sorted(ALL_HEADINGS, key=len, reverse=True)
+    )
+    prepared = re.sub(
+        rf"(?<!\w)({heading_pattern})\s*:?(?=\s|$)",
+        lambda match: f"\n{match.group(1).strip().upper()}\n",
+        prepared,
+        flags=re.IGNORECASE,
+    )
+    return [clean_line(line) for line in prepared.splitlines() if clean_line(line)]
 
 
 def infer_role_family(role: str, description: str = "", required_skills: str = "") -> str:
@@ -348,6 +398,21 @@ def strip_section_titles(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def clean_skill_entries(values: List[str]) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for value in values:
+        item = normalize_professional_language(clean_line(value))
+        if not item:
+            continue
+        key = normalize(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
 def sanitize_rewrite_instruction(instruction: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(instruction, dict):
         return None
@@ -357,6 +422,7 @@ def sanitize_rewrite_instruction(instruction: Dict[str, Any]) -> Optional[Dict[s
     if not section or not replacement:
         return None
     replacement = strip_section_titles(replacement)
+    replacement = normalize_professional_language(replacement)
     if not replacement:
         return None
     norm_replacement = normalize(replacement)
@@ -476,6 +542,8 @@ def extract_skill_terms(text: str) -> List[str]:
     for part in re.split(r"[,;|•·\n]+", text or ""):
         part = re.sub(r"[●○■□▪▫]+", " ", part)
         part = clean_line(part)
+        if ":" in part:
+            part = clean_line(part.split(":", 1)[1])
         if not part or looks_like_contact(part):
             continue
         if 1 <= len(part.split()) <= 4:
@@ -491,6 +559,7 @@ def group_skills(skills: List[str]) -> str:
         "Strumenti e metodi": [],
     }
     for skill in skills:
+        skill = normalize_professional_language(skill)
         plain = normalize(skill)
         if plain in {"python", "sql", "java", "c++", "c#"}:
             buckets["Linguaggi e database"].append(skill)
@@ -502,7 +571,7 @@ def group_skills(skills: List[str]) -> str:
             buckets["Strumenti e metodi"].append(skill)
     rows = []
     for label, values in buckets.items():
-        values = unique(values)
+        values = clean_skill_entries(values)
         if values:
             rows.append(f"{label}: {', '.join(values)}")
     return "\n".join(rows)
@@ -620,10 +689,10 @@ def experience_rewrite(original: str, target: Dict[str, Any]) -> str:
     else:
         intro = f"Esperienza professionale orientata al ruolo di {role}:\n"
 
-    return intro + ("\n".join(header_lines) + "\n" if header_lines else "") + "\n".join(bullets)
+    return ("\n".join(header_lines) + "\n" if header_lines else "") + "\n".join(bullets)
 
 
-def projects_rewrite(original: str, target: Dict[str, Any]) -> str:
+def _legacy_projects_rewrite(original: str, target: Dict[str, Any]) -> str:
     role = target.get("role") or "ruolo target"
     target_terms = unique([
         *target.get("hard_skills", []),
@@ -636,7 +705,16 @@ def projects_rewrite(original: str, target: Dict[str, Any]) -> str:
         part = clean_line(part).strip(".")
         if part:
             normalized = normalize(part)
-            if not normalized_terms or any(token in normalized for token in normalized_terms):
+            projectish = any(term in normalized for term in [
+                "progetto", "project", "tesi", "stage", "tirocinio", "thesis",
+                "svilupp", "implement", "elabor", "analisi", "pipeline", "dataset",
+                "modello", "classific", "predizion", "dashboard", "report",
+            ])
+            if len(normalized.split()) <= 3 and not projectish:
+                continue
+            if extract_skill_terms(part) and not projectish:
+                continue
+            if projectish or not normalized_terms:
                 parts.append(f"- {part}.")
     parts = unique(parts)[:7]
     if not parts:
@@ -648,6 +726,47 @@ def education_rewrite(original: str, parsed: ParsedCV, target: Dict[str, Any]) -
     # La formazione deve restare fattuale: niente frasi sintetiche costruite
     # usando segnali presi da altre sezioni del CV.
     return strip_section_titles(shorten(original, 780))
+
+
+def projects_rewrite(original: str, target: Dict[str, Any]) -> str:
+    """Keep real projects as title/description pairs and discard loose notes."""
+    lines = [
+        clean_line(line).strip(" .")
+        for line in re.sub(r"\r\n?", "\n", original or "").splitlines()
+        if clean_line(line)
+    ]
+    projects: List[tuple[str, List[str]]] = []
+    current_title = ""
+    current_description: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_title, current_description
+        if current_title and current_description:
+            projects.append((current_title, unique(current_description)))
+        current_title = ""
+        current_description = []
+
+    for line in lines:
+        plain = normalize(line)
+        is_title = plain.startswith(("progetto ", "project ", "tesi ")) and len(plain.split()) <= 8
+        if is_title:
+            flush()
+            current_title = line
+            continue
+        projectish = any(term in plain for term in [
+            "svilupp", "implement", "elabor", "analisi", "pipeline", "dataset",
+            "modello", "classific", "predizion", "dashboard", "report", "rete neural",
+        ])
+        if current_title and projectish:
+            current_description.append(line)
+    flush()
+
+    rows: List[str] = []
+    for title, descriptions in projects[:6]:
+        description = " ".join(descriptions).strip()
+        if description:
+            rows.extend([title, description.rstrip(".") + "."])
+    return "\n".join(rows)
 
 
 def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -712,7 +831,8 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
             "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
             "project manager": ["Organizzazione", "Gestione priorità", "Comunicazione", "Leadership", "Negoziazione"],
         }.get(role_family, [])
-        ordered_soft = unique([*preferred_soft, *soft_hits])[:8]
+        supported_preferred = [skill for skill in preferred_soft if normalize(skill) in normalize(cv_text)]
+        ordered_soft = unique([*supported_preferred, *soft_hits])[:8]
         if ordered_soft:
             proposed_soft = "Soft skills:\n" + "\n".join(f"- {line}" for line in ordered_soft)
             item = make_suggestion(
@@ -735,7 +855,7 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
         *evaluation.get("missing_soft_skills", []),
     ])
     if missing_keywords and skills_text:
-        keyword_lines = unique([kw for kw in missing_keywords if kw.strip()])[:8]
+        keyword_lines = unique([kw for kw in missing_keywords if kw.strip() and normalize(kw) in normalize(cv_text)])[:8]
         if keyword_lines:
             item = make_suggestion(
                 "ats_keywords",
@@ -780,7 +900,8 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
                 "backend developer": ["Problem solving", "Precisione", "Collaborazione", "Documentazione tecnica", "Comunicazione tecnica"],
                 "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
             }.get(role_family, [])
-            ordered_soft = unique([*soft_priority, *soft])
+            supported_priority = [skill for skill in soft_priority if normalize(skill) in normalize(cv_text)]
+            ordered_soft = unique([*supported_priority, *soft])
             item = make_suggestion("soft_skills", "SOFT SKILLS", "Rendi più chiara la sezione soft skills", sections["soft_skills"], "Soft skills:\n" + "\n".join(f"- {skill}" for skill in ordered_soft[:8]), "Mantiene le soft skill reali e le presenta in modo più pulito e più coerente con il ruolo.", "medio", 5, soft)
             if item:
                 suggestions.append(item)
@@ -805,7 +926,7 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
                 if item:
                     suggestions.append(item)
             experience_text = experience_rewrite(full_text, target)
-            if experience_text:
+            if experience_text and sections.get("experience"):
                 item = make_suggestion("experience", "ESPERIENZE PROFESSIONALI", "Trasforma il testo in esperienza leggibile", full_text[:900], experience_text, "Ricostruisce un blocco esperienza più chiaro partendo dal testo grezzo disponibile.", "alto", 3, [])
                 if item:
                     suggestions.append(item)
@@ -929,11 +1050,6 @@ def build_optimized_cv_text(
             sections["profile"] = profile_text
             if "profile" not in parsed.order:
                 parsed.order.append("profile")
-        experience_text = experience_rewrite(full_text, target)
-        if experience_text:
-            sections["experience"] = experience_text
-            if "experience" not in parsed.order:
-                parsed.order.append("experience")
         hard_skills_text = group_skills(extract_skill_terms(full_text))
         if hard_skills_text:
             sections["hard_skills"] = hard_skills_text
@@ -1007,6 +1123,49 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
                 lines.append(line)
         return "\n".join(lines).strip()
 
+    def _fallback_section_merge(base_text: str, proposed_texts: List[str]) -> str:
+        base_text = (base_text or "").strip()
+        cleaned_proposals = [re.sub(r"\n{3,}", "\n\n", str(text or "").strip()) for text in proposed_texts if str(text or "").strip()]
+        if not cleaned_proposals:
+            return base_text
+        merged = _merge_unique_lines(base_text, *cleaned_proposals)
+        if merged.strip():
+            return strip_section_titles(merged)
+        return strip_section_titles("\n".join(cleaned_proposals).strip() or base_text)
+
+    def _clean_project_block(text: str) -> str:
+        lines: List[str] = []
+        seen = set()
+        for raw_line in re.split(r"\n+", text or ""):
+            line = clean_line(raw_line)
+            plain = normalize(line)
+            if not line or not plain:
+                continue
+            projectish = any(term in plain for term in [
+                "progetto", "project", "tesi", "svilupp", "implement", "elabor",
+                "analisi", "pipeline", "dataset", "modello", "classific",
+                "predizion", "dashboard", "report", "rete neural",
+            ])
+            if is_noise_keyword(line) and not projectish:
+                continue
+            if (
+                len(plain.split()) <= 3
+                and len(plain) <= 28
+                and not re.search(r"[.!?:;]", line)
+                and not plain.startswith(("progetto ", "project ", "tesi "))
+            ):
+                continue
+            if line.endswith(("·", "|", "/", "-")):
+                line = line.rstrip("·|/- ").strip()
+            if not line:
+                continue
+            marker = normalize(line)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            lines.append(line)
+        return "\n".join(lines).strip()
+
     if "profile" in section_buckets:
         before_profile = sections.get("profile", "")
         proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["profile"]]
@@ -1020,13 +1179,21 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
         merged_experience = _apply_forced_section_change("experience", base, proposed_texts)
         if merged_experience:
             sections["experience"] = merged_experience
+        elif proposed_texts:
+            sections["experience"] = _fallback_section_merge(base, proposed_texts)
 
     if "projects" in section_buckets:
         base = projects_rewrite(sections.get("projects", ""), target)
         proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["projects"]]
         merged_projects = _apply_forced_section_change("projects", base, proposed_texts)
         if merged_projects:
-            sections["projects"] = merged_projects
+            cleaned_projects = _clean_project_block(merged_projects)
+            if cleaned_projects:
+                sections["projects"] = cleaned_projects
+        elif proposed_texts:
+            cleaned_projects = _clean_project_block(_fallback_section_merge(base, proposed_texts))
+            if cleaned_projects:
+                sections["projects"] = cleaned_projects
 
     if "education" in section_buckets:
         base = education_rewrite(sections.get("education", ""), parsed, target)
@@ -1050,30 +1217,83 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
                 sections["hard_skills"] = incoming_text
 
     confirmed = (user_additional_data or {}).get("confirmed_skills", [])
-    confirmed_names: List[str] = []
+    confirmed_by_section: Dict[str, List[str]] = {}
     if isinstance(confirmed, list):
         for item in confirmed:
             if isinstance(item, dict):
                 name = str(item.get("name") or item.get("skill") or "").strip()
+                target_section = str(item.get("target_section") or "").strip()
+                category = normalize(str(item.get("category") or "hard_skill"))
             else:
                 name = str(item or "").strip()
-            if name and not is_noise_keyword(name):
-                confirmed_names.append(name)
-    if confirmed_names:
-        existing = extract_skill_terms(sections.get("hard_skills", ""))
-        merged = unique([*existing, *confirmed_names])
-        sections["hard_skills"] = group_skills(merged) or ", ".join(merged)
-        if "hard_skills" not in parsed.order:
-            parsed.order.append("hard_skills")
+                target_section = ""
+                category = "hard_skill"
+            if not name or is_noise_keyword(name):
+                continue
+            section_key = normalize(target_section)
+            if section_key not in {"hard_skills", "soft_skills", "competenze tecniche", "hard skill", "soft skill"}:
+                if category == "soft_skill":
+                    section_key = "soft_skills"
+                elif category == "keyword":
+                    section_key = "hard_skills"
+                else:
+                    section_key = "hard_skills"
+            if section_key in {"competenze tecniche", "hard skill"}:
+                section_key = "hard_skills"
+            elif section_key in {"soft skill"}:
+                section_key = "soft_skills"
+            confirmed_by_section.setdefault(section_key, []).append(name)
+
+    for section_key, names in confirmed_by_section.items():
+        target_section = "soft_skills" if section_key == "soft_skills" else "hard_skills"
+        current = sections.get(target_section, "")
+        existing = extract_skill_terms(current)
+        merged = unique([*existing, *names])
+        sections[target_section] = group_skills(merged) or ", ".join(merged)
+        if target_section not in parsed.order:
+            parsed.order.append(target_section)
+
+    def _cleanup_section_text(section_key: str, text: str) -> str:
+        cleaned = normalize_professional_language(text)
+        if section_key in {"hard_skills", "soft_skills"}:
+            terms = extract_skill_terms(cleaned)
+            if section_key == "soft_skills":
+                terms = [term for term in terms if normalize(term) not in {normalize(skill) for skill in extract_skill_terms(sections.get("hard_skills", ""))}]
+                if not terms and cleaned:
+                    terms = [clean_line(part) for part in re.split(r"[,;|\n]+", cleaned) if clean_line(part)]
+            grouped = group_skills(terms)
+            return grouped or cleaned
+        if section_key == "experience":
+            cleaned_lines = []
+            for line in cleaned.splitlines():
+                plain = normalize(line)
+                if plain == "professionali" or plain.startswith((
+                    "esperienza orientata ",
+                    "esperienza professionale orientata ",
+                    "esperienza valorizzata per ",
+                )):
+                    continue
+                line = re.sub(r"\b(visto|vista|visti|viste|ho|abbiamo|l'?ho|lo|la|li|le)\b", "", line, flags=re.IGNORECASE)
+                line = re.sub(r"\s{2,}", " ", line).strip(" ,;:-")
+                if line:
+                    cleaned_lines.append(line)
+            cleaned = "\n".join(cleaned_lines)
+        if section_key == "projects" and not re.search(r"\b(progetto|project|tesi|pipeline|dataset|analisi|svilupp|implement)\b", normalize(cleaned)):
+            return ""
+        return cleaned
 
     order = [key for key in SECTION_ORDER if key in sections]
+    if "projects" in order:
+        project_text = sections.get("projects", "")
+        if project_text and len(project_text.splitlines()) > 8:
+            sections["projects"] = _clean_project_block(project_text)
     for key in parsed.order:
         if key in sections and key not in order:
             order.append(key)
 
     rows: List[str] = []
     for key in order:
-        text = sections.get(key, "").strip()
+        text = _cleanup_section_text(key, sections.get(key, "").strip())
         if not text:
             continue
         if key == "header":

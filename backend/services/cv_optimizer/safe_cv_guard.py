@@ -768,8 +768,44 @@ def _final_best_block(cv_text: str) -> str:
 
 def _final_role_phrase(role: str, company: str = "") -> str:
     role = clean_line(role) or "ruolo target"
-    company = clean_line(company)
-    return f" per il ruolo di {role}" + (f" presso {company}" if company else "")
+    return f" per il ruolo di {role}"
+
+
+def _profile_rewrite(profile: str, target: Dict[str, Any], cv_text: str = "") -> str:
+    text = compact(profile, 760).rstrip(".")
+    role = clean_line(str(target.get("role") or ""))
+    if not text:
+        return ""
+    if not role or norm(role) in norm(text):
+        return f"{text}."
+    return f"{text}. Profilo orientato a opportunita come {role}, in coerenza con il percorso descritto."
+
+
+def _skills_rewrite(skills: str, target: Dict[str, Any]) -> str:
+    items = unique([
+        clean_line(item)
+        for item in re.split(r"[,;|â€¢Â·\n]+", skills or "")
+        if clean_line(item)
+    ])
+    return "\n".join(f"- {item}" for item in items[:12])
+
+
+def _experience_rewrite(experience: str, target: Dict[str, Any]) -> str:
+    bullets = _compact_to_bullets(experience, max_items=5)
+    return bullets or compact(experience, 850)
+
+
+def _projects_rewrite(projects: str, target: Dict[str, Any]) -> str:
+    lines = [clean_line(line) for line in (projects or "").splitlines() if clean_line(line)]
+    if len(lines) >= 2:
+        return "\n".join(lines)
+    bullets = _compact_to_bullets(projects, max_items=5)
+    return bullets or compact(projects, 850)
+
+
+def _education_rewrite(education: str, target: Dict[str, Any], cv_text: str = "") -> str:
+    text = compact(education, 760).rstrip(".")
+    return f"Percorso accademico: {text}." if text else ""
 
 
 def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str, Any]]:  # type: ignore[override]
@@ -815,7 +851,7 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
             suggestions.append(item)
 
     hard = sections.get("hard_skills", "")
-    skills = unique([*extract_skills(hard), *present_keywords, *missing_keywords[:3]])
+    skills = unique([*extract_skills(hard), *present_keywords])
     grouped = group_skills(skills)
     if hard and grouped:
         grouped_lines = [line.strip() for line in grouped.splitlines() if line.strip()]
@@ -840,7 +876,10 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
             suggestions.append(item)
 
     if missing_keywords and hard:
-        useful_missing = [kw for kw in missing_keywords if kw and normalize_pair_equal(kw, "") is False][:6]
+        useful_missing = [
+            kw for kw in missing_keywords
+            if kw and norm(kw) in norm(cv_text)
+        ][:6]
         if useful_missing:
             proposed = (
                 "Competenze tecniche da evidenziare solo se già presenti o confermate:\n"
@@ -857,7 +896,7 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
             if item:
                 suggestions.append(item)
 
-    exp = sections.get("experience", "") or _final_best_block(cv_text)
+    exp = sections.get("experience", "")
     if exp:
         proposed = (
             f"Esperienza valorizzata{_final_role_phrase(role, company)}, evidenziando attività già presenti nel CV:\n"
@@ -897,7 +936,11 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
                 "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
             }
             soft_priority = soft_priority_map.get(role_family, [])
-            ordered_soft = unique([*soft_priority, *soft_items, *missing_keywords[:3]])
+            supported_soft_priority = [
+                skill for skill in soft_priority
+                if norm(skill) in norm(cv_text)
+            ]
+            ordered_soft = unique([*supported_soft_priority, *soft_items])
             proposed = "Soft skills rilevanti:\n" + "\n".join(
                 f"- {skill.strip().rstrip('.')}"
                 for skill in ordered_soft[:8]
@@ -913,7 +956,7 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
                 suggestions.append(item)
 
     if missing_keywords and not any(item.get("category") == "ats_keywords" for item in suggestions):
-        suggested_terms = unique([kw for kw in missing_keywords if kw][:6])
+        suggested_terms = unique([kw for kw in missing_keywords if kw and norm(kw) in norm(cv_text)][:6])
         if suggested_terms:
             source_block = sections.get("profile") or sections.get("experience") or sections.get("hard_skills") or _final_best_block(cv_text)
             if source_block:
@@ -977,7 +1020,8 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
                     "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
                     "game design": ["Creatività", "Collaborazione", "Problem solving", "Iterazione su feedback", "Comunicazione"],
                 }.get(role_family, [])
-                proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in unique([*preferred, *soft_values])[:8])
+                supported_preferred = [skill for skill in preferred if norm(skill) in norm(cv_text)]
+                proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in unique([*supported_preferred, *soft_values])[:8])
             else:
                 proposed = ""
         elif section_key == "experience":
@@ -1000,6 +1044,6 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
             99,
             present_keywords[:4],
         )
-        if item and suggestion_targets_current_cv(item, cv_text):
+        if item and norm(item.get("original_text") or "") in norm(cv_text):
             return [item]
     return clean

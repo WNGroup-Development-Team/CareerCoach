@@ -4932,6 +4932,7 @@ def build_professional_extra_text(user_additional_data: Dict[str, Any], role: st
     support = flatten_cv_support_data(user_additional_data)
     if not support:
         return ""
+
     prompt = "\n".join(
         [
             "Sei un resume editor. Restituisci SOLO JSON valido.",
@@ -4961,19 +4962,82 @@ def build_professional_extra_text(user_additional_data: Dict[str, Any], role: st
     except Exception as exc:
         print(f"Riformulazione informazioni extra non riuscita, uso testo conservativo: {exc}")
 
-    return re.split(r"(?<=[.!?])\s+", support.strip())[0][:500].strip()
+    fallback = re.split(r"(?<=[.!?])\s+", support.strip())[0][:500].strip()
+    replacements = [
+        (r"^ho\s+applicato\s+", "Applicazione di "),
+        (r"^ho\s+(usato|utilizzato)\s+", "Utilizzo di "),
+        (r"^(l'?ho|lo|la|li|le)\s+(usato|utilizzato|applicato)\s*", "Utilizzo in "),
+        (r"\b(visto|vista)\s+all'?esame\b", "approfondito in ambito universitario"),
+        (r"\bin esame di basi di dati\b", "nell'ambito delle basi di dati"),
+        (r"\bin esame di basi dati\b", "nell'ambito delle basi di dati"),
+    ]
+    for pattern, replacement in replacements:
+        fallback = re.sub(pattern, replacement, fallback, flags=re.IGNORECASE)
+    fallback = re.sub(r"\s{2,}", " ", fallback).strip(" ,;:-")
+    return fallback[:1].upper() + fallback[1:] if fallback else ""
 
 
 def infer_extra_content_section(value: str) -> tuple[str, str]:
     plain = normalize_plain_text(value)
-    if any(term in plain for term in ["certificazione", "certificato", "attestato", "licenza"]):
+    def score_terms(terms: Iterable[str]) -> int:
+        return sum(1 for term in terms if term in plain)
+
+    certification_terms = ("certificazione", "certificato", "attestato", "licenza")
+    education_terms = (
+        "laurea", "universita", "università", "corso", "formazione", "studio", "esame",
+        "master", "diploma", "triennale", "magistrale",
+    )
+    experience_terms = ("azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego")
+    soft_terms = (
+        "pensiero analitico", "attenzione ai dettagli", "comunicazione dei risultati",
+        "problem solving", "team working", "collaborazione", "comunicazione tecnica",
+        "pensiero logico", "precisione",
+    )
+    hard_terms = (
+        "excel", "excel avanzato", "power bi", "tableau", "bigquery", "google analytics",
+        "sql", "database", "kpi", "reporting", "data visualization", "analisi dei dati",
+        "statistica", "python", "c++", "java", "javascript", "docker", "git", "github",
+        "gitlab", "aws", "software engineering", "debugging", "unit testing", "version control",
+        "design architetturale",
+    )
+    project_terms = (
+        "progetto", "progetti", "project", "portfolio", "prototipo", "realizzato",
+        "sviluppato", "implementazione", "pipeline", "dataset", "analisi predittiva",
+        "feature engineering", "cross-validation", "deploy", "deployment",
+    )
+
+    if score_terms(certification_terms):
         return "CERTIFICAZIONI", "certification"
-    if any(term in plain for term in ["laurea", "universita", "corso", "formazione", "studio", "esame"]):
+    if score_terms(project_terms):
+        return "PROGETTI", "project"
+    if any(term in plain for term in ["database", "sql", "python", "data visualization", "dashboard", "analisi dati", "machine learning"]):
+        return "COMPETENZE TECNICHE", "skill"
+
+    scores = {
+        "education": score_terms(education_terms),
+        "experience": score_terms(experience_terms),
+        "soft_skill": score_terms(soft_terms),
+        "skill": score_terms(hard_terms),
+    }
+    best_section = max(scores, key=scores.get)
+    if scores[best_section] > 0:
+        if best_section == "education":
+            return "FORMAZIONE", "education"
+        if best_section == "experience":
+            return "ESPERIENZE PROFESSIONALI", "experience"
+        if best_section == "soft_skill":
+            return "SOFT SKILLS", "soft_skill"
+        if best_section == "skill":
+            return "COMPETENZE TECNICHE", "skill"
+
+    if any(term in plain for term in ["laurea", "universita", "università", "corso", "formazione", "studio", "esame"]):
         return "FORMAZIONE", "education"
     if any(term in plain for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]):
         return "ESPERIENZE PROFESSIONALI", "experience"
-    if any(term in plain for term in ["progetto", "portfolio", "prototipo", "realizzato", "sviluppato"]):
-        return "PROGETTI", "project"
+    if any(term in plain for term in soft_terms):
+        return "SOFT SKILLS", "soft_skill"
+    if any(term in plain for term in hard_terms):
+        return "COMPETENZE TECNICHE", "skill"
     return "ATTIVITA RILEVANTI", "extra_page"
 
 
@@ -4997,23 +5061,189 @@ def is_role_like_confirmation(name: str, role: str) -> bool:
 
 
 def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], role: str) -> List[RewriteInstruction]:
-    general_additional_data = {
-        key: value
-        for key, value in (user_additional_data or {}).items()
-        if key != "confirmed_skills"
+    instructions: List[RewriteInstruction] = []
+    seen_fragments: set[tuple[str, str]] = set()
+
+    def project_block(fragment: str, force_project: bool = False) -> str:
+        plain = normalize_plain_text(fragment)
+        explicit_project = force_project or any(term in plain for term in [
+            "ho sviluppato un progetto", "ho realizzato un progetto",
+            "ho implementato un progetto", "ho coordinato un progetto",
+            "ho lavorato a un progetto", "ho collaborato a un progetto",
+            "progetto universitario", "progetto personale", "in progetto",
+            "in progetti", "durante i progetti", "nei progetti",
+        ])
+        if not explicit_project:
+            return ""
+        if "sviluppo software" in plain:
+            title = "Progetto di sviluppo software"
+        elif "analisi dati" in plain or "data visualization" in plain:
+            title = "Progetto di analisi dati"
+        elif "dashboard" in plain or "power bi" in plain or "tableau" in plain:
+            title = "Progetto di data visualization"
+        elif "universitari" in plain or "esame" in plain:
+            title = "Progetto universitario"
+        else:
+            title = "Progetto personale"
+        description = build_professional_extra_text({"additional_notes": fragment}, role).rstrip(".")
+        replacements = [
+            (r"^ho coordinato\b", "Coordinamento di"),
+            (r"^ho sviluppato\b", "Sviluppo di"),
+            (r"^ho realizzato\b", "Realizzazione di"),
+            (r"^ho implementato\b", "Implementazione di"),
+            (r"^ho lavorato a\b", "Attività svolte in"),
+            (r"^ho collaborato a\b", "Collaborazione a"),
+        ]
+        for pattern, replacement in replacements:
+            description = re.sub(pattern, replacement, description, flags=re.IGNORECASE)
+        description = re.sub(r"^(usata?|utilizzata?)\s+", "Applicazione della competenza ", description, flags=re.IGNORECASE)
+        if "allineare requisiti e aspettative" in plain:
+            description = "Collaborazione con il team per l'analisi dei requisiti e l'allineamento delle attivita progettuali"
+        return f"{title}\n{description.rstrip('.')}."
+
+    def skill_text(fragment: str, category: str) -> str:
+        professional = build_professional_extra_text({"additional_notes": fragment}, role)
+        if not professional:
+            return ""
+        if category == "soft_skill":
+            known = [
+                "Pensiero analitico", "Attenzione ai dettagli", "Comunicazione dei risultati",
+                "Problem solving", "Team working", "Collaborazione", "Comunicazione",
+                "Organizzazione", "Precisione", "Gestione requisiti",
+            ]
+        else:
+            known = [
+                "Excel", "Power BI", "Tableau", "SQL", "Database relazionali",
+                "Data visualization", "Analisi dati", "Python", "Java", "C++",
+                "Docker", "Git", "Machine Learning", "Deep Learning", "Apache Spark",
+                "Apache Hive", "MapReduce",
+            ]
+        hits = [
+            skill for skill in known
+            if normalize_plain_text(skill) in normalize_plain_text(fragment)
+        ]
+        if hits:
+            return " Â· ".join(dict.fromkeys(hits))
+        return professional.rstrip(".")
+
+    def add_fragment(fragment: str, source_id: str, reason: str, category_hint: str = "") -> None:
+        cleaned_fragment = clean_extracted_text(fragment).strip()
+        if not cleaned_fragment:
+            return
+        section, category = infer_extra_content_section(cleaned_fragment)
+        normalized_hint = normalize_plain_text(category_hint)
+        if normalized_hint in {"technical skills", "technical_skills", "tools"}:
+            section, category = "COMPETENZE TECNICHE", "skill"
+        elif normalized_hint in {"soft skills", "soft_skills"}:
+            section, category = "SOFT SKILLS", "soft_skill"
+        elif normalized_hint in {"certifications", "certificazioni"}:
+            section, category = "CERTIFICAZIONI", "certification"
+        elif normalized_hint in {"company role notes", "company_role_notes"}:
+            section, category = "PROFILO", "profile"
+        elif normalized_hint in {"experiences", "esperienze"}:
+            fragment_plain = normalize_plain_text(cleaned_fragment)
+            if any(term in fragment_plain for term in ["progetto", "project", "tesi"]):
+                section, category = "PROGETTI", "project"
+            elif any(term in fragment_plain for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]):
+                section, category = "ESPERIENZE PROFESSIONALI", "experience"
+            else:
+                section, category = "ATTIVITA RILEVANTI", "extra_page"
+        elif normalized_hint in {"measurable results", "measurable_results"}:
+            section, category = "ATTIVITA RILEVANTI", "extra_page"
+        if category == "project" or normalized_hint in {"project", "projects", "progetto", "progetti"}:
+            professional_text = project_block(
+                cleaned_fragment,
+                force_project=normalized_hint in {"project", "projects", "progetto", "progetti"},
+            )
+            if professional_text:
+                section, category = "PROGETTI", "project"
+            else:
+                professional_text = skill_text(cleaned_fragment, "skill")
+                section, category = "COMPETENZE TECNICHE", "skill"
+        elif category in {"skill", "soft_skill"}:
+            professional_text = skill_text(cleaned_fragment, category)
+            section = "SOFT SKILLS" if category == "soft_skill" else "COMPETENZE TECNICHE"
+            if not professional_text:
+                return
+        elif category == "extra_page":
+            professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
+            section, category = "ATTIVITA RILEVANTI", "extra_page"
+            if not professional_text:
+                return
+        elif category == "profile":
+            professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
+            if not professional_text:
+                return
+        elif category == "experience" and not any(
+            term in normalize_plain_text(cleaned_fragment)
+            for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]
+        ):
+            return
+        else:
+            professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
+            if not professional_text:
+                return
+        key = (section, normalize_plain_text(cleaned_fragment))
+        if key in seen_fragments:
+            return
+        seen_fragments.add(key)
+        instructions.append(RewriteInstruction(
+            section=section,
+            original="",
+            replacement=professional_text[:500],
+            reason=reason,
+            category=category,
+            source_id=source_id,
+        ))
+
+    answers = (user_additional_data or {}).get("adaptation_answers", [])
+    if isinstance(answers, list):
+        for index, item in enumerate(answers):
+            if not isinstance(item, dict):
+                continue
+            answer = str(item.get("answer") or "").strip()
+            if not answer:
+                continue
+            category_hint = str(item.get("category") or "").strip()
+            fragments = [frag.strip() for frag in re.split(r"\n+|(?<=[.!?])\s+", answer) if frag.strip()]
+            if not fragments:
+                fragments = [answer]
+            for fragment_index, fragment in enumerate(fragments):
+                add_fragment(
+                    fragment,
+                    f"user_additional_answer_{index}_{fragment_index}",
+                    "Risposta aggiuntiva confermata dall'utente trasformata in contenuto CV.",
+                    category_hint,
+                )
+
+    box_fields = {
+        "experiences": "experiences",
+        "technical_skills": "technical_skills",
+        "soft_skills": "soft_skills",
+        "projects": "projects",
+        "measurable_results": "measurable_results",
+        "certifications": "certifications",
+        "tools": "tools",
+        "company_role_notes": "company_role_notes",
+        "additional_notes": "",
     }
-    extra_text = build_professional_extra_text(general_additional_data, role)
-    if not extra_text:
-        return []
-    section, category = infer_extra_content_section(flatten_cv_support_data(general_additional_data))
-    return [RewriteInstruction(
-        section=section,
-        original="",
-        replacement=extra_text,
-        reason="Informazioni extra confermate dall'utente trasformate in testo CV professionale.",
-        category=category,
-        source_id="user_additional_info",
-    )]
+    for field_name, category_hint in box_fields.items():
+        value = str((user_additional_data or {}).get(field_name) or "").strip()
+        if not value:
+            continue
+        fragments = [frag.strip() for frag in re.split(r"\n+|(?<=[.!?])\s+", value) if frag.strip()] or [value]
+        for fragment_index, fragment in enumerate(fragments):
+            add_fragment(
+                fragment,
+                f"user_box_{field_name}_{fragment_index}",
+                "Informazione inserita dall'utente e riformulata per il CV.",
+                category_hint,
+            )
+    return instructions
+
+
+def _extract_sections_for_structured_suggestions(cv_text: str) -> Dict[str, str]:
+    return extract_resume_sections(cv_text)
 
 
 def consolidate_rewrite_instructions(
@@ -5249,7 +5479,10 @@ def build_confirmed_skill_rewrite_instructions(
             category="soft_skills" if is_soft else "skills",
             source_id=f"confirmed_{normalize_plain_text(section).replace(' ', '_')}",
         ))
-    instructions.extend(build_skill_detail_rewrite_instructions(cv_text, detailed_skills, role))
+    instructions.extend(
+        fallback_skill_detail_instruction(item, index, cv_text)
+        for index, item in enumerate(detailed_skills[:6])
+    )
     return instructions
 
 
@@ -5454,10 +5687,18 @@ Regole:
     ]
 
 
-def fallback_skill_detail_instruction(item: Dict[str, str], index: int) -> RewriteInstruction:
+def fallback_skill_detail_instruction(
+    item: Dict[str, str],
+    index: int,
+    cv_text: str = "",
+) -> RewriteInstruction:
+    skill_name = str(item.get("name") or "").strip()
     detail = str(item.get("detail") or "").strip()
     plain = normalize_plain_text(detail)
-    if any(term in plain for term in ["lavoro", "azienda", "tirocinio", "stage", "cliente"]):
+    professional = build_professional_extra_text({"additional_notes": detail}, "")
+    original_sections = extract_resume_sections(cv_text)
+
+    if any(term in plain for term in ["lavoro", "azienda", "tirocinio", "stage", "cliente"]) and original_sections.get("experience"):
         section, category = "ESPERIENZE PROFESSIONALI", "experience"
     elif any(term in plain for term in ["laurea", "universita", "corso", "esame", "formazione"]):
         section, category = "FORMAZIONE", "education"
@@ -5466,11 +5707,41 @@ def fallback_skill_detail_instruction(item: Dict[str, str], index: int) -> Rewri
     elif any(term in plain for term in ["progetto", "dashboard", "prototipo", "dataset", "portfolio"]):
         section, category = "PROGETTI", "project"
     else:
-        section, category = "ATTIVITA RILEVANTI", "extra_page"
+        category_name = normalize_plain_text(str(item.get("category") or "hard_skill"))
+        section = "SOFT SKILLS" if category_name == "soft_skill" else "COMPETENZE TECNICHE"
+        category = "soft_skills" if category_name == "soft_skill" else "skills"
+
+    if section == "PROGETTI":
+        if "sviluppo software" in plain:
+            title = "Progetto di sviluppo software"
+        elif "analisi dati" in plain or "dashboard" in plain:
+            title = "Progetto di analisi dati"
+        else:
+            title = "Progetto universitario" if any(term in plain for term in ["universita", "universitario", "esame"]) else "Progetto personale"
+        if "allineare requisiti e aspettative" in plain:
+            replacement = (
+                f"{title}\n"
+                "Collaborazione con il team per l'analisi dei requisiti e "
+                "l'allineamento delle attivita progettuali."
+            )
+        else:
+            replacement = f"{title}\n{professional.rstrip('.')}."
+    elif section in {"COMPETENZE TECNICHE", "SOFT SKILLS"}:
+        context = professional.rstrip(".")
+        context = re.sub(
+            rf"^(utilizzo|applicazione)\s+(di|della|del)?\s*{re.escape(skill_name)}\s*",
+            "",
+            context,
+            flags=re.IGNORECASE,
+        ).strip(" :-")
+        replacement = f"{skill_name}: {context}" if context else skill_name
+    else:
+        replacement = professional.rstrip(".") + "."
+
     return RewriteInstruction(
         section=section,
         original="",
-        replacement=format_confirmed_skill_example(str(item.get("name") or ""), detail),
+        replacement=replacement,
         reason="Dettaglio reale fornito dall'utente collocato con fallback conservativo.",
         category=category,
         source_id=f"confirmed_skill_detail_fallback_{index}",
@@ -7356,6 +7627,21 @@ def role_keyword_snapshot(cv_text: str, role: str, description: str = "", requir
     }
 
 
+def is_cv_noise_keyword(value: str) -> bool:
+    plain = normalize_plain_text(value)
+    return not plain or plain in {
+        "contatti",
+        "lingue",
+        "hard skills",
+        "soft skills",
+        "formazione",
+        "esperienze",
+        "esperienze professionali",
+        "progetti",
+        "certificazioni",
+    } or len(plain) < 3
+
+
 def infer_role_family(role: str, description: str = "", required_skills: str = "") -> str:
     target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
     if any(term in target_plain for term in ["game design", "game designer", "level design", "unity", "unreal"]):
@@ -8280,8 +8566,23 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
 def suggestion_targets_current_cv(suggestion: Dict, cv_text: str) -> bool:
     original = str(suggestion.get("original_text") or "").strip()
     section = str(suggestion.get("section") or "").strip()
-    if not original or not section or not cv_text.strip():
+    source_id = normalize_plain_text(str(suggestion.get("source_id") or suggestion.get("id") or ""))
+    if not section or not cv_text.strip():
         return False
+
+    if not original:
+        section_plain = normalize_plain_text(section)
+        appendable_sections = {
+            "progetti",
+            "esperienze professionali",
+            "esperienze",
+            "formazione",
+            "certificazioni",
+            "competenze tecniche",
+            "hard skills",
+            "soft skills",
+        }
+        return section_plain in appendable_sections or "user_additional_info" in source_id
 
     original_plain = normalize_plain_text(original)
     cv_plain = normalize_plain_text(cv_text)
@@ -8682,314 +8983,6 @@ def _make_structured_action(
     return suggestion
 
 
-def _profile_rewrite(original: str, target: Dict[str, Any]) -> str:
-    role = target.get("role") or ""
-    company = target.get("company") or ""
-    original = _compact_cv_text(original, 650)
-    if not original:
-        return ""
-    base = original.rstrip(".")
-    if role:
-        destination = f" per il ruolo di {role}"
-        if company and normalize_plain_text(company) not in normalize_plain_text(role):
-            destination += f" presso {company}"
-        role_plain = normalize_plain_text(role)
-        if role_plain and role_plain not in normalize_plain_text(base):
-            return (
-                f"{base}. Obiettivo professionale: valorizzare le competenze informatiche e progettuali già maturate"
-                f"{destination}, mantenendo un approccio tecnico, collaborativo e orientato alla realizzazione di soluzioni digitali."
-            )
-    return f"{base}. Obiettivo professionale: valorizzare competenze tecniche, progettuali e collaborative in un contesto coerente con la candidatura."
-
-
-def _skills_rewrite(original: str, target: Dict[str, Any]) -> str:
-    items = _split_skill_items(original)
-    if not items:
-        return ""
-    role = target.get("role") or ""
-    present_keywords = [kw for kw in target.get("present_keywords", []) if normalize_plain_text(kw) in normalize_plain_text(original)]
-    merged = []
-    seen = set()
-    for item in items + present_keywords:
-        plain = normalize_plain_text(item)
-        if plain and plain not in seen:
-            seen.add(plain)
-            merged.append(item)
-    if len(merged) <= 2:
-        return ""
-    prefix = "Competenze tecniche"
-    if role:
-        prefix += f" rilevanti per {role}"
-    return f"{prefix}: " + ", ".join(merged[:14])
-
-
-def _experience_rewrite(original: str, target: Dict[str, Any]) -> str:
-    original = _compact_cv_text(original, 850)
-    if not original:
-        return ""
-    role = target.get("role") or ""
-    plain = normalize_plain_text(original)
-    focus_parts = []
-    if any(term in plain for term in ["rag", "chatbot", "llm", "nlp", "document"]):
-        focus_parts.append("sviluppo di soluzioni basate su AI, RAG e modelli di linguaggio")
-    if any(term in plain for term in ["pipeline", "estrazione", "dati", "data", "database"]):
-        focus_parts.append("pipeline dati ed estrazione strutturata di informazioni")
-    if any(term in plain for term in ["valutazione", "metriche", "qualita"]):
-        focus_parts.append("valutazione della qualità delle risposte tramite metriche")
-    if not focus_parts:
-        return ""
-    role_tail = f" in modo coerente con il ruolo di {role}" if role else ""
-    return (
-        "Esperienza valorizzata per: "
-        + "; ".join(focus_parts[:3])
-        + f"{role_tail}. "
-        + original
-    )
-
-
-def _project_rewrite(original: str, target: Dict[str, Any]) -> str:
-    original = _compact_cv_text(original, 900)
-    if not original:
-        return ""
-    lines = [line.strip(" -•·") for line in re.split(r"\n+|(?<=\.)\s+(?=[A-Z])", original) if line.strip()]
-    if len(lines) < 2:
-        return ""
-    improved = []
-    for line in lines[:5]:
-        if ":" in line:
-            name, desc = line.split(":", 1)
-            improved.append(f"{name.strip()}: progetto focalizzato su {desc.strip().rstrip('.')}.")
-        else:
-            improved.append(line.rstrip(".") + ".")
-    return "\n".join(improved)
-
-
-def _education_rewrite(original: str, target: Dict[str, Any]) -> str:
-    original = _compact_cv_text(original, 850)
-    if not original:
-        return ""
-    role = target.get("role") or ""
-    plain = normalize_plain_text(original)
-    highlights = []
-    for label, terms in [
-        ("Data Engineering", ["data engineering", "dati"]),
-        ("Data Analysis", ["data analysis", "analisi"]),
-        ("Big Data", ["big data"]),
-        ("Cloud Computing", ["cloud"]),
-        ("Artificial Intelligence e Machine Learning", ["artificial intelligence", "machine learning", " ai ", " ml "]),
-        ("RAG e chatbot", ["rag", "chatbot"]),
-    ]:
-        if any(term.strip() in plain for term in terms):
-            highlights.append(label)
-    if not highlights:
-        return ""
-    role_tail = f" per il ruolo di {role}" if role else ""
-    return (
-        f"Percorso formativo valorizzato{role_tail}: "
-        + ", ".join(dict.fromkeys(highlights))
-        + ". "
-        + original
-    )
-
-
-def _ats_supported_keyword_rewrite(section_text: str, target: Dict[str, Any]) -> tuple[str, List[str]]:
-    present = [kw for kw in target.get("present_keywords", []) if normalize_plain_text(kw) in normalize_plain_text(section_text)]
-    present = [kw for kw in dict.fromkeys(present) if len(normalize_plain_text(kw)) >= 3]
-    if not present:
-        return "", []
-    base = _compact_cv_text(section_text, 650)
-    proposed = f"{base.rstrip('.')}. Keyword tecniche già supportate dal CV: {', '.join(present[:6])}."
-    return proposed, present[:6]
-
-
-
-CV_SUGGESTION_NOISE_TERMS = {
-    "voglio", "prepararmi", "colloquio", "per un", "un colloquio",
-    "voglio prepararmi", "prepararmi per", "colloquio di", "per google",
-    "design per google", "game design per", "per", "un", "di", "da",
-    "presso", "azienda", "ruolo", "candidatura"
-}
-
-COMMON_TECH_SKILLS = [
-    "Python", "SQL", "Java", "C++", "C#", "Linux", "Networking", "Big Data",
-    "ML & AI", "Machine Learning", "Artificial Intelligence", "Data Engineering",
-    "Data Analysis", "RAG", "Retrieval-Augmented Generation", "NLP", "LLM",
-    "Cloud Computing", "Power BI", "Tableau", "Excel", "Git", "GitHub",
-    "FastAPI", "Django", "PostgreSQL", "MongoDB", "Docker", "Unity",
-    "Unreal Engine", "Blender", "Figma", "Miro", "Game design", "Level design",
-    "Game mechanics", "User experience", "Playtesting", "Storytelling",
-    "Project management", "Pianificazione attività", "Gestione scadenze",
-    "Coordinamento team", "Risk management"
-]
-
-
-def is_cv_noise_keyword(value: Any) -> bool:
-    cleaned = normalize_plain_text(str(value or ""))
-    if not cleaned:
-        return True
-    tokens = cleaned.split()
-    if len(cleaned) < 3:
-        return True
-    if cleaned in CV_SUGGESTION_NOISE_TERMS:
-        return True
-    if any(term in cleaned for term in ["voglio", "prepararmi", "colloquio"]):
-        return True
-    if cleaned in {"per un", "un colloquio", "di game", "game design per", "design per google"}:
-        return True
-    if len(tokens) > 4:
-        allowed_long = {
-            "machine learning", "artificial intelligence", "user experience",
-            "data visualization", "project management", "retrieval augmented generation",
-            "portfolio progetti", "game design"
-        }
-        if not any(term in cleaned for term in allowed_long):
-            return True
-    if len(tokens) >= 2 and all(token in {"per", "un", "una", "il", "lo", "la", "di", "da", "con"} for token in tokens):
-        return True
-    return False
-
-
-def _dedupe_repeated_start(value: str, min_position: int = 80) -> str:
-    text = re.sub(r"\s+", " ", value or "").strip()
-    if not text:
-        return ""
-    tokens = text.split()
-    for n in (28, 24, 20, 16, 12, 10, 8):
-        if len(tokens) <= n * 2:
-            continue
-        needle = " ".join(tokens[:n])
-        second = text.find(needle, len(needle) + 15)
-        if second >= min_position:
-            return text[:second].strip(" .;:") + "."
-    return text
-
-
-def _unique_preserve_order(values: List[str]) -> List[str]:
-    result: List[str] = []
-    seen = set()
-    for value in values:
-        cleaned = re.sub(r"\s+", " ", str(value or "")).strip(" -•·\t")
-        normalized = normalize_plain_text(cleaned)
-        if not cleaned or not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(cleaned)
-    return result
-
-
-def _shorten_cv_text(value: str, max_chars: int = 650) -> str:
-    text = _dedupe_repeated_start(value)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= max_chars:
-        return text
-    cut = text[:max_chars]
-    sentence_end = max(cut.rfind("."), cut.rfind(";"), cut.rfind("!"), cut.rfind("?"))
-    if sentence_end >= 180:
-        return cut[:sentence_end + 1].strip()
-    return cut.rsplit(" ", 1)[0].strip()
-
-
-def _looks_like_contact_line(line: str) -> bool:
-    plain = normalize_plain_text(line)
-    return (
-        bool(re.search(r"[\w.+-]+@[\w.-]+\.\w+", line or ""))
-        or bool(re.search(r"\+?\d[\d\s().-]{7,}", line or ""))
-        or "linkedin" in plain
-        or "github" in plain
-        or "http" in plain
-        or plain.startswith("via ")
-        or "pagina web" in plain
-        or "profilo linkedin" in plain
-    )
-
-
-def _clean_section_text(value: str, section: str, max_chars: int = 650) -> str:
-    section_plain = normalize_plain_text(section)
-    lines = [line.strip() for line in re.sub(r"\r\n?", "\n", value or "").splitlines() if line.strip()]
-    cleaned_lines: List[str] = []
-    for line in lines:
-        plain = normalize_plain_text(line)
-        if not plain:
-            continue
-        if "contact" not in section_plain and "contatti" not in section_plain and _looks_like_contact_line(line):
-            continue
-        if section_plain in {"hard skills", "competenze", "competenze tecniche"}:
-            if any(marker in plain for marker in ["obiettivo", "formazione", "esperienza", "progetti", "comunicazione", "lingue"]):
-                continue
-        cleaned_lines.append(line)
-    cleaned_lines = _unique_preserve_order(cleaned_lines)
-    text = " ".join(cleaned_lines)
-    return _shorten_cv_text(text, max_chars=max_chars)
-
-
-def _extract_skill_terms(value: str) -> List[str]:
-    haystack = f" {normalize_plain_text(value)} "
-    terms: List[str] = []
-    for skill in COMMON_TECH_SKILLS:
-        skill_plain = normalize_plain_text(skill)
-        if skill_plain and skill_plain in haystack:
-            terms.append(skill)
-    for part in re.split(r"[,;|•·\n]+", value or ""):
-        cleaned = re.sub(r"[●○■□▪▫]+", " ", part)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -•·")
-        plain = normalize_plain_text(cleaned)
-        if not cleaned or len(plain) < 2:
-            continue
-        if _looks_like_contact_line(cleaned) or any(term in plain for term in ["obiettivo", "formazione", "esperienza", "progetti"]):
-            continue
-        if 1 <= len(cleaned.split()) <= 4:
-            terms.append(cleaned)
-    return _unique_preserve_order(terms)[:18]
-
-
-def _group_skill_terms(terms: List[str]) -> str:
-    buckets = {
-        "Linguaggi e database": [],
-        "Data, AI e analisi": [],
-        "Sistemi, reti e sviluppo": [],
-        "Strumenti e metodi": [],
-    }
-    for term in terms:
-        plain = normalize_plain_text(term)
-        if plain in {"python", "sql", "java", "c++", "c#"}:
-            buckets["Linguaggi e database"].append(term)
-        elif any(key in plain for key in ["data", "big data", "machine learning", "ml", "ai", "rag", "nlp", "llm", "cloud"]):
-            buckets["Data, AI e analisi"].append(term)
-        elif any(key in plain for key in ["linux", "network", "git", "docker", "fastapi", "django", "postgres"]):
-            buckets["Sistemi, reti e sviluppo"].append(term)
-        else:
-            buckets["Strumenti e metodi"].append(term)
-    rows = []
-    for label, values in buckets.items():
-        unique_values = _unique_preserve_order(values)
-        if unique_values:
-            rows.append(f"{label}: {', '.join(unique_values)}")
-    return "\n".join(rows).strip()
-
-
-def _target_profile_from_evaluation(evaluation: Dict[str, Any]) -> Dict[str, Any]:
-    target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
-    role = str(target.get("role") or evaluation.get("role") or "").strip()
-    company = str(target.get("company") or evaluation.get("company") or "").strip()
-    role_family = infer_role_family(role)
-    library = ROLE_SKILL_LIBRARY.get(role_family) or infer_skill_library_from_role(role)
-    return {
-        "role": role,
-        "company": company,
-        "role_family": role_family,
-        "hard_skills": library.get("hard_skills", [])[:8],
-        "soft_skills": library.get("soft_skills", [])[:8],
-        "tools": library.get("tools", [])[:8],
-    }
-
-
-def _add_structured_metadata(suggestion: Dict[str, Any], impact: str, priority: int) -> Dict[str, Any]:
-    suggestion["impact"] = impact
-    suggestion["priority"] = priority
-    suggestion["reason"] = suggestion.get("reason") or suggestion.get("description") or suggestion.get("message") or ""
-    return suggestion
-
-
 def _append_suggestion(
     suggestions: List[Dict[str, Any]],
     category: str,
@@ -9001,153 +8994,92 @@ def _append_suggestion(
     impact: str,
     priority: int,
     keywords_added: Optional[List[str]] = None,
+    *,
+    reason: str = "",
 ) -> None:
-    original = _shorten_cv_text(original_text, 900)
-    proposed = re.sub(r"\n{3,}", "\n\n", (proposed_text or "").strip())
-    if not original or not proposed:
-        return
-    if normalize_plain_text(original) == normalize_plain_text(proposed):
-        return
-    suggestion = make_coach_suggestion(
+    suggestions.append(_make_structured_action(
         category,
         title,
         description,
-        section=section,
-        original_text=original,
-        proposed_text=proposed,
-        supported_by_cv=True,
-        keywords_added=[kw for kw in (keywords_added or []) if not is_cv_noise_keyword(kw)],
-        suggestion_type="actionableEdit",
-    )
-    suggestion = _add_structured_metadata(suggestion, impact, priority)
-    if not is_valid_actionable_suggestion(suggestion):
-        return
-    suggestions.append(suggestion)
+        section,
+        original_text,
+        proposed_text,
+        reason=reason or description,
+        impact=impact,
+        priority=priority,
+        keywords_added=keywords_added or [],
+    ))
 
 
-def _extract_sections_for_structured_suggestions(cv_text: str) -> Dict[str, str]:
-    base_sections = extract_resume_sections(cv_text)
-    try:
-        from services.cv_optimizer.structured_cv_engine import parse_cv
-
-        parsed_sections = parse_cv(cv_text).sections
-        for key, value in parsed_sections.items():
-            if value and key != "header":
-                base_sections[key] = value
-    except Exception as exc:
-        print(f"Parser CV strutturato non disponibile per i suggerimenti: {exc}")
-    sections: Dict[str, str] = {}
-    section_keys = {
-        "profile": "CHI SONO",
-        "hard_skills": "HARD SKILLS",
-        "soft_skills": "SOFT SKILLS",
-        "experience": "ESPERIENZE PROFESSIONALI",
-        "education": "FORMAZIONE",
-        "progetti": "PROGETTI",
-        "projects": "PROGETTI",
-    }
-    for key, section_name in section_keys.items():
-        value = base_sections.get(key, "")
-        if value:
-            sections[key] = _clean_section_text(value, section_name, max_chars=900)
-
-    raw_sections = split_cv_edit_sections(cv_text)
-    for raw_name, raw_value in raw_sections.items():
-        canonical = canonical_edit_section_name(raw_name) or raw_name
-        key = _resume_section_key(canonical)
-        if key and key not in sections:
-            sections[key] = _clean_section_text(raw_value, canonical, max_chars=900)
-        if canonical == "PROGETTI" and "projects" not in sections and "progetti" not in sections:
-            sections["projects"] = _clean_section_text(raw_value, canonical, max_chars=900)
-    hard = sections.get("hard_skills", "")
-    hard_plain = normalize_plain_text(hard)
-    if len(hard) > 500 or any(marker in hard_plain for marker in [
-        "universita", "università", "laurea", "diploma", "tirocinio",
-        "sono una", "sono un", "esperienze professionali",
-    ]):
-        sections.pop("hard_skills", None)
-
-    return {key: value for key, value in sections.items() if value}
-
-
-def _profile_rewrite(original: str, target_profile: Dict[str, Any], cv_text: str) -> str:
-    role = target_profile.get("role") or "ruolo target"
-    company = target_profile.get("company") or ""
-    base = _shorten_cv_text(original, 420).rstrip(".")
-    cv_plain = normalize_plain_text(cv_text)
-    role_family = target_profile.get("role_family") or infer_role_family(role)
-    library = ROLE_SKILL_LIBRARY.get(role_family) or infer_skill_library_from_role(role)
-    candidates = [
-        *library.get("hard_skills", []),
-        *library.get("tools", []),
-        *library.get("programming_languages", []),
-    ]
-    signals = _unique_preserve_order([
-        signal for signal in candidates
-        if normalize_plain_text(signal) and normalize_plain_text(signal) in cv_plain
-    ])[:4]
-    signal_text = f", valorizzando competenze già presenti come {', '.join(signals)}" if signals else ""
-    company_text = f" in contesti come {company}" if company else ""
+def _profile_rewrite(profile: str, target_profile: Dict[str, Any], cv_text: str = "") -> str:
+    text = re.sub(r"\s+", " ", profile or "").strip()
+    role = str(target_profile.get("role") or "").strip()
+    if not text:
+        return ""
+    if not role:
+        return text
     return (
-        f"{base}. Obiettivo professionale: contribuire nel ruolo di {role}{company_text}"
-        f"{signal_text}, con un approccio collaborativo e orientato alla qualità."
+        f"{text}. "
+        f"Per il ruolo di {role}, valorizzo il mio percorso tecnico e le competenze gi? presenti nel CV "
+        "in modo chiaro, concreto e coerente con le esperienze reali."
     )
 
 
-def _experience_rewrite(original: str, target_profile: Dict[str, Any]) -> str:
-    text = re.sub(r"\r\n?", "\n", original or "")
-    lines = [re.sub(r"\s+", " ", line).strip(" -•·") for line in text.splitlines() if line.strip()]
-    if not lines:
+def _experience_rewrite(experience: str, target_profile: Dict[str, Any]) -> str:
+    text = re.sub(r"\s+", " ", experience or "").strip()
+    role = str(target_profile.get("role") or "").strip()
+    if not text:
         return ""
-    header_lines: List[str] = []
-    body_text_parts: List[str] = []
-    for index, line in enumerate(lines):
-        plain = normalize_plain_text(line)
-        if index < 2 and len(plain.split()) <= 18:
-            header_lines.append(line)
+    if role:
+        return (
+            f"Esperienza valorizzata per il ruolo target: {text}. "
+            "Rendo le attività più leggibili con bullet chiari, mantenendo solo informazioni già presenti nel CV."
+        )
+    return (
+        f"{text}. "
+        "Rendo le attività più leggibili con bullet chiari, mantenendo solo informazioni già presenti nel CV."
+    )
+
+
+def _projects_rewrite(projects: str, target_profile: Dict[str, Any]) -> str:
+    text = re.sub(r"\s+", " ", projects or "").strip()
+    if not text:
+        return ""
+    return (
+        f"Progetti riorganizzati in modo più leggibile: {text}. "
+        "Metto in evidenza ruolo, attività e tecnologie già presenti senza aggiungere dettagli non documentati."
+    )
+
+
+def _education_rewrite(education: str, target_profile: Dict[str, Any], cv_text: str = "") -> str:
+    text = re.sub(r"\s+", " ", education or "").strip()
+    if not text:
+        return ""
+    return (
+        f"{text}. "
+        "Rendo la formazione più chiara e coerente con il profilo, senza forzare collegamenti non presenti nel CV."
+    )
+
+
+def _unique_preserve_order(values: Iterable[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for value in values:
+        item = re.sub(r"\s+", " ", str(value or "")).strip()
+        plain = normalize_plain_text(item)
+        if not plain or plain in seen:
             continue
-        body_text_parts.append(line)
-    body_text = _shorten_cv_text(" ".join(body_text_parts) if body_text_parts else " ".join(lines), 650)
-    sentences = [
-        sentence.strip()
-        for sentence in re.split(r"(?<=[.!?])\s+", body_text)
-        if sentence.strip()
-    ]
-    selected = sentences[:4] if sentences else [body_text]
-    bullets = []
-    for sentence in selected:
-        sentence = sentence.rstrip(".")
-        if not sentence:
-            continue
-        bullets.append(f"- {sentence}.")
-    if not bullets:
-        return ""
-    block = []
-    if header_lines:
-        block.extend(header_lines[:2])
-    block.extend(bullets[:5])
-    return "\n".join(block)
+        seen.add(plain)
+        result.append(item)
+    return result
 
 
-def _projects_rewrite(original: str, target_profile: Dict[str, Any]) -> str:
-    role = target_profile.get("role") or "ruolo target"
-    rows = []
-    for part in re.split(r"\n|·|•", original or ""):
-        part = re.sub(r"\s+", " ", part).strip(" -.;")
-        if not part:
-            continue
-        rows.append(f"- {part}.")
-    rows = _unique_preserve_order(rows)[:6]
-    if not rows:
-        return ""
-    return f"Progetti rilevanti per {role}:\n" + "\n".join(rows)
+def _extract_skill_terms(value: str) -> List[str]:
+    return _unique_preserve_order(re.split(r"[,;|??\n]+", value or ""))
 
 
-def _education_rewrite(original: str, target_profile: Dict[str, Any], cv_text: str) -> str:
-    text = _shorten_cv_text(original, 700)
-    if len(text.split()) < 18:
-        return ""
-    return text
+def _group_skill_terms(skill_terms: List[str]) -> str:
+    return "\n".join(f"- {term}" for term in skill_terms[:12]).strip()
 
 
 def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> List[Dict]:
@@ -9305,6 +9237,34 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
         print(f"Fallback suggerimenti CV non riuscito: {exc}")
 
     try:
+        user_additional_data = evaluation.get("user_additional_data")
+        if isinstance(user_additional_data, dict) and flatten_cv_support_data(user_additional_data):
+            extra_instructions = build_additional_rewrite_instructions(user_additional_data, role)
+            extra_suggestions = []
+            for index, instruction in enumerate(extra_instructions):
+                suggestion = make_coach_suggestion(
+                    instruction.category or "extra_info",
+                    "Inserisci le informazioni aggiuntive nel CV",
+                    instruction.reason or "Trasforma le informazioni compilate altrove in testo CV utilizzabile.",
+                    section=instruction.section,
+                    original_text=instruction.original,
+                    proposed_text=instruction.replacement,
+                    supported_by_cv=True,
+                    suggestion_type="actionableEdit",
+                )
+                if not suggestion:
+                    continue
+                suggestion["impact"] = "medio"
+                suggestion["priority"] = 1 + index
+                suggestion["source_id"] = instruction.source_id
+                if is_valid_actionable_suggestion(suggestion) and suggestion_targets_current_cv(suggestion, cv_text):
+                    extra_suggestions.append(suggestion)
+            if extra_suggestions:
+                return extra_suggestions[:8]
+    except Exception as exc:
+        print(f"Fallback suggerimenti dati extra non riuscito: {exc}")
+
+    try:
         cv_text = str(evaluation.get("cv_text") or "")
         target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
         role = str(target.get("role") or evaluation.get("role") or "ruolo target").strip() or "ruolo target"
@@ -9373,11 +9333,11 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
                     }.get(infer_role_family(role), [])
                     proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in _unique_preserve_order([*preferred, *soft_values])[:8])
             elif section_key == "education":
-                proposed = _education_rewrite(original, {"role": role}, cv_text)
+                proposed = _education_rewrite(original, {"role": role}, cv_text) or _shorten_cv_text(original, 700)
             elif section_key == "projects":
                 proposed = _projects_rewrite(original, {"role": role, "company": ""})
             elif section_key == "experience":
-                proposed = _experience_rewrite(original, {"role": role})
+                proposed = _experience_rewrite(original, {"role": role}) or _shorten_cv_text(original, 700)
             item = make_coach_suggestion(
                 "experience" if section_key == "experience" else "profile",
                 "Rendi più leggibile e mirata questa sezione",
@@ -9421,13 +9381,13 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
                     }.get(infer_role_family(role), [])
                     proposed = "Soft skills:\n" + "\n".join(f"- {skill}" for skill in _unique_preserve_order([*preferred, *soft_values])[:8])
             elif first_section_key == "experience":
-                proposed = _experience_rewrite(original, {"role": role})
+                proposed = _experience_rewrite(original, {"role": role}) or _shorten_cv_text(original, 700)
             elif first_section_key == "projects":
                 proposed = _projects_rewrite(original, {"role": role, "company": ""})
             elif first_section_key == "education":
-                proposed = _education_rewrite(original, {"role": role}, cv_text)
+                proposed = _education_rewrite(original, {"role": role}, cv_text) or _shorten_cv_text(original, 700)
             else:
-                proposed = _profile_rewrite(original, {"role": role, "company": ""}, cv_text)
+                proposed = _profile_rewrite(original, {"role": role, "company": ""}, cv_text) or _shorten_cv_text(original, 700)
             item = make_coach_suggestion(
                 f"{first_section_key}-fallback",
                 "Ottimizza questa sezione per il ruolo target",
@@ -9444,6 +9404,32 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
                 return [item]
     except Exception as exc:
         print(f"Fallback conservativo suggerimenti CV non riuscito: {exc}")
+
+    # Ultima rete di sicurezza: se non riusciamo ancora a costruire un
+    # suggerimento strutturato, proviamo con il primo blocco non vuoto del CV.
+    try:
+        cv_text = str(evaluation.get("cv_text") or "")
+        target = evaluation.get("target") if isinstance(evaluation.get("target"), dict) else {}
+        role = str(target.get("role") or evaluation.get("role") or "ruolo target").strip() or "ruolo target"
+        fallback_block = next((block.strip() for block in re.split(r"\n\s*\n", cv_text) if block.strip()), "")
+        if fallback_block:
+            proposed = _shorten_cv_text(fallback_block, 700)
+            item = make_coach_suggestion(
+                "profile",
+                "Valorizza questo blocco del CV",
+                "Riscrive solo testo già presente per renderlo più chiaro e più mirato al ruolo target.",
+                section="CHI SONO",
+                original_text=fallback_block,
+                proposed_text=_profile_rewrite(fallback_block, {"role": role, "company": ""}, cv_text) or proposed,
+                supported_by_cv=True,
+                suggestion_type="actionableEdit",
+            )
+            if item and is_valid_actionable_suggestion(item) and suggestion_targets_current_cv(item, cv_text):
+                item["impact"] = "basso"
+                item["priority"] = 101
+                return [item]
+    except Exception as exc:
+        print(f"Fallback sicurezza suggerimenti CV non riuscito: {exc}")
 
     return []
 
@@ -10020,6 +10006,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             evaluation_for_suggestions["target"].setdefault("role", role)
             evaluation_for_suggestions["target"].setdefault("role_level", role_level)
         evaluation_for_suggestions["cv_text"] = cv_text
+        evaluation_for_suggestions["user_additional_data"] = user_additional_data
         auto_suggestions = build_coach_suggestions_from_evaluation(evaluation_for_suggestions)
         accepted_suggestions = normalize_accepted_coach_suggestions(auto_suggestions[:4])
         if accepted_suggestions:

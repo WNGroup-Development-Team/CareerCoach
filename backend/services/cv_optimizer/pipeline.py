@@ -78,6 +78,26 @@ SYNONYMS = {
     "problem solving": {"problem solving", "risoluzione problemi"},
 }
 
+CONTROLLED_PM_SKILLS = {
+    "gestione budget": ("budget", "costi", "spese"),
+    "budget management": ("budget", "costi", "spese"),
+    "leadership strategica": ("leadership strategica",),
+    "negoziazione": ("negoziazione", "negoziato"),
+    "negoziazione avanzata": ("negoziazione avanzata",),
+    "microsoft project": ("microsoft project",),
+    "monday.com": ("monday.com", "monday"),
+    "notion": ("notion",),
+    "risk management": ("risk management", "gestione rischi", "analisi dei rischi"),
+    "gestione rischi": ("gestione rischi", "analisi dei rischi"),
+}
+
+INFORMAL_CV_MARKERS = (
+    "l'ho usato", "l ho usato", "l'ho utilizzato", "l ho utilizzato",
+    "ho usato", "ho utilizzato", "ho applicato", "visto all'esame",
+    "vista all'esame", "usata durante i progetti", "usato durante i progetti",
+    "usata in progetto", "usato in progetto",
+)
+
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").lower()).strip()
@@ -655,6 +675,8 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
     def __init__(self) -> None:
         self.rewriter = ResumeRewriter()
         self.parser = ResumeParser()
+        self._source_cv_text = ""
+        self._user_additional_data: Dict[str, Any] = {}
 
     def generate_structured_instructions(
         self,
@@ -667,6 +689,8 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
         use_llm: bool = True,
     ) -> List[StructuredRewriteInstruction]:
         accepted_suggestions = accepted_suggestions or []
+        self._source_cv_text = cv_text or ""
+        self._user_additional_data = dict(user_additional_data or {})
         normalized_suggestions: List[Dict[str, Any]] = []
         for index, suggestion in enumerate(accepted_suggestions):
             if not isinstance(suggestion, dict):
@@ -755,7 +779,183 @@ Dati aggiuntivi utente:
                     reason=suggestion["reason"],
                     confidence=0.5,
                 ))
-        return instructions
+        return self._sanitize_structured_instructions(
+            instructions,
+            cv_text,
+            user_additional_data or {},
+        )
+
+    def _sanitize_structured_instructions(
+        self,
+        instructions: List[StructuredRewriteInstruction],
+        cv_text: str,
+        user_additional_data: Dict[str, Any],
+    ) -> List[StructuredRewriteInstruction]:
+        source_sections = self.parser.section_text_map(cv_text)
+        support_text = normalize_text(
+            " ".join([
+                cv_text or "",
+                *self._confirmed_skill_names(user_additional_data),
+                *self._user_note_texts(user_additional_data),
+            ])
+        )
+        note_texts = [
+            normalize_text(note)
+            for note in self._user_note_texts(user_additional_data)
+            if len(normalize_text(note)) >= 14
+        ]
+        cleaned: List[StructuredRewriteInstruction] = []
+        seen = set()
+
+        for instruction in instructions:
+            target = canonical_section(instruction.target_section)
+            if target == "esperienze" and not source_sections.get("esperienze"):
+                continue
+
+            text = self._clean_instruction_text(instruction.new_text, note_texts)
+            if target in {"hard_skills", "soft_skills", "competenze"}:
+                text = self._filter_supported_skill_text(text, support_text)
+            elif target == "progetti":
+                text = self._format_project_entries(text)
+                if not text:
+                    continue
+
+            text = self._fix_common_grammar(text)
+            key = (target, normalize_text(text))
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(StructuredRewriteInstruction(
+                suggestion_id=instruction.suggestion_id,
+                target_section=instruction.target_section,
+                action=instruction.action,
+                old_text_hint=instruction.old_text_hint,
+                new_text=text,
+                items=list(instruction.items),
+                reason=instruction.reason,
+                confidence=instruction.confidence,
+            ))
+        return cleaned
+
+    def _confirmed_skill_names(self, user_data: Dict[str, Any]) -> List[str]:
+        names: List[str] = []
+        for item in user_data.get("confirmed_skills", []) if isinstance(user_data.get("confirmed_skills"), list) else []:
+            name = str(item.get("name") or item.get("skill") or "") if isinstance(item, dict) else str(item or "")
+            if name.strip():
+                names.append(name.strip())
+        return names
+
+    def _user_note_texts(self, user_data: Dict[str, Any]) -> List[str]:
+        notes: List[str] = []
+        for item in user_data.get("adaptation_answers", []) if isinstance(user_data.get("adaptation_answers"), list) else []:
+            if isinstance(item, dict) and str(item.get("answer") or "").strip():
+                notes.append(str(item.get("answer")).strip())
+        additional = str(user_data.get("additional_notes") or "").strip()
+        if additional:
+            notes.append(additional)
+        for item in user_data.get("confirmed_skills", []) if isinstance(user_data.get("confirmed_skills"), list) else []:
+            if isinstance(item, dict):
+                detail = str(item.get("user_example") or item.get("detail") or "").strip()
+                if detail:
+                    notes.append(detail)
+        return notes
+
+    def _clean_instruction_text(self, text: str, note_texts: List[str]) -> str:
+        lines: List[str] = []
+        for raw_line in re.sub(r"\r\n?", "\n", text or "").splitlines():
+            original_line = re.sub(r"[ \t]+", " ", raw_line).strip()
+            original_plain = normalize_text(original_line)
+            line = self._professionalize_informal_line(original_line)
+            plain = normalize_text(line)
+            if not line:
+                continue
+            if any(marker in plain for marker in INFORMAL_CV_MARKERS):
+                continue
+            if (
+                plain == original_plain
+                and any(note == plain or (len(note) >= 24 and note in plain) for note in note_texts)
+            ):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
+    def _professionalize_informal_line(self, line: str) -> str:
+        plain = normalize_text(line)
+        if "allineare requisiti e aspettative" in plain:
+            return (
+                "Collaborazione con il team per l'analisi dei requisiti e "
+                "l'allineamento delle attivita progettuali."
+            )
+        replacements = [
+            (r"^ho\s+applicato\s+", "Applicazione di "),
+            (r"^ho\s+(usato|utilizzato)\s+", "Utilizzo di "),
+            (r"^(usata?|utilizzata?)\s+in\s+", "Applicazione in "),
+            (r"^(usata?|utilizzata?)\s+durante\s+", "Applicazione durante "),
+            (r"\b(visto|vista)\s+all'?esame\b", "approfondito in ambito universitario"),
+        ]
+        cleaned = line
+        for pattern, replacement in replacements:
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        return cleaned[:1].upper() + cleaned[1:] if cleaned else ""
+
+    def _filter_supported_skill_text(self, text: str, support_text: str) -> str:
+        filtered = text
+        for skill, evidence_terms in CONTROLLED_PM_SKILLS.items():
+            if skill not in normalize_text(filtered):
+                continue
+            if not any(term in support_text for term in evidence_terms):
+                filtered = re.sub(
+                    rf"(?i)\b{re.escape(skill)}\b",
+                    "",
+                    filtered,
+                )
+        rows: List[str] = []
+        seen = set()
+        for raw_line in filtered.splitlines():
+            line = re.sub(r"\s*[,;|Â·â€¢]\s*", " Â· ", raw_line).strip(" Â·,;|")
+            parts = [part.strip() for part in line.split(" Â· ") if part.strip()]
+            unique_parts = []
+            for part in parts:
+                key = normalize_text(part)
+                if key and key not in seen:
+                    seen.add(key)
+                    unique_parts.append(part)
+            if unique_parts:
+                rows.append(" Â· ".join(unique_parts))
+        return "\n".join(rows).strip()
+
+    def _format_project_entries(self, text: str) -> str:
+        lines = [line.strip(" -Â·â€¢") for line in (text or "").splitlines() if line.strip()]
+        rows: List[str] = []
+        index = 0
+        while index < len(lines):
+            title = lines[index]
+            plain = normalize_text(title)
+            if not plain.startswith(("progetto ", "project ", "tesi ")):
+                index += 1
+                continue
+            if index + 1 >= len(lines):
+                break
+            description = lines[index + 1].strip()
+            if (
+                normalize_text(description).startswith(("progetto ", "project ", "tesi "))
+                or any(marker in normalize_text(description) for marker in INFORMAL_CV_MARKERS)
+            ):
+                index += 1
+                continue
+            rows.extend([title, description.rstrip(".") + "."])
+            index += 2
+        return "\n".join(rows)
+
+    def _fix_common_grammar(self, text: str) -> str:
+        cleaned = re.sub(
+            r"\brischiare\s+(attivit[aÃ ]|progetti?)\b",
+            r"gestire i rischi delle \1",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
     def apply_instructions_to_docx(
         self,
@@ -779,6 +979,8 @@ Dati aggiuntivi utente:
             else:
                 failed_ids.append(instruction.suggestion_id)
 
+        self._remove_empty_section_headings(document)
+        self._polish_document_typography(document)
         self._remove_oversized_table_row_minimums(document)
         self._collapse_trailing_blank_paragraphs(document)
         output = io.BytesIO()
@@ -795,6 +997,81 @@ Dati aggiuntivi utente:
             duplicate_warnings=duplicate_warnings,
             validation_report=validation_report,
         )
+
+    def _remove_empty_section_headings(self, document) -> None:
+        """Remove orphan headings without touching sections backed by a table."""
+        paragraphs = list(document.paragraphs)
+        for index, paragraph in enumerate(paragraphs):
+            if not is_section_heading(paragraph.text or ""):
+                continue
+            has_content = False
+            for following in paragraphs[index + 1:]:
+                text = (following.text or "").strip()
+                if not text:
+                    continue
+                if is_section_heading(text):
+                    break
+                has_content = True
+                break
+            if has_content:
+                continue
+
+            sibling = paragraph._p.getnext()
+            while sibling is not None:
+                if sibling.tag.endswith("}tbl"):
+                    has_content = True
+                    break
+                if sibling.tag.endswith("}p"):
+                    sibling_text = "".join(sibling.itertext()).strip()
+                    if sibling_text:
+                        break
+                sibling = sibling.getnext()
+            if not has_content:
+                self._replace_paragraph_preserving_style(paragraph, "")
+
+    def _polish_document_typography(self, document) -> None:
+        """Harmonize equivalent font aliases while preserving the original design."""
+        from docx.oxml.ns import qn
+
+        font_aliases = {
+            "arial mt": "Arial",
+            "arialmt": "Arial",
+        }
+
+        def normalize_run_font(run) -> None:
+            current = str(run.font.name or "").strip()
+            replacement = font_aliases.get(current.lower())
+            if not replacement:
+                return
+            run.font.name = replacement
+            r_pr = run._r.get_or_add_rPr()
+            r_fonts = r_pr.rFonts
+            if r_fonts is None:
+                r_fonts = OxmlElement("w:rFonts")
+                r_pr.insert(0, r_fonts)
+            for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
+                r_fonts.set(qn(f"w:{attribute}"), replacement)
+
+        for style in document.styles:
+            style_font = getattr(style, "font", None)
+            if style_font is None:
+                continue
+            current = str(style_font.name or "").strip()
+            replacement = font_aliases.get(current.lower())
+            if replacement:
+                style_font.name = replacement
+
+        seen = set()
+        for context in self._paragraph_contexts(document):
+            paragraph = context.paragraph
+            paragraph_id = id(paragraph._p)
+            if paragraph_id in seen:
+                continue
+            seen.add(paragraph_id)
+            for run in paragraph.runs:
+                normalize_run_font(run)
+            if is_section_heading(paragraph.text or ""):
+                paragraph.paragraph_format.keep_with_next = True
 
     def _remove_oversized_table_row_minimums(self, document) -> None:
         """Let full-page layout tables size to content instead of forcing overflow."""
@@ -862,6 +1139,7 @@ Dati aggiuntivi utente:
             generated_file_bytes
         )
         added_sections = self._unexpected_sections(normalized_original, normalized_final)
+        content_warnings = self._final_content_warnings(final_text, original_text)
         status = "applied"
         if failed:
             status = "partially_applied" if (applied or partial) else "failed"
@@ -892,6 +1170,8 @@ Dati aggiuntivi utente:
                     }
                 ],
             ]))
+        if content_warnings:
+            status = "failed"
 
         return {
             "status": status,
@@ -900,9 +1180,49 @@ Dati aggiuntivi utente:
             "failed": failed,
             "duplicate_warnings": duplicate_warnings,
             "contamination_warnings": contamination_warnings,
+            "content_warnings": content_warnings,
             "unexpected_sections": added_sections,
             "final_text": final_text,
         }
+
+    def _final_content_warnings(self, final_text: str, original_text: str) -> List[str]:
+        warnings: List[str] = []
+        final_plain = normalize_text(final_text)
+        original_sections = self.parser.section_text_map(original_text)
+        final_sections = self.parser.section_text_map(final_text)
+
+        if final_sections.get("esperienze") and not original_sections.get("esperienze"):
+            warnings.append("Sezione ESPERIENZE PROFESSIONALI non presente nel CV originale.")
+
+        for marker in INFORMAL_CV_MARKERS:
+            if marker in final_plain:
+                warnings.append(f"Formula informale ancora presente: {marker}")
+
+        for note in self._user_note_texts(self._user_additional_data):
+            note_plain = normalize_text(note)
+            if len(note_plain) >= 14 and note_plain in final_plain:
+                warnings.append("Una nota utente risulta copiata letteralmente nel CV.")
+                break
+
+        support_text = normalize_text(
+            " ".join([
+                original_text,
+                *self._confirmed_skill_names(self._user_additional_data),
+                *self._user_note_texts(self._user_additional_data),
+            ])
+        )
+        for skill, evidence_terms in CONTROLLED_PM_SKILLS.items():
+            if skill in final_plain and not any(term in support_text for term in evidence_terms):
+                warnings.append(f"Competenza non supportata rilevata: {skill}")
+
+        project_text = final_sections.get("progetti", "")
+        if project_text:
+            project_lines = [line.strip() for line in project_text.splitlines() if line.strip()]
+            for index, line in enumerate(project_lines):
+                if index % 2 == 0 and not normalize_text(line).startswith(("progetto ", "project ", "tesi ")):
+                    warnings.append("La sezione PROGETTI non rispetta il formato titolo e descrizione.")
+                    break
+        return list(dict.fromkeys(warnings))[:10]
 
     def _skill_section_contamination_warnings(self, file_bytes: bytes) -> List[str]:
         from docx import Document
@@ -1056,10 +1376,12 @@ Dati aggiuntivi utente:
             self._replace_paragraph_preserving_style(context.paragraph, "")
 
         self._replace_paragraph_preserving_style(anchor.paragraph, replacement_lines[0])
+        self._style_section_line(anchor.paragraph, section_name, 0)
         previous = anchor.paragraph
-        for extra_line in replacement_lines[1:]:
+        for line_index, extra_line in enumerate(replacement_lines[1:], start=1):
             new_paragraph = self._insert_paragraph_after(previous, extra_line)
             self._copy_paragraph_format(previous, new_paragraph)
+            self._style_section_line(new_paragraph, section_name, line_index)
             previous = new_paragraph
 
     def _rewrite_single_anchor(
@@ -1079,11 +1401,14 @@ Dati aggiuntivi utente:
         if anchor is None:
             anchor = matching_contexts[0]
 
+        section_name = anchor.section
         self._replace_paragraph_preserving_style(anchor.paragraph, replacement_lines[0])
+        self._style_section_line(anchor.paragraph, section_name, 0)
         previous = anchor.paragraph
-        for extra_line in replacement_lines[1:]:
+        for line_index, extra_line in enumerate(replacement_lines[1:], start=1):
             new_paragraph = self._insert_paragraph_after(previous, extra_line)
             self._copy_paragraph_format(previous, new_paragraph)
+            self._style_section_line(new_paragraph, section_name, line_index)
             previous = new_paragraph
 
     def _is_high_confidence_section_instruction(self, instruction: StructuredRewriteInstruction) -> bool:
@@ -1099,18 +1424,37 @@ Dati aggiuntivi utente:
         if not lines:
             lines = [replacement.strip()]
 
+        heading_reference = self._last_heading_paragraph(document)
+        body_reference = self._last_styled_paragraph(document)
         if anchor_paragraph is None:
             heading_paragraph = document.add_paragraph()
         else:
             heading_paragraph = self._insert_paragraph_after(anchor_paragraph, "")
+        if heading_reference is not None:
+            self._copy_paragraph_format(heading_reference, heading_paragraph)
         self._replace_paragraph_preserving_style(heading_paragraph, heading.upper())
         self._make_heading_like(heading_paragraph)
 
         previous = heading_paragraph
-        for line in lines:
-            content_paragraph = self._insert_paragraph_after(previous, line)
-            self._copy_paragraph_format(previous, content_paragraph)
+        section_name = canonical_section(heading)
+        for line_index, line in enumerate(lines):
+            content_paragraph = self._insert_paragraph_after(previous, line, source_format=body_reference or previous)
+            self._style_section_line(content_paragraph, section_name, line_index)
             previous = content_paragraph
+
+    def _style_section_line(self, paragraph, section_name: str, line_index: int) -> None:
+        if canonical_section(section_name) != "progetti":
+            return
+        from docx.shared import Pt
+
+        is_title = line_index % 2 == 0
+        if not paragraph.runs:
+            paragraph.add_run("")
+        for run in paragraph.runs:
+            run.bold = is_title
+        paragraph.paragraph_format.keep_with_next = is_title
+        paragraph.paragraph_format.space_before = Pt(5 if is_title else 0)
+        paragraph.paragraph_format.space_after = Pt(2 if is_title else 5)
 
     def _find_best_section_anchor(self, document, target: str, sections_detected: List[str]):
         contexts = self._paragraph_contexts(document)
@@ -1572,11 +1916,23 @@ Dati aggiuntivi utente:
         )
 
     def _append_section(self, document, instruction: RewriteInstruction) -> None:
+        from docx.enum.text import WD_BREAK
+
         heading = (instruction.section or "PROGETTI").strip().upper()
         if heading == "PAGINA AGGIUNTIVA":
             heading = "PROGETTI"
         section_name = canonical_section(heading)
         contexts = self._paragraph_contexts(document)
+        preferred_order = [
+            "profilo",
+            "esperienze",
+            "competenze",
+            "formazione",
+            "certificazioni",
+            "lingue",
+            "progetti",
+            "contatti",
+        ]
         matching_heading_index = next(
             (
                 index
@@ -1612,14 +1968,38 @@ Dati aggiuntivi utente:
 
         heading_reference = self._last_heading_paragraph(document)
         body_reference = self._last_styled_paragraph(document)
+        anchor = body_reference or heading_reference
+        insertion_index = len(contexts)
+        section_rank = preferred_order.index(section_name) if section_name in preferred_order else len(preferred_order)
+        for index, context in enumerate(contexts):
+            current_section = canonical_section(context.section or "")
+            if current_section == section_name:
+                insertion_index = index
+                break
+            current_rank = preferred_order.index(current_section) if current_section in preferred_order else len(preferred_order)
+            if current_rank > section_rank:
+                insertion_index = index
+                break
+
+        if insertion_index < len(contexts) and insertion_index > 0:
+            anchor = contexts[insertion_index - 1].paragraph
+
+        insert_page_break = section_name == "progetti" and len(instruction.replacement.splitlines()) > 2
+        if insert_page_break and anchor is not None:
+            page_break = document.add_paragraph()
+            page_break.add_run().add_break(WD_BREAK.PAGE)
+            page_break._p.getparent().remove(page_break._p)
+            anchor._p.addnext(page_break._p)
+            anchor = page_break
+
         heading_paragraph = document.add_paragraph(heading)
         body_paragraph = document.add_paragraph(instruction.replacement)
         if heading_reference is not None:
             self._copy_paragraph_format(heading_reference, heading_paragraph)
         if body_reference is not None:
             self._copy_paragraph_format(body_reference, body_paragraph)
-        if body_reference is not None:
-            body_reference._p.addnext(heading_paragraph._p)
+        if anchor is not None:
+            anchor._p.addnext(heading_paragraph._p)
             heading_paragraph._p.addnext(body_paragraph._p)
         elif heading_reference is not None:
             heading_reference._p.addnext(heading_paragraph._p)

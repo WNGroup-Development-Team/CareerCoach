@@ -20,12 +20,14 @@ def build_cv_job_suggestions(
 
     cv_text = str(evaluation.get("cv_text") or "")
     filtered: List[Dict[str, Any]] = []
+    fallback: List[Dict[str, Any]] = []
     seen = set()
     for item in suggestions:
         if not isinstance(item, dict):
             continue
         if not is_valid_actionable_suggestion(item):
             continue
+        fallback.append(item)
         if not suggestion_targets_current_cv(item, cv_text):
             continue
         item_id = str(item.get("id") or "").strip()
@@ -34,4 +36,6 @@ def build_cv_job_suggestions(
         if item_id:
             seen.add(item_id)
         filtered.append(item)
-    return filtered[:8]
+    if filtered:
+        return filtered[:8]
+    return fallback[:8]

@@ -18,6 +18,7 @@ def build_resume_rewrite_result(
         CoachSuggestionEngine,
         ResumeParser,
         ResumeRewriter,
+        build_additional_rewrite_instructions,
         build_confirmed_skill_rewrite_instructions,
         build_cv_rewrite_prompt,
         call_rewrite_llm,
@@ -35,6 +36,7 @@ def build_resume_rewrite_result(
     confirmed_instructions = build_confirmed_skill_rewrite_instructions(
         cv_text, user_additional_data or {}, role
     )
+    additional_instructions = build_additional_rewrite_instructions(user_additional_data or {}, role)
     clean_additional_data = {
         key: str(value).strip()[:300] if isinstance(value, str) else value
         for key, value in (user_additional_data or {}).items()
@@ -75,6 +77,7 @@ def build_resume_rewrite_result(
         instructions = rewriter.instructions_from_suggestions(accepted)
 
     instructions.extend(confirmed_instructions)
+    instructions.extend(additional_instructions)
     if instructions:
         instructions = consolidate_rewrite_instructions(
             cv_text,
@@ -124,8 +127,12 @@ def build_resume_rewrite_result(
             use_llm=False,
         )
         if (
-            len((optimized_text or "").strip()) < 200
-            or normalize_plain_text(optimized_text) == normalize_plain_text(cv_text)
+            not (optimized_text or "").strip()
+            or (
+                instructions
+                and len((optimized_text or "").strip()) < 120
+                and normalize_plain_text(optimized_text) == normalize_plain_text(cv_text)
+            )
         ):
             optimized_text = rewriter.apply_to_text(cv_text, instructions)
     except Exception as exc:
