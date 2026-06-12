@@ -340,6 +340,26 @@ class CvValidationTests(unittest.TestCase):
         self.assertTrue(result["is_cv"])
         self.assertFalse(result["visual_validation"]["blocked"])
 
+    def test_quality_review_treats_semantically_present_replacement_as_kept(self):
+        final_text = "Profilo aggiornato con orientamento analitico.\nHARD SKILLS\nPython, SQL, data analysis\n"
+        instructions = [
+            main.RewriteInstruction(
+                section="HARD SKILLS",
+                original="Python, SQL",
+                replacement="Python, SQL, data analysis",
+                category="skills",
+                source_id="skills-update",
+            )
+        ]
+
+        review = main.review_generated_cv_quality_locally(
+            final_text=final_text,
+            accepted_instructions=instructions,
+        )
+
+        self.assertTrue(review["ready_to_send"])
+        self.assertEqual(review["issues"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

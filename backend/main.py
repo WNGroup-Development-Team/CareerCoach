@@ -4827,11 +4827,26 @@ def review_generated_cv_quality_locally(
         for warning in validate_optimized_docx_structure(final_text)
     ]
     normalized_final = normalize_plain_text(final_text)
+    def _instruction_present(replacement: str) -> bool:
+        normalized_replacement = normalize_plain_text(replacement)
+        if not normalized_replacement:
+            return True
+        if normalized_replacement in normalized_final:
+            return True
+
+        replacement_tokens = [token for token in normalized_replacement.split() if len(token) > 2]
+        if len(replacement_tokens) < 3:
+            return False
+
+        final_tokens = set(normalized_final.split())
+        overlap = sum(1 for token in replacement_tokens if token in final_tokens)
+        return (overlap / len(replacement_tokens)) >= 0.7
+
     missing_changes = [
         instruction.source_id or instruction.section or "modifica"
         for instruction in accepted_instructions
         if instruction.replacement
-        and normalize_plain_text(instruction.replacement) not in normalized_final
+        and not _instruction_present(instruction.replacement)
     ]
     if missing_changes:
         issues.append({
