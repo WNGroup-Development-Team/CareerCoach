@@ -780,7 +780,7 @@ Dati aggiuntivi utente:
                 failed_ids.append(instruction.suggestion_id)
 
         self._remove_oversized_table_row_minimums(document)
-        self._minimize_trailing_paragraph_after_table(document)
+        self._collapse_trailing_blank_paragraphs(document)
         output = io.BytesIO()
         document.save(output)
         file_bytes = output.getvalue()
@@ -805,23 +805,30 @@ Dati aggiuntivi utente:
                     if child.tag.endswith("}trHeight"):
                         tr_pr.remove(child)
 
-    def _minimize_trailing_paragraph_after_table(self, document) -> None:
-        """Prevent Word's mandatory paragraph after a full-page table becoming a blank page."""
+    def _collapse_trailing_blank_paragraphs(self, document) -> None:
+        """Keep only one hidden trailing blank paragraph and minimize its footprint."""
         from docx.shared import Pt
 
         body = document._element.body
         children = list(body)
-        if not children or not any(child.tag.endswith("}tbl") for child in children):
+        if not children:
             return
-        trailing = document.paragraphs[-1] if document.paragraphs else None
-        if trailing is None or (trailing.text or "").strip():
+        trailing_paragraphs = []
+        for paragraph in reversed(document.paragraphs):
+            if (paragraph.text or "").strip():
+                break
+            trailing_paragraphs.append(paragraph)
+        if not trailing_paragraphs:
             return
-        trailing.paragraph_format.space_before = Pt(0)
-        trailing.paragraph_format.space_after = Pt(0)
-        trailing.paragraph_format.line_spacing = Pt(1)
-        run = trailing.runs[0] if trailing.runs else trailing.add_run("")
-        run.font.size = Pt(1)
-        run.font.hidden = True
+        for index, paragraph in enumerate(trailing_paragraphs):
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.paragraph_format.line_spacing = Pt(1)
+            run = paragraph.runs[0] if paragraph.runs else paragraph.add_run("")
+            run.font.size = Pt(1)
+            run.font.hidden = True
+            if index > 0:
+                paragraph._element.getparent().remove(paragraph._element)
 
     def validate_generated_docx(
         self,
@@ -1108,10 +1115,20 @@ Dati aggiuntivi utente:
     def _find_best_section_anchor(self, document, target: str, sections_detected: List[str]):
         contexts = self._paragraph_contexts(document)
         target_index = self._section_index(sections_detected, target)
+        prefer_body = target not in {"contatti", "lingue", "hard_skills", "soft_skills", "competenze"}
         if target_index > 0:
             previous_section = sections_detected[target_index - 1]
+            body_candidates = []
             for context in reversed(contexts):
                 if context.section == previous_section and (context.paragraph.text or '').strip():
+                    if not prefer_body or not self._paragraph_is_in_table(context.paragraph):
+                        return context.paragraph
+                    body_candidates.append(context.paragraph)
+            if body_candidates:
+                return body_candidates[0]
+        if prefer_body:
+            for context in reversed(contexts):
+                if (context.paragraph.text or '').strip() and not self._paragraph_is_in_table(context.paragraph):
                     return context.paragraph
         for context in reversed(contexts):
             if (context.paragraph.text or '').strip():
@@ -1141,12 +1158,12 @@ Dati aggiuntivi utente:
 
     def _make_heading_like(self, paragraph) -> None:
         if not paragraph.runs:
-            return
-        run = paragraph.runs[0]
-        try:
-            run.bold = True
-        except Exception:
-            pass
+            paragraph.add_run("")
+        for run in paragraph.runs:
+            try:
+                run.bold = True
+            except Exception:
+                pass
 
     def _replace_paragraph_preserving_style(self, paragraph, replacement: str) -> None:
         runs = list(paragraph.runs)
@@ -1168,12 +1185,34 @@ Dati aggiuntivi utente:
                 target._p.remove(target._p.pPr)
             target._p.insert(0, deepcopy(source._p.pPr))
 
+        try:
+            target.paragraph_format.alignment = source.paragraph_format.alignment
+            target.paragraph_format.left_indent = source.paragraph_format.left_indent
+            target.paragraph_format.right_indent = source.paragraph_format.right_indent
+            target.paragraph_format.first_line_indent = source.paragraph_format.first_line_indent
+            target.paragraph_format.space_before = source.paragraph_format.space_before
+            target.paragraph_format.space_after = source.paragraph_format.space_after
+            target.paragraph_format.line_spacing = source.paragraph_format.line_spacing
+            target.paragraph_format.keep_together = source.paragraph_format.keep_together
+            target.paragraph_format.keep_with_next = source.paragraph_format.keep_with_next
+            target.paragraph_format.widow_control = source.paragraph_format.widow_control
+        except Exception:
+            pass
+
         source_run = next((run for run in source.runs if (run.text or "").strip()), None)
         target_run = target.runs[0] if target.runs else target.add_run()
         if source_run is not None and source_run._r.rPr is not None:
             if target_run._r.rPr is not None:
                 target_run._r.remove(target_run._r.rPr)
             target_run._r.insert(0, deepcopy(source_run._r.rPr))
+        try:
+            target_run.font.name = source_run.font.name if source_run is not None else target_run.font.name
+            target_run.font.size = source_run.font.size if source_run is not None else target_run.font.size
+            target_run.font.bold = source_run.font.bold if source_run is not None else target_run.font.bold
+            target_run.font.italic = source_run.font.italic if source_run is not None else target_run.font.italic
+            target_run.font.underline = source_run.font.underline if source_run is not None else target_run.font.underline
+        except Exception:
+            pass
 
     def _duplicate_markers(self, final_text: str) -> List[str]:
         warnings: List[str] = []
@@ -1192,13 +1231,17 @@ Dati aggiuntivi utente:
         final_sections = set(self.parser.section_text_map(final_text).keys())
         return sorted(section for section in final_sections - original_sections if section not in {"intestazione", "contenuto"})
 
-    def _insert_paragraph_after(self, paragraph, text: str):
+    def _insert_paragraph_after(self, paragraph, text: str, source_format=None):
         from docx.text.paragraph import Paragraph
 
         new_p = OxmlElement("w:p")
         paragraph._p.addnext(new_p)
         new_paragraph = Paragraph(new_p, paragraph._parent)
         new_paragraph.text = text
+        if source_format is None:
+            source_format = paragraph
+        if source_format is not None:
+            self._copy_paragraph_format(source_format, new_paragraph)
         return new_paragraph
 
     def _extract_docx_text_bytes(self, file_bytes: bytes) -> str:
@@ -1676,6 +1719,14 @@ Dati aggiuntivi utente:
     def _is_editable_paragraph(self, paragraph) -> bool:
         text = (paragraph.text or "").strip()
         return bool(text) and not is_section_heading(text)
+
+    def _paragraph_is_in_table(self, paragraph) -> bool:
+        parent = getattr(paragraph, "_parent", None)
+        while parent is not None:
+            if parent.__class__.__name__ == "Table":
+                return True
+            parent = getattr(parent, "_parent", None)
+        return False
 
     def _is_heading_for_candidates(self, normalized_text: str, section_names: List[str]) -> bool:
         clean = normalize_text(normalized_text).strip(":")

@@ -200,10 +200,13 @@ class DocxPreserverLayoutTests(unittest.TestCase):
 
     def test_structured_pipeline_copies_direct_run_format_to_inserted_lines(self):
         document = Document()
-        document.add_paragraph("ESPERIENZE PROFESSIONALI")
+        heading = document.add_paragraph("ESPERIENZE PROFESSIONALI")
+        heading.runs[0].font.name = "Montserrat"
+        heading.runs[0].font.bold = True
         body = document.add_paragraph("Attività originale.")
         body.runs[0].font.name = "Open Sans"
         body.runs[0].font.size = Pt(10)
+        body.paragraph_format.space_after = Pt(12)
 
         instruction = StructuredRewriteInstruction(
             suggestion_id="formatted-experience",
@@ -229,6 +232,38 @@ class DocxPreserverLayoutTests(unittest.TestCase):
 
         self.assertEqual(inserted.runs[0].font.name, "Open Sans")
         self.assertEqual(inserted.runs[0].font.size.pt, 10)
+        self.assertEqual(inserted.paragraph_format.space_after.pt, 12)
+
+    def test_structured_pipeline_preserves_heading_format_when_appending_section(self):
+        document = Document()
+        heading = document.add_paragraph("FORMAZIONE")
+        heading.runs[0].font.name = "Montserrat"
+        heading.runs[0].font.size = Pt(16)
+        heading.paragraph_format.space_after = Pt(6)
+        body = document.add_paragraph("Laurea")
+        body.runs[0].font.name = "Open Sans"
+        body.runs[0].font.size = Pt(10)
+
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="append-projects",
+            target_section="PROGETTI",
+            action="replace",
+            old_text_hint="",
+            new_text="Progetto uno\nProgetto due",
+            items=[],
+            reason="Aggiunta sezione.",
+            confidence=0.8,
+        )
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [instruction],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        project_heading = next(paragraph for paragraph in updated.paragraphs if paragraph.text == "PROGETTI")
+        project_body = next(paragraph for paragraph in updated.paragraphs if paragraph.text == "Progetto uno")
+
+        self.assertTrue(project_heading.runs[0].bold)
 
     def test_structured_pipeline_minimizes_trailing_paragraph_after_table(self):
         document = Document()
@@ -249,6 +284,54 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         self.assertTrue(trailing.runs[0].font.hidden)
         row_xml = updated.tables[0].rows[0]._tr.xml
         self.assertNotIn("trHeight", row_xml)
+
+    def test_structured_pipeline_collapses_multiple_trailing_blank_paragraphs(self):
+        document = Document()
+        document.add_paragraph("ESPERIENZE PROFESSIONALI")
+        document.add_paragraph("Attività")
+        document.add_paragraph("")
+        document.add_paragraph("")
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        blank_trailing = [paragraph for paragraph in updated.paragraphs if not paragraph.text.strip()]
+
+        self.assertLessEqual(len(blank_trailing), 1)
+
+    def test_structured_pipeline_prefers_body_anchor_over_sidebar_table(self):
+        document = Document()
+        sidebar = document.add_table(rows=1, cols=1)
+        sidebar.cell(0, 0).text = "CONTATTI"
+        sidebar.cell(0, 0).add_paragraph("Telefono")
+        document.add_paragraph("CHI SONO")
+        document.add_paragraph("Profilo esistente")
+        document.add_paragraph("FORMAZIONE")
+        document.add_paragraph("Laurea")
+
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="append-experience",
+            target_section="ESPERIENZE PROFESSIONALI",
+            action="replace",
+            old_text_hint="",
+            new_text="Esperienza uno\nEsperienza due",
+            items=[],
+            reason="Aggiunta esperienza.",
+            confidence=0.8,
+        )
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [instruction],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        body_texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text.strip()]
+        sidebar_texts = [paragraph.text for paragraph in updated.tables[0].cell(0, 0).paragraphs if paragraph.text.strip()]
+
+        self.assertIn("Esperienza uno", body_texts)
+        self.assertNotIn("Esperienza uno", sidebar_texts)
 
     def test_replaces_text_inside_table_section(self):
         document = Document()
@@ -462,6 +545,7 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         document.add_paragraph("ESPERIENZE PROFESSIONALI")
         first = document.add_paragraph("Attività iniziale.")
         first.runs[0].font.name = "Open Sans"
+        first.paragraph_format.space_after = Pt(9)
         second = document.add_paragraph("Risultato iniziale.")
         second.runs[0].font.name = "Open Sans"
         document.add_paragraph("FORMAZIONE")
