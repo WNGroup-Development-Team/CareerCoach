@@ -37,6 +37,11 @@ class SocialProfileTextTests(unittest.TestCase):
             patch.object(main, "VISION_PROVIDER", "ollama"),
             patch.object(
                 main,
+                "extract_social_text_with_rapidocr",
+                side_effect=RuntimeError("rapidocr unavailable"),
+            ),
+            patch.object(
+                main,
                 "extract_social_text_with_ollama",
                 side_effect=RuntimeError("timeout"),
             ),

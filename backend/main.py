@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from functools import lru_cache
 from html.parser import HTMLParser
 from typing import Optional, List, Dict, Any
 from urllib3.exceptions import MaxRetryError, NewConnectionError
@@ -64,6 +65,7 @@ OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
 VISION_PROVIDER = ENV_FILE_VALUES.get("VISION_PROVIDER", "ollama").strip().lower()
 OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_VISION_MODEL = ENV_FILE_VALUES.get("OLLAMA_VISION_MODEL", "moondream")
+OLLAMA_OCR_MODEL = ENV_FILE_VALUES.get("OLLAMA_OCR_MODEL", "qwen2.5vl:3b")
 OPENAI_VISION_MODEL = ENV_FILE_VALUES.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip() or None
@@ -3491,27 +3493,74 @@ def clean_social_ocr_text(value: Any) -> str:
     return "\n".join(lines)[:8000]
 
 
+@lru_cache(maxsize=1)
+def get_rapid_ocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
+
+    return RapidOCR()
+
+
+def extract_social_text_with_rapidocr(image_input: Dict) -> str:
+    encoded_image = extract_image_base64(image_input)
+    if not encoded_image:
+        raise ValueError("Immagine Base64 non disponibile.")
+    image_bytes = base64.b64decode(encoded_image)
+    result, _elapsed = get_rapid_ocr_engine()(image_bytes)
+    lines = [
+        str(item[1]).strip()
+        for item in (result or [])
+        if len(item) >= 3 and float(item[2] or 0) >= 0.45 and str(item[1]).strip()
+    ]
+    return clean_social_ocr_text("\n".join(lines))
+
+
 def extract_social_text_with_ollama(image_input: Dict) -> str:
     encoded_image = extract_image_base64(image_input)
     if not encoded_image:
         raise ValueError("Immagine Base64 non disponibile.")
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+        image = Image.open(io.BytesIO(base64.b64decode(encoded_image))).convert("RGB")
+        scale = min(3.0, max(1.0, 2400 / max(image.width, 1)))
+        if scale > 1:
+            image = image.resize(
+                (round(image.width * scale), round(image.height * scale)),
+                Image.Resampling.LANCZOS,
+            )
+        image = ImageOps.autocontrast(image)
+        image = ImageEnhance.Contrast(image).enhance(1.35)
+        image = ImageEnhance.Sharpness(image).enhance(1.6)
+        image = image.filter(ImageFilter.SHARPEN)
+        output = io.BytesIO()
+        image.save(output, format="PNG", optimize=True)
+        encoded_image = base64.b64encode(output.getvalue()).decode("ascii")
+    except Exception as exc:
+        print(f"Pre-elaborazione OCR non disponibile, uso immagine originale: {exc}")
+
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
         json={
-            "model": OLLAMA_VISION_MODEL,
+            "model": OLLAMA_OCR_MODEL,
             "stream": False,
             "messages": [{
                 "role": "user",
                 "content": (
-                    "Transcribe all legible text visible in this social profile screenshot. "
-                    "Preserve line breaks. Do not describe, infer hidden text, translate, or add "
-                    "commentary. If no text is legible, answer exactly: NO TEXT."
+                    "You are an OCR engine. Transcribe every legible word visible in this social "
+                    "profile screenshot, including username, display name, bio, buttons, labels "
+                    "and links. Preserve reading order and line breaks. Return transcription only. "
+                    "Do not describe, translate, summarize, correct spelling, infer hidden text, "
+                    "or add commentary. If no text is legible, answer exactly: NO TEXT."
                 ),
                 "images": [encoded_image],
             }],
-            "options": {"temperature": 0, "num_predict": 500},
+            "options": {
+                "temperature": 0,
+                "num_ctx": 4096,
+                "num_predict": 900,
+            },
         },
-        timeout=120,
+        timeout=180,
     )
     if not response.ok:
         raise RuntimeError(f"Ollama OCR: {response.text}")
@@ -3544,40 +3593,36 @@ def extract_social_text_with_openai(image_input: Dict) -> str:
 
 
 def extract_social_screenshot_texts(image_inputs: List[Dict]) -> Dict:
-    if VISION_PROVIDER not in {"ollama", "openai"}:
-        return {
-            "status": "provider_not_configured",
-            "provider": VISION_PROVIDER,
-            "screenshots_checked": 0,
-            "screenshots_with_text": 0,
-            "failed_count": 0,
-            "extracted_text": "",
-            "message": "OCR non disponibile: provider visuale non configurato.",
-        }
-
-    extractor = (
-        extract_social_text_with_ollama
-        if VISION_PROVIDER == "ollama"
-        else extract_social_text_with_openai
-    )
     extracted = []
     failed_count = 0
     last_error = ""
     for image_input in image_inputs[:8]:
         try:
-            text = extractor(image_input)
+            text = extract_social_text_with_rapidocr(image_input)
             if text:
                 extracted.append(text)
         except Exception as exc:
-            failed_count += 1
-            last_error = str(exc)
-            print(f"OCR screenshot social non riuscito: {exc}")
+            print(f"RapidOCR non riuscito, provo fallback visuale: {exc}")
+            try:
+                if VISION_PROVIDER == "ollama":
+                    text = extract_social_text_with_ollama(image_input)
+                elif VISION_PROVIDER == "openai":
+                    text = extract_social_text_with_openai(image_input)
+                else:
+                    raise RuntimeError("Provider OCR di fallback non configurato.")
+                if text:
+                    extracted.append(text)
+            except Exception as fallback_exc:
+                failed_count += 1
+                last_error = str(fallback_exc)
+                print(f"OCR screenshot social non riuscito: {fallback_exc}")
 
     combined = clean_social_ocr_text("\n".join(extracted))
     status = "completed" if combined else ("failed" if failed_count else "no_text_found")
     return {
         "status": status,
-        "provider": VISION_PROVIDER,
+        "provider": "rapidocr",
+        "fallback_provider": VISION_PROVIDER,
         "screenshots_checked": min(len(image_inputs), 8),
         "screenshots_with_text": len(extracted),
         "failed_count": failed_count,
