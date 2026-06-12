@@ -10966,6 +10966,63 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
 
     sources = search_public_profile_signals(public_user, data)
     digital_analysis = analyze_digital_profile(public_user, sources)
+    previous_analysis = json.loads(existing_user[19]) if existing_user[19] else {}
+    previous_evidence = previous_analysis.get("analysis_evidence", {})
+    previous_profile_analyses = dict(previous_evidence.get("visual_media_analyses", {}))
+    previous_text_analyses = dict(previous_evidence.get("social_text_analyses", {}))
+    same_instagram_profile = (
+        normalize_instagram_handle(existing_user[18])
+        == normalize_instagram_handle(public_user["instagram_handle"])
+    )
+    if not same_instagram_profile:
+        previous_profile_analyses.pop("instagram", None)
+        previous_text_analyses.pop("instagram", None)
+    if previous_profile_analyses or previous_text_analyses:
+        evidence = digital_analysis.setdefault("analysis_evidence", {})
+        evidence["visual_media_analyses"] = previous_profile_analyses
+        evidence["social_text_analyses"] = previous_text_analyses
+        evidence["profile_screenshots_analyzed"] = previous_evidence.get(
+            "profile_screenshots_analyzed", sorted(previous_profile_analyses)
+        )
+        evidence["instagram_media_analyzed"] = (
+            previous_evidence.get("instagram_media_analyzed", False)
+            if same_instagram_profile
+            else False
+        )
+        evidence["instagram_bio_analyzed"] = (
+            previous_evidence.get("instagram_bio_analyzed", False)
+            if same_instagram_profile
+            else False
+        )
+        evidence["instagram_identity_check"] = (
+            previous_evidence.get("instagram_identity_check", {})
+            if same_instagram_profile
+            else {}
+        )
+        evidence["visual_score_adjustment"] = int(
+            previous_evidence.get("visual_score_adjustment", 0) or 0
+        )
+        if previous_evidence.get("visual_media_analysis"):
+            evidence["visual_media_analysis"] = previous_evidence["visual_media_analysis"]
+        if evidence.get("can_compare_with_cv"):
+            digital_analysis["score"] = clamp_score(
+                int(digital_analysis.get("score", 0) or 0)
+                + evidence["visual_score_adjustment"]
+            )
+
+        preserved_titles = {"foto e contenuti pubblici", "bio e testo profilo"}
+        preserved_findings = [
+            finding
+            for finding in previous_analysis.get("findings", [])
+            if str(finding.get("title", "")).strip().lower() in preserved_titles
+        ]
+        if preserved_findings:
+            digital_analysis["findings"] = [
+                finding
+                for finding in digital_analysis.get("findings", [])
+                if str(finding.get("title", "")).strip().lower() not in preserved_titles
+            ]
+            digital_analysis["findings"].extend(preserved_findings)
     digital_analysis_json = json.dumps(digital_analysis, ensure_ascii=False)
 
     cursor.execute("""
@@ -10998,6 +11055,7 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
 async def analyze_social_screenshots(
     user_id: int,
     profile_type: str = Form("instagram"),
+    instagram_handle: str = Form(""),
     files: List[UploadFile] = File(...),
 ):
     profile_type = profile_type.strip().lower()
@@ -11041,6 +11099,14 @@ async def analyze_social_screenshots(
     if not user:
         conn.close()
         raise HTTPException(status_code=404, detail="Utente non trovato.")
+    if instagram_handle.strip():
+        normalized_instagram = normalize_instagram_handle(instagram_handle)
+        cursor.execute(
+            "UPDATE users SET instagram_handle = ? WHERE id = ?",
+            (f"@{normalized_instagram}" if normalized_instagram else "", user_id),
+        )
+        conn.commit()
+        user = fetch_user_by_id(cursor, user_id)
     profile_text_analysis = evaluate_social_profile_text(
         ocr_analysis.get("extracted_text", ""),
         profile_type,
