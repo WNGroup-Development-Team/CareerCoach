@@ -3599,10 +3599,68 @@ function App() {
               screenshot nella schermata successiva.
             </p>
 
+            {!['provider_not_configured', 'provider_unavailable'].includes(
+              digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
+            ) && (
+              <div className="cv-analysis-card linkedin-basic-card">
+                <h3>Completa il controllo delle immagini</h3>
+                <p>
+                  Puoi caricare fino a 8 screenshot per ciascun profilo. Le immagini vengono
+                  analizzate senza essere salvate come file: eventuali contenuti sensibili
+                  possono ridurre il punteggio complessivo.
+                </p>
+                <div className="screenshot-upload-grid">
+                  {screenshotUploadBoxes.map((box) => {
+                    const isCurrentAnalysis =
+                      screenshotAnalysisProgress.active && screenshotAnalysisProgress.profileType === box.type;
+                    return (
+                      <div className="screenshot-upload-box" key={box.type}>
+                        <h4>{box.title}</h4>
+                        <p>{box.description}</p>
+                        <input
+                          id={`social-screenshot-files-${box.type}`}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          multiple
+                          disabled={screenshotAnalysisProgress.active}
+                          onChange={(event) => {
+                            analyzeSocialScreenshots(box.type, event.target.files);
+                            event.target.value = "";
+                          }}
+                        />
+                        <label
+                          className={`linkedin-export-button ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
+                          htmlFor={`social-screenshot-files-${box.type}`}
+                        >
+                          {isCurrentAnalysis ? "Analisi in corso..." : "Carica screenshot"}
+                        </label>
+                        {isCurrentAnalysis && (
+                          <div className="screenshot-analysis-progress" role="status">
+                            <div className="screenshot-analysis-spinner" />
+                            <div>
+                              <strong>
+                                Analisi locale di {screenshotAnalysisProgress.fileCount}{" "}
+                                {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
+                              </strong>
+                              <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
+                            </div>
+                          </div>
+                        )}
+                        {socialScreenshotMessages[box.type] && (
+                          <p className="linkedin-upload-message">{socialScreenshotMessages[box.type]}</p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <p className="privacy-note">
               <span aria-hidden="true">i</span>
               I profili inseriti verranno usati solo per valutare la coerenza professionale del tuo percorso.
             </p>
+
 
             {!canAnalyzeDigitalPresence && (
               <p className="digital-profile-help">
@@ -3756,62 +3814,7 @@ function App() {
             </div>
           )}
 
-          {!["provider_not_configured", "provider_unavailable"].includes(
-              digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
-            ) && (
-            <div className="cv-analysis-card linkedin-basic-card">
-              <h3>Completa il controllo delle immagini</h3>
-              <p>
-                Puoi caricare fino a 8 screenshot per ciascun profilo. Le immagini vengono
-                analizzate senza essere salvate come file: eventuali contenuti sensibili
-                possono ridurre il punteggio complessivo.
-              </p>
-              <div className="screenshot-upload-grid">
-                {screenshotUploadBoxes.map((box) => {
-                  const isCurrentAnalysis =
-                    screenshotAnalysisProgress.active && screenshotAnalysisProgress.profileType === box.type;
-                  return (
-                    <div className="screenshot-upload-box" key={box.type}>
-                      <h4>{box.title}</h4>
-                      <p>{box.description}</p>
-                      <input
-                        id={`social-screenshot-files-${box.type}`}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        multiple
-                        disabled={screenshotAnalysisProgress.active}
-                        onChange={(event) => {
-                          analyzeSocialScreenshots(box.type, event.target.files);
-                          event.target.value = "";
-                        }}
-                      />
-                      <label
-                        className={`linkedin-export-button ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
-                        htmlFor={`social-screenshot-files-${box.type}`}
-                      >
-                        {isCurrentAnalysis ? "Analisi in corso..." : "Carica screenshot"}
-                      </label>
-                      {isCurrentAnalysis && (
-                        <div className="screenshot-analysis-progress" role="status">
-                          <div className="screenshot-analysis-spinner" />
-                          <div>
-                            <strong>
-                              Analisi locale di {screenshotAnalysisProgress.fileCount}{" "}
-                              {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
-                            </strong>
-                            <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
-                          </div>
-                        </div>
-                      )}
-                      {socialScreenshotMessages[box.type] && (
-                        <p className="linkedin-upload-message">{socialScreenshotMessages[box.type]}</p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+
 
           {connectedDigitalProfiles.length > 0 && (
             <div className="cv-analysis-card">

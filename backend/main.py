@@ -51,10 +51,12 @@ load_dotenv()
 ENV_FILE_VALUES = dotenv_values()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 OPENAI_API_KEY = ENV_FILE_VALUES.get("OPENAI_API_KEY")
+OPENAI_TEXT_MODEL = ENV_FILE_VALUES.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
 VISION_PROVIDER = ENV_FILE_VALUES.get("VISION_PROVIDER", "ollama").strip().lower()
 OLLAMA_URL = ENV_FILE_VALUES.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_TEXT_MODEL = ENV_FILE_VALUES.get("OLLAMA_TEXT_MODEL", "qwen2.5:3b")
 OLLAMA_VISION_MODEL = ENV_FILE_VALUES.get("OLLAMA_VISION_MODEL", "moondream")
 OPENAI_VISION_MODEL = ENV_FILE_VALUES.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
 
@@ -90,7 +92,91 @@ groq_client = OpenAI(
     timeout=30.0
 )
 
+openai_chat_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 openai_moderation_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+def call_ollama_text(
+    prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    json_mode: bool = False,
+) -> str:
+    if not OLLAMA_URL:
+        raise HTTPException(status_code=500, detail="Ollama non configurato nel file .env")
+
+    payload = {
+        "model": OLLAMA_TEXT_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+    if json_mode:
+        payload["format"] = "json"
+
+    try:
+        # Usiamo un timeout lungo per le analisi digitali locali
+        response = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=180)
+        response.raise_for_status()
+        full_response_content = "".join(json.loads(line).get("response", "") for line in response.iter_lines() if line)
+        return full_response_content.strip()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            error_detail = (
+                f"Errore 404 da Ollama. Il modello '{OLLAMA_TEXT_MODEL}' potrebbe non essere stato scaricato "
+                f"o non è disponibile. Assicurati che Ollama sia in esecuzione e che tu abbia eseguito "
+                f"'ollama pull {OLLAMA_TEXT_MODEL}'."
+            )
+            print(f"Errore chiamata Ollama (text): {error_detail}")
+            raise HTTPException(status_code=500, detail=f"Errore Ollama (text): {error_detail}")
+        else:
+            print(f"Errore chiamata Ollama (text): {e}")
+            raise HTTPException(status_code=500, detail=f"Errore Ollama (text): {str(e)}")
+    except requests.exceptions.ConnectionError as e:
+        error_detail = (
+            f"Impossibile connettersi a Ollama all'indirizzo '{OLLAMA_URL}'. "
+            "Assicurati che il server Ollama sia in esecuzione e accessibile."
+        )
+        print(f"Errore chiamata Ollama (text): {error_detail}")
+        raise HTTPException(status_code=500, detail=f"Errore Ollama (text): {error_detail}")
+    except Exception as e:
+        print(f"Errore chiamata Ollama (text): {e}")
+        raise HTTPException(status_code=500, detail=f"Errore Ollama (text): {str(e)}")
+
+def call_openai(
+    prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    json_mode: bool = False,
+) -> str:
+    if not openai_moderation_client:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY non configurata nel file .env")
+    
+    try:
+        kwargs = {
+            "model": OPENAI_TEXT_MODEL,
+            "messages": [
+                {"role": "system", "content": "Sei un esperto recruiter e career coach senior."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+            
+        response = openai_chat_client.chat.completions.create(**kwargs)
+        return (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        error_text = str(e).lower()
+        if "429" in error_text or "rate_limit" in error_text:
+            raise HTTPException(status_code=429, detail="Limite di richieste OpenAI raggiunto. Riprova tra poco.")
+        print(f"Errore chiamata OpenAI: {e}")
+        raise HTTPException(status_code=500, detail=f"Errore OpenAI: {str(e)}")
+
+
 openai_visual_rate_limited_until = None
 
 
@@ -362,8 +448,8 @@ class UserCvUpload(BaseModel):
 
 class DigitalPresenceUpdate(BaseModel):
     linkedin_url: Optional[str] = None
-    portfolio_url: Optional[str] = None
     instagram_handle: Optional[str] = None
+    portfolio_url: Optional[str] = None
     linkedin_connected: bool = False
 
 
@@ -1362,7 +1448,7 @@ Testo estratto dal documento:
 """
 
     try:
-        raw_output = call_groq(prompt, temperature=0.1, max_tokens=500)
+        raw_output = call_openai(prompt, temperature=0.1, max_tokens=500, json_mode=True)
         result = extract_json(raw_output)
         return {
             "is_cv": bool(result.get("is_cv")),
@@ -2326,10 +2412,10 @@ def search_public_profile_signals(user: Dict, digital_presence: DigitalPresenceU
 
     if linkedin_url:
         search_targets.append((linkedin_url, "linkedin"))
-    if portfolio_url:
-        search_targets.append((portfolio_url, "additional_link"))
     if instagram_handle:
         search_targets.append((f"https://www.instagram.com/{instagram_handle}/", "instagram"))
+    if portfolio_url:
+        search_targets.append((portfolio_url, "additional_link"))
 
     sources = []
     seen_snippet_urls = set()
@@ -2579,15 +2665,15 @@ def build_visual_analysis_result(
     failed_count: int,
     content_count: Optional[int] = None,
 ) -> Dict:
-    flagged_results = [result for result in analyzed if result.get("flagged")]
+    blocked_results = [result for result in analyzed if result.get("blocked")]
     sensitive_results = [
         result
-        for result in flagged_results
+        for result in blocked_results
         if any(is_sensitive_visual_category(category) for category in result.get("categories", []))
     ]
     categories = sorted({
         category
-        for result in flagged_results
+        for result in blocked_results
         for category in result.get("categories", [])
     })
     incomplete_message = f" {failed_count} media non sono risultati leggibili." if failed_count else ""
@@ -2608,13 +2694,13 @@ def build_visual_analysis_result(
         "analyzed_count": len(analyzed),
         "analyzed_content_count": analyzed_content_count,
         "analyzed_preview_count": preview_count,
-        "flagged_count": len(flagged_results),
+        "flagged_count": len(blocked_results),
         "sensitive_flagged_count": len(sensitive_results),
         "failed_count": failed_count,
         "flagged_categories": categories,
         "message": (
-            f"{scope_message}: {len(flagged_results)} richiedono una verifica manuale.{incomplete_message}"
-            if flagged_results
+            f"{scope_message}: {len(blocked_results)} richiedono una verifica manuale.{incomplete_message}"
+            if blocked_results
             else (
                 f"{scope_message}: "
                 f"non sono emersi contenuti sensibili evidenti.{incomplete_message}"
@@ -2879,11 +2965,245 @@ def analyze_embedded_cv_image(image_input: Dict[str, Any]) -> Dict[str, Any]:
     raise RuntimeError("Provider visuale non configurato.")
 
 
+def analyze_screenshots_with_openai_cv_comparison(image_inputs: List[Dict], cv_text: str, user_name: str) -> Dict:
+    if not openai_moderation_client:
+        raise RuntimeError("OpenAI non configurato.")
+    content_list = [
+        {
+            "type": "text",
+            "text": (
+                "Sei un assistente AI esperto di brand professionale e recruiting.\n"
+                "Ti vengono forniti uno o più screenshot del profilo social dell'utente che mostrano il nome, cognome e la bio.\n"
+                "Inoltre, ti vengono forniti i dati del candidato:\n"
+                f"- Nome/Cognome attesi: {user_name}\n"
+                "- Testo estratto dal CV:\n"
+                f"{cv_text[:4000]}\n\n"
+                "Il tuo compito è confrontare questi dati con il CV e assegnare un punteggio di coerenza:\n"
+                "1. Analizzare visivamente le immagini per estrarre nome, cognome e biografia (bio).\n"
+                "2. Valutare la coerenza tra i dati del profilo social e il CV/Nome del candidato:\n"
+                f"   - **Verifica Nome/Cognome**: C'è corrispondenza tra il nome sullo screenshot e quello del candidato ({user_name})?\n"
+                "   - **Verifica Coerenza Bio/CV**: La bio o la descrizione del profilo è coerente con il percorso professionale, il ruolo target o le competenze indicate nel CV?\n"
+                "3. Assegnare un punteggio di coerenza specifico da 0 a 100 per questo confronto.\n"
+                "4. Generare una descrizione dettagliata del confronto in italiano e un consiglio pratico del coach in italiano.\n\n"
+                "Rispondi esclusivamente in formato JSON con la seguente struttura:\n"
+                "{\n"
+                "  \"name_match\": boolean,\n"
+                "  \"extracted_name\": \"nome estratto dallo screenshot o null\",\n"
+                "  \"extracted_bio\": \"biografia estratta dallo screenshot o null\",\n"
+                "  \"coherence_score\": number,\n"
+                "  \"description\": \"descrizione dettagliata del confronto in italiano\",\n"
+                "  \"coach_tip\": \"consiglio del coach in italiano\"\n"
+                "}"
+            ),
+        }
+    ]
+    for image_input in image_inputs[:8]:
+        content_list.append({
+            "type": "image_url",
+            "image_url": image_input.get("image_url", {}),
+        })
+
+    response = openai_moderation_client.chat.completions.create(
+        model=OPENAI_VISION_MODEL,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+        messages=[{
+            "role": "user",
+            "content": content_list,
+        }],
+        timeout=60,
+    )
+    content = response.choices[0].message.content or "{}"
+    return extract_json(content)
+
+
+def analyze_image_text_with_ollama(image_input: Dict) -> str:
+    encoded_image = extract_image_base64(image_input)
+    if not encoded_image:
+        return ""
+
+    # Instagram screenshots are often stylized/small. Transcribing EVERYTHING is brittle.
+    # We extract constrained chunks and return them in a stable, machine-readable format.
+    prompt = (
+        "Extract text from an Instagram profile screenshot.\n"
+        "Return STRICTLY plain text with this exact structure (keep labels):\n"
+        "NAME: <account name/handle if visible else empty>\n"
+        "BIO: <bio/description text if visible else empty>\n\n"
+        "Rules:\n"
+        "- Only extract what is visibly present.\n"
+        "- Do NOT include UI labels like 'Following', 'Message', 'Edit profile', timestamps,\n"
+        "  'Switch accounts', 'More options', or navigation text.\n"
+        "- Do NOT summarize; output only extracted text.\n"
+        "- Keep BIO as the short paragraph under the name (can be multiple lines).\n"
+        "- If a section is not visible, leave it empty after the colon.\n"
+    )
+
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": [encoded_image],
+        }],
+    }
+
+    try:
+        response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=240)
+        if not response.ok:
+            return ""
+
+        content = response.json().get("message", {}).get("content", "").strip()
+
+        # Lightweight noise cleanup: keep only lines relevant to NAME/BIO blocks.
+        # (Do not be too aggressive: preserve BIO punctuation/line breaks.)
+        lines = []
+        for line in (content or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            lowered = s.lower()
+            if any(lbl in lowered for lbl in [
+                "following", "message", "edit profile", "more options",
+                "timestamp", "view profile", "switch accounts"
+            ]):
+                continue
+            if s.lower().startswith("name:") or s.lower().startswith("bio:"):
+                lines.append(s)
+            elif lines:
+                lines.append(s)
+
+        # Ensure labels exist
+        has_name = any(l.lower().startswith("name:") for l in lines)
+        has_bio = any(l.lower().startswith("bio:") for l in lines)
+        if not has_name:
+            lines.insert(0, "NAME: ")
+        if not has_bio:
+            lines.append("BIO: ")
+
+        # Normalize whitespace
+        cleaned = "\n".join(lines)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
+        return cleaned
+    except Exception:
+        return ""
+
+
+def compare_extracted_text_with_cv_via_llm(extracted_text: str, cv_text: str, user_name: str) -> Dict:
+    prompt = (
+        "Sei un assistente AI esperto di brand professionale e recruiting.\n"
+        "Ti viene fornito il testo estratto visivamente da screenshot del profilo social.\n"
+        "Il testo è formattato con blocchi etichettati 'NAME:' e 'BIO:': entrambi i blocchi sono presenti\n"
+        "(anche se il contenuto può essere vuoto).\n"
+        "---\n"
+        "TESTO ESTRATTO DAL PROFILO SOCIAL (con etichette):\n"
+        f"{extracted_text}\n"
+        "---\n\n"
+        "Inoltre, ti vengono forniti i dati del candidato:\n"
+        f"- Nome e Cognome attesi: {user_name}\n"
+        "- Testo estratto dal CV:\n"
+        f"{cv_text[:4000]}\n\n"
+        "Il tuo compito:\n"
+        "1) Estrarre 'extracted_name' e 'extracted_bio' dal testo fornito.\n"
+        "2) Valutare la coerenza tra profilo social e CV.\n\n"
+        "Regole IMPORTANTI per scenario 'BIO-only':\n"
+        "- Se il blocco NAME è vuoto o assente, NON bloccare la valutazione sulla coerenza.\n"
+        "  In quel caso: name_match deve essere false (o null logicamente), ma il coherence_score deve basarsi principalmente su BIO/CV.\n"
+        "- Se la BIO è vuota o non leggibile, allora la coerenza va valutata con grande incertezza e può scendere.\n\n"
+        "Valutazione:\n"
+        "- Verifica Nome/Cognome: corrispondenza tra NAME e il nome atteso.\n"
+        "- Verifica Coerenza Bio/CV: coerenza tra BIO e ruolo/competenze/settore presenti nel CV.\n\n"
+        "Assegna coherence_score da 0 a 100 con questa logica orientativa:\n"
+        "- BIO presente e coerente con CV: punteggio medio-alto (es. 55-80) anche se NAME è vuoto.\n"
+        "- BIO presente ma poco specifica: punteggio medio-basso (es. 30-60).\n"
+        "- BIO assente o irrilevante/non leggibile: punteggio basso (es. 0-35).\n"
+        "- NAME non corrispondente può ridurre ulteriormente SOLO se NAME è presente e leggibile.\n\n"
+        "3) Generare una descrizione dettagliata del confronto in italiano e un consiglio del coach in italiano.\n\n"
+        "Rispondi ESCLUSIVAMENTE in formato JSON con questa struttura:\n"
+        "{\n"
+        "  \"name_match\": boolean,\n"
+        "  \"extracted_name\": \"nome estratto o null\",\n"
+        "  \"extracted_bio\": \"bio estratta o null\",\n"
+        "  \"coherence_score\": number,\n"
+        "  \"description\": \"descrizione del confronto in italiano\",\n"
+        "  \"coach_tip\": \"consiglio del coach in italiano\"\n"
+        "}\n\n"
+        "Vincoli JSON:\n"
+        "- extracted_name: null se NAME è vuoto.\n"
+        "- extracted_bio: null se BIO è vuota.\n"
+    )
+
+    try:
+        raw_output = call_groq(prompt, temperature=0.2, json_mode=True)
+    except Exception as exc:
+        print(f"Errore Groq durante il confronto, uso Ollama fallback: {exc}")
+        raw_output = call_ollama_text(prompt, temperature=0.2, json_mode=True)
+    return extract_json(raw_output)
+
+
+def compare_screenshots_with_cv(image_inputs: List[Dict], cv_text: str, user_name: str) -> Dict:
+    if not image_inputs:
+        return {
+            "name_match": False,
+            "extracted_name": None,
+            "extracted_bio": None,
+            "coherence_score": 0,
+            "description": "Nessun screenshot fornito per il confronto.",
+            "coach_tip": "Carica uno screenshot del tuo profilo social per effettuare il confronto."
+        }
+    if VISION_PROVIDER == "openai" and openai_moderation_client:
+        try:
+            return analyze_screenshots_with_openai_cv_comparison(image_inputs, cv_text, user_name)
+        except Exception as exc:
+            print(f"Errore OpenAI durante il confronto: {exc}. Provo fallback locale...")
+    transcripts = []
+    for image_input in image_inputs:
+        try:
+            txt = analyze_image_text_with_ollama(image_input)
+            if txt:
+                transcripts.append(txt)
+        except Exception as exc:
+            print(f"Errore local vision extraction: {exc}")
+    extracted_text = "\n\n".join(transcripts) if transcripts else "Nessun testo leggibile estratto dallo screenshot."
+    return compare_extracted_text_with_cv_via_llm(extracted_text, cv_text, user_name)
+
+
+def build_visual_media_finding(evidence: Dict, has_instagram: bool) -> Dict:
+    comp = evidence.get("screenshot_cv_comparison")
+    if comp and isinstance(comp, dict):
+        score = comp.get("coherence_score", 0)
+        name_part = f"Nome rilevato: {comp.get('extracted_name') or 'Non rilevato'}. "
+        bio_part = f"Bio rilevata: {comp.get('extracted_bio') or 'Non rilevata'}. "
+        desc = f"Confronto screenshot completato con punteggio {score}%. {name_part}{bio_part}{comp.get('description', '')}"
+
+        # Mostra anche eventuali flag di contenuto sensibile se presenti.
+        vis = evidence.get("visual_media_analysis") or {}
+        sensitive_count = int(vis.get("sensitive_flagged_count", 0) or 0)
+        flagged_count = int(vis.get("flagged_count", 0) or 0)
+        if flagged_count > 0:
+            desc += f" Contenuti sensibili rilevati: {sensitive_count} su {flagged_count}."
+
+        return {
+            "title": "Coerenza Screenshot Profilo & CV",
+            "status": "success" if score >= 60 else "warning",
+            "description": desc,
+            "coach_tip": comp.get("coach_tip") or "Allinea la bio e il nome del tuo profilo social con il tuo CV.",
+        }
+
+    return {
+        "title": "Foto e contenuti pubblici",
+        "status": visual_media_finding_status(evidence),
+        "description": describe_visual_media_analysis(evidence, has_instagram),
+        "coach_tip": "Mantieni foto profilo, bio e contenuti recenti coerenti con il ruolo per cui ti candidi.",
+    }
+
+
+
 def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_count: int) -> Dict:
     global openai_visual_rate_limited_until
 
     if not image_inputs:
-        return {
+        return { # This is a fallback for no media found
             "status": "no_media_found",
             "provider": VISION_PROVIDER,
             "source": source,
@@ -2956,25 +3276,28 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
     failed_count = 0
     for image_input in image_inputs[:8]:
         try:
-            response = openai_moderation_client.moderations.create(
-                model="omni-moderation-latest",
-                input=[image_input],
-            )
-            for result in response.results:
-                analyzed.append({
-                    "flagged": bool(result.flagged),
-                    "categories": [
-                        category
-                        for category, flagged in result.categories.model_dump().items()
-                        if flagged
-                    ],
-                })
+            # Use the same detailed CV image analysis for public social media images
+            analysis_result = analyze_cv_image_with_openai(image_input)
+            analyzed.append(analysis_result)
         except Exception as exc:
-            failed_count += 1
             error_text = str(exc)
-            print(f"Moderazione visuale OpenAI non riuscita per un media: {exc}")
+            print(f"Analisi visuale OpenAI non riuscita per un media: {exc}")
             if "429" in error_text or "too many requests" in error_text.lower():
                 openai_visual_rate_limited_until = datetime.utcnow() + timedelta(minutes=5)
+                if not analyzed:
+                    return {
+                        "status": "rate_limited",
+                        "provider": "openai",
+                        "source": source,
+                        "discovered_count": discovered_count,
+                        "analyzed_count": 0,
+                        "flagged_count": 0,
+                        "sensitive_flagged_count": 0,
+                        "message": "OpenAI ha sospeso temporaneamente l'analisi per troppe richieste (Rate Limit). Attendi qualche minuto.",
+                    }
+                break
+            failed_count += 1
+            if failed_count >= 3 and not analyzed:
                 break
     if analyzed:
         return build_visual_analysis_result(source, discovered_count, analyzed, failed_count)
@@ -3053,12 +3376,12 @@ def describe_visual_media_analysis(evidence: Dict, has_instagram: bool) -> str:
     if has_instagram and evidence.get("instagram_metadata_found"):
         return (
             "Il profilo Instagram risulta rintracciabile sul web, ma non sono stati recuperati media "
-            "analizzabili automaticamente. Puoi caricare uno o piu screenshot per completare il controllo."
+            "analizzabili automaticamente. Carica uno screenshot (bio e nome) per confrontarlo con il CV."
         )
     if has_instagram:
         return (
-            "Instagram e stato collegato, ma foto e post non risultano accessibili automaticamente. "
-            "Puoi caricare uno o piu screenshot per completare il controllo."
+            "Instagram è stato collegato, ma foto e post non risultano accessibili automaticamente. "
+            "Carica uno screenshot (bio e nome) per confrontarlo con il CV."
         )
     return "Non sono stati trovati media pubblici da analizzare automaticamente."
 
@@ -3248,14 +3571,24 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         linkedin_identity = linkedin_official_identity
         linkedin_verified = False
     instagram_verified = False
+    existing_da = user.get("digital_analysis") or {}
+    existing_evidence = existing_da.get("analysis_evidence") or {}
+    screenshot_cv_comparison = existing_evidence.get("screenshot_cv_comparison")
+    if screenshot_cv_comparison and isinstance(screenshot_cv_comparison, dict):
+        if screenshot_cv_comparison.get("coherence_score", 0) >= 60:
+            instagram_verified = True
     other_profile_verified = other_profile_identity["status"] == "matched"
-    visual_media_analysis = user.get("visual_media_analysis") or {
-        "status": "not_requested",
-        "discovered_count": 0,
-        "analyzed_count": 0,
-        "flagged_count": 0,
-        "sensitive_flagged_count": 0,
-    }
+    visual_media_analysis = (
+        user.get("visual_media_analysis")
+        or existing_evidence.get("visual_media_analysis")
+        or {
+            "status": "not_requested",
+            "discovered_count": 0,
+            "analyzed_count": 0,
+            "flagged_count": 0,
+            "sensitive_flagged_count": 0,
+        }
+    )
     verified_profiles = [
         profile
         for profile, verified in [
@@ -3277,6 +3610,8 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "instagram_media_analyzed": visual_media_analysis.get("analyzed_content_count", 0) > 0,
         "public_preview_analyzed": visual_media_analysis.get("analyzed_preview_count", 0) > 0,
         "visual_media_analysis": visual_media_analysis,
+        "screenshot_cv_comparison": screenshot_cv_comparison,
+        "instagram_verified": instagram_verified,
         "official_profile_sources": official_profile_sources,
         "official_profile_source_count": len(official_profile_sources),
         "official_profile_capabilities": OFFICIAL_PROFILE_CAPABILITIES,
@@ -3330,7 +3665,7 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
-    instagram_verified = False
+    instagram_verified = evidence.get("instagram_verified", False)
     other_profile_verified = other_profile_identity["status"] == "matched"
     linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
     if not evidence["can_compare_with_cv"]:
@@ -3365,12 +3700,7 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
                     "Allinea headline, esperienze, competenze e date con il CV prima di candidarti."
                 ),
             },
-            {
-                "title": "Foto e contenuti pubblici",
-                "status": visual_media_finding_status(evidence),
-                "description": describe_visual_media_analysis(evidence, has_instagram),
-                "coach_tip": "Mantieni foto profilo, bio e contenuti recenti coerenti con il ruolo per cui ti candidi.",
-            },
+            build_visual_media_finding(evidence, has_instagram),
             {
                 "title": "Link aggiuntivo",
                 "status": "success" if other_profile_verified else "warning",
@@ -3405,7 +3735,7 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
-    instagram_verified = False
+    instagram_verified = evidence.get("instagram_verified", False)
     other_profile_verified = other_profile_identity["status"] == "matched"
     can_compare_with_cv = evidence["can_compare_with_cv"]
     linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
@@ -3421,6 +3751,7 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
             ),
             "coach_tip": "Allinea headline, ruolo target, esperienze, date e competenze con il CV.",
         },
+        build_visual_media_finding(evidence, has_instagram),
         {
             "title": "Coerenza CV/profili",
             "status": "success" if can_compare_with_cv else "warning",
@@ -3430,12 +3761,6 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
                 else evidence["zero_score_reason"]
             ),
             "coach_tip": "Controlla che ruolo target, formazione e competenze principali dicano la stessa cosa su CV e LinkedIn.",
-        },
-        {
-            "title": "Foto e contenuti pubblici",
-            "status": visual_media_finding_status(evidence),
-            "description": describe_visual_media_analysis(evidence, has_instagram),
-            "coach_tip": "Evita contenuti pubblici che possano confondere il posizionamento professionale.",
         },
         {
             "title": "Link aggiuntivo",
@@ -3550,6 +3875,7 @@ Regole:
 - Se LinkedIn OAuth ufficiale e collegato, usalo come verifica identita di base, ma non come prova di coerenza professionale se non contiene sezioni professionali.
 - Analizza solo i profili social inseriti dal candidato e gli snippet che corrispondono esattamente a quei link.
 - L'handle Instagram inserito dal candidato e autoritativo: non segnalare profili Instagram multipli o omonimi se non compaiono tra le fonti esatte.
+- Nel finding "Foto e contenuti pubblici", effettua obbligatoriamente un confronto testuale tra il testo nel CV e le informazioni pubbliche trovate (es. bio di Instagram, nome visualizzato, interessi dichiarati). Indica se il brand professionale online e coerente con il CV (es. citando ruoli o competenze simili) o se emergono discrepanze (es. settori diversi o omonimie).
 - Se le fonti non contengono altri profili, non parlare di "diverse fonti", "profili multipli", omonimi o incongruenze con persone diverse.
 - Per ogni confronto descrivi elementi concreti realmente presenti nelle fonti, ad esempio ruolo, formazione, esperienze, date o competenze.
 - Se non sono disponibili contenuti sufficienti per un confronto concreto, dichiaralo esplicitamente invece di formulare una valutazione generica.
@@ -3559,7 +3885,12 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1400))
+        if VISION_PROVIDER == "ollama":
+            raw_output = call_ollama_text(prompt, temperature=0.25, max_tokens=1400, json_mode=True)
+        else: 
+            raw_output = call_openai(prompt, temperature=0.25, max_tokens=1400, json_mode=True)
+            
+        result = extract_json(raw_output)
         ai_score = clamp_score(result.get("score", fallback["score"]))
         score_cap = (
             fallback["score"]
@@ -3576,16 +3907,17 @@ Regole:
         result["sources"] = sources
         result["linkedin_basic_info"] = fallback["linkedin_basic_info"]
         result["analysis_evidence"] = evidence
-        if (
-            has_instagram
-            and not evidence["instagram_media_analyzed"]
-            and "instagram" in str(result.get("summary", "")).lower()
-        ):
-            result["summary"] = (
-                "Il confronto usa il CV e i profili pubblici verificabili disponibili. "
-                "Per Instagram risultano accessibili soltanto metadati o anteprime pubbliche: "
-                "foto e post non sono stati analizzati."
-            )
+        
+        # Evita di sovrascrivere il summary se l'AI ha gia inserito un confronto testuale utile
+        summary_val = str(result.get("summary", "")).lower()
+        if has_instagram and not evidence["instagram_media_analyzed"] and "instagram" in summary_val:
+            if "bio" not in summary_val and "coerente" not in summary_val:
+                result["summary"] = (
+                    "Il confronto usa il CV e i profili pubblici verificabili disponibili. "
+                    "Per Instagram risultano accessibili soltanto metadati o anteprime pubbliche: "
+                    "foto e post non sono stati analizzati."
+                )
+
         if not evidence["can_compare_with_cv"]:
             result["headline"] = "Analisi non disponibile"
             result["summary"] = evidence["zero_score_reason"]
@@ -3594,7 +3926,12 @@ Regole:
                 title = str(finding.get("title", "")).lower()
                 if "linkedin" in title:
                     finding["status"] = "success" if linkedin_identity["status"] == "matched" else "warning"
-                    finding["description"] = describe_linkedin_evidence(evidence)
+                    
+                    llm_desc = str(finding.get("description") or "").strip()
+                    evidence_msg = describe_linkedin_evidence(evidence)
+                    # Combina l'analisi testuale dell'AI con il dettaglio tecnico delle fonti
+                    finding["description"] = f"{llm_desc} {evidence_msg}".strip() if llm_desc and len(llm_desc) > 30 else evidence_msg
+                    
                     finding["coach_tip"] = (
                         "Mantieni allineati date, titoli e descrizioni tra CV, PDF LinkedIn e profilo pubblico."
                         if linkedin_identity["status"] == "matched"
@@ -3603,13 +3940,25 @@ Regole:
         if has_instagram:
             for finding in result["findings"]:
                 title = str(finding.get("title", "")).lower()
-                if "instagram" in title or "foto" in title or "contenuti pubblici" in title:
-                    finding["status"] = visual_media_finding_status(evidence)
-                    finding["description"] = describe_visual_media_analysis(evidence, has_instagram)
-                    finding["coach_tip"] = (
-                        "Controlla manualmente cosa risulta visibile a chi non segue il profilo. "
-                        "Per un controllo automatico dei contenuti servono media realmente accessibili."
-                    )
+                if "instagram" in title or "foto" in title or "contenuti pubblici" in title or "screenshot" in title:
+                    comp = evidence.get("screenshot_cv_comparison")
+                    if comp and isinstance(comp, dict):
+                        score = comp.get("coherence_score", 0)
+                        finding["title"] = "Coerenza Screenshot Profilo & CV"
+                        finding["status"] = "success" if score >= 60 else "warning"
+                        name_part = f"Nome rilevato: {comp.get('extracted_name') or 'Non rilevato'}. "
+                        bio_part = f"Bio rilevata: {comp.get('extracted_bio') or 'Non rilevata'}. "
+                        finding["description"] = f"Confronto screenshot completato con punteggio {score}%. {name_part}{bio_part}{comp.get('description', '')}"
+                        finding["coach_tip"] = comp.get("coach_tip") or "Allinea la bio e il nome del tuo profilo social con il tuo CV."
+                    else:
+                        finding["status"] = visual_media_finding_status(evidence)
+                        llm_desc = str(finding.get("description") or "").strip()
+                        media_status = describe_visual_media_analysis(evidence, has_instagram)
+                        finding["description"] = f"{llm_desc} {media_status}".strip() if llm_desc and len(llm_desc) > 30 else media_status
+                        finding["coach_tip"] = (
+                            "Controlla manualmente cosa risulta visibile a chi non segue il profilo. "
+                            "Per un controllo automatico dei contenuti servono media realmente accessibili."
+                        )
         if has_other_profile:
             for finding in result["findings"]:
                 title = str(finding.get("title", "")).lower()
@@ -3780,7 +4129,7 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1000))
+        result = extract_json(call_openai(prompt, temperature=0.25, max_tokens=1000, json_mode=True))
         return normalize_cv_strategy_result(result, fallback, sources, target)
     except Exception as exc:
         print(f"Analisi strategica CV AI non riuscita, uso fallback: {exc}")
@@ -3998,7 +4347,7 @@ Regole obbligatorie:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, json_mode=True), context="optimize_cv_text")
+        result = extract_json(call_openai(prompt, temperature=0.2, max_tokens=1500, json_mode=True), context="optimize_cv_text")
         optimized_text = clean_extracted_text(result.get("optimized_cv_text", ""))
         if len(optimized_text) < 200:
             return fallback
@@ -4047,7 +4396,7 @@ def build_resume_rewrite_result(
 
     try:
         # Generiamo le istruzioni usando Groq
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1500, json_mode=True), context="resume_rewrite_instructions")
+        result = extract_json(call_openai(prompt, temperature=0.1, max_tokens=1500, json_mode=True), context="resume_rewrite_instructions")
         instructions = rewriter.instructions_from_result(result)
 
         # Se LLM ha restituito una lista vuota o qualcosa e' andato storto e avevamo suggerimenti:
@@ -4356,7 +4705,7 @@ Regole:
 - Mantieni la prima persona implicita e non aggiungere etichette o spiegazioni.
 """
     try:
-        result = extract_json(call_groq(prompt, temperature=0.05, max_tokens=400, json_mode=True), context="professional_extra_text")
+        result = extract_json(call_openai(prompt, temperature=0.05, max_tokens=400, json_mode=True), context="professional_extra_text")
         text = clean_extracted_text(str(result.get("text") or ""))
         if text:
             return text[:700]
@@ -4462,9 +4811,6 @@ Sei un senior resume editor. Restituisci SOLO JSON valido.
 Devi creare la versione finale di UNA SOLA sezione del CV incorporando TUTTE le modifiche accettate.
 
 Candidatura corrente:
-- Azienda: {company or "Non specificata"}
-- Ruolo: {role or "Non specificato"}
-- Obiettivo/annuncio: {goal or "Non specificato"}
 
 Sezione:
 {section}
@@ -4482,21 +4828,12 @@ Schema:
 }}
 
 Regole obbligatorie:
-- Integra tutte le modifiche elencate in un unico testo finale coerente.
-- Non perdere nessuna skill, informazione o riscrittura accettata.
-- Non duplicare concetti sovrapposti: fondili mantenendo tutto il contenuto utile.
-- Usa esclusivamente fatti presenti nel testo originale o nelle modifiche accettate.
-- Non inventare aziende, date, strumenti, risultati, esperienze o titoli.
-- Mantieni lingua, tono, sintesi, punteggiatura e forma del CV originale.
-- Se la sezione contiene skill, conserva tutte le skill originali e tutte quelle confermate, organizzandole in modo leggibile.
-- Non inserire il titolo della sezione nel replacement.
-- applied_ids deve contenere esattamente tutti gli ID ricevuti.
 """
         replacement = ""
         applied_ids: List[str] = []
         try:
             result = extract_json(
-                call_groq(prompt, temperature=0.05, max_tokens=1200, timeout=60, json_mode=True),
+                call_openai(prompt, temperature=0.05, max_tokens=1200, json_mode=True),
                 context="consolidate_rewrite_instructions",
             )
             replacement = str(result.get("replacement") or "").strip()
@@ -4700,7 +5037,7 @@ Regole:
 - Ogni testo deve essere breve e direttamente utilizzabile nel CV, senza note, spiegazioni o titoli interni.
 """
     try:
-        result = extract_json(call_groq(prompt, temperature=0.1, max_tokens=1000, json_mode=True), context="skill_detail_rewrite")
+        result = extract_json(call_openai(prompt, temperature=0.1, max_tokens=1000, json_mode=True), context="skill_detail_rewrite")
         raw_items = result.get("items") if isinstance(result, dict) else []
     except Exception as exc:
         print(f"Collocazione dettagli skill non riuscita, uso fallback: {exc}")
@@ -7968,7 +8305,7 @@ Regole:
 """
 
     try:
-        result = extract_json(call_groq(prompt, temperature=0.2, max_tokens=1500, timeout=60, json_mode=True), context="cv_job_evaluation")
+        result = extract_json(call_openai(prompt, temperature=0.2, max_tokens=1500, json_mode=True), context="cv_job_evaluation")
         normalized = normalize_cv_job_evaluation(result, fallback)
         questions = generate_cv_optimization_questions(cv_text, normalized, normalized.get("ats_analysis", ats_analysis))
         normalized["optimization_questions"] = questions
@@ -9253,9 +9590,9 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
     public_user["cv_text"] = recover_saved_cv_text(cursor, existing_user)
     public_user["linkedin_profile_text"] = existing_user[21] or ""
     public_user["linkedin_url"] = normalize_linkedin_profile_url(data.linkedin_url)
-    public_user["portfolio_url"] = (data.portfolio_url or "").strip()
     instagram_handle = normalize_instagram_handle(data.instagram_handle)
     public_user["instagram_handle"] = f"@{instagram_handle}" if instagram_handle else ""
+    public_user["portfolio_url"] = (data.portfolio_url or "").strip()
     public_user["visual_media_analysis"] = analyze_public_social_media(public_user)
 
     sources = search_public_profile_signals(public_user, data)
@@ -9314,16 +9651,6 @@ async def analyze_social_screenshots(
             "image_url": {"url": f"data:{content_type};base64,{encoded}"},
         })
 
-    screenshot_analysis = await run_in_threadpool(
-        moderate_visual_inputs,
-        image_inputs,
-        "uploaded_screenshots",
-        len(image_inputs),
-    )
-    if screenshot_analysis.get("status") == "rate_limited":
-        raise HTTPException(status_code=429, detail=screenshot_analysis["message"])
-    if screenshot_analysis.get("status") in {"provider_not_configured", "provider_unavailable"}:
-        raise HTTPException(status_code=503, detail=screenshot_analysis["message"])
     conn = get_connection()
     cursor = conn.cursor()
     user = fetch_user_by_id(cursor, user_id)
@@ -9331,69 +9658,72 @@ async def analyze_social_screenshots(
         conn.close()
         raise HTTPException(status_code=404, detail="Utente non trovato.")
 
+    cv_text = user[13] or ""
+    user_name = user[1] or ""
+
+    comparison_result = await run_in_threadpool(
+        compare_screenshots_with_cv,
+        image_inputs,
+        cv_text,
+        user_name,
+    )
+
     digital_analysis = json.loads(user[19]) if user[19] else {
         "score": 0,
         "headline": "Analisi screenshot completata",
-        "summary": screenshot_analysis["message"],
+        "summary": "Analisi del profilo social completata.",
         "findings": [],
         "sources": [],
         "analysis_evidence": {},
     }
     evidence = digital_analysis.setdefault("analysis_evidence", {})
-    previous_adjustment = int(evidence.get("visual_score_adjustment", 0) or 0)
-    profile_analyses = evidence.setdefault("visual_media_analyses", {})
-    screenshot_analysis["profile_type"] = profile_type
-    screenshot_analysis["profile_label"] = VISUAL_PROFILE_LABELS[profile_type]
-    profile_analyses[profile_type] = screenshot_analysis
-    visual_score_adjustment = calculate_visual_score_adjustment(profile_analyses)
-    evidence["visual_score_adjustment"] = visual_score_adjustment
+    evidence["screenshot_cv_comparison"] = comparison_result
+
+    screenshot_analysis = {
+        "status": "completed",
+        "provider": VISION_PROVIDER,
+        "profile_type": profile_type,
+        "profile_label": VISUAL_PROFILE_LABELS[profile_type],
+        "analyzed_content_count": len(image_inputs),
+        "coherence_score": comparison_result.get("coherence_score", 0),
+        "name_match": comparison_result.get("name_match", False),
+        "extracted_name": comparison_result.get("extracted_name"),
+        "extracted_bio": comparison_result.get("extracted_bio"),
+        "description": comparison_result.get("description", ""),
+        "coach_tip": comparison_result.get("coach_tip", ""),
+        "message": f"Confronto con CV completato. Punteggio di coerenza ottenuto: {comparison_result.get('coherence_score', 0)}%."
+    }
     evidence["visual_media_analysis"] = screenshot_analysis
+
+    profile_analyses = evidence.setdefault("visual_media_analyses", {})
+    profile_analyses[profile_type] = screenshot_analysis
     evidence["instagram_media_analyzed"] = (
         profile_analyses.get("instagram", {}).get("analyzed_content_count", 0) > 0
     )
     evidence["profile_screenshots_analyzed"] = sorted(profile_analyses)
-    if evidence.get("can_compare_with_cv"):
-        digital_analysis["score"] = clamp_score(
-            int(digital_analysis.get("score", 0) or 0) - previous_adjustment + visual_score_adjustment
-        )
-    findings = digital_analysis.setdefault("findings", [])
-    media_finding = next(
-        (
-            finding
-            for finding in findings
-            if "foto" in str(finding.get("title", "")).lower()
-            or "contenuti pubblici" in str(finding.get("title", "")).lower()
-        ),
-        None,
-    )
-    if not media_finding:
-        media_finding = {"title": "Foto e contenuti pubblici", "coach_tip": ""}
-        findings.append(media_finding)
-    media_finding["status"] = (
-        "warning"
-        if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
-        else "success"
-    )
-    media_finding["description"] = describe_profile_screenshot_analyses(profile_analyses)
-    media_finding["coach_tip"] = (
-        "Rivedi manualmente i contenuti intimi o sensibili segnalati prima di candidarti."
-        if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
-        else "Gli screenshot senza contenuti sensibili non aumentano il punteggio: la coerenza professionale resta basata su CV, profili verificabili e contenuti rilevanti."
-    )
+
+    public_user = user_to_response(user)
+    public_user["cv_text"] = cv_text
+    public_user["linkedin_profile_text"] = user[21] or ""
+    public_user["digital_analysis"] = digital_analysis
+
+    existing_sources = digital_analysis.get("sources", [])
+    updated_analysis = analyze_digital_profile(public_user, existing_sources)
 
     cursor.execute(
         "UPDATE users SET digital_analysis_json = ? WHERE id = ?",
-        (json.dumps(digital_analysis, ensure_ascii=False), user_id),
+        (json.dumps(updated_analysis, ensure_ascii=False), user_id),
     )
     conn.commit()
     updated_user = fetch_user_by_id(cursor, user_id)
     conn.close()
+
     return {
         "user": user_to_response(updated_user),
-        "analysis": digital_analysis,
+        "analysis": updated_analysis,
         "message": (
-            f"{VISUAL_PROFILE_LABELS[profile_type]}: {screenshot_analysis['message']} "
-            f"Impatto visuale sul punteggio: {visual_score_adjustment:+d}."
+            f"Confronto {VISUAL_PROFILE_LABELS[profile_type]} completato. "
+            f"Punteggio di coerenza ottenuto: {comparison_result.get('coherence_score', 0)}%."
         ),
     }
 
@@ -9605,7 +9935,7 @@ La struttura deve essere ESATTAMENTE questa:
 """
 
     try:
-        raw_questions = call_groq(prompt, temperature=0.3, max_tokens=1400)
+        raw_questions = call_openai(prompt, temperature=0.3, max_tokens=1400, json_mode=True)
 
         print("OUTPUT GREZZO GROQ DOMANDE:")
         print(raw_questions)
@@ -10010,7 +10340,7 @@ Regole di valutazione:
 """
 
     try:
-        raw_output = call_groq(prompt, temperature=0.4, max_tokens=1600)
+        raw_output = call_openai(prompt, temperature=0.4, max_tokens=1600, json_mode=True)
         result = extract_json(raw_output)
     except Exception as e:
         conn.close()
