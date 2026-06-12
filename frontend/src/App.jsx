@@ -3763,6 +3763,20 @@ function App() {
                     : "profilo non accessibile: foto e post non sono stati analizzati"}
               </p>
               <p>
+                Bio Instagram:{" "}
+                {digitalAnalysis.analysis_evidence.instagram_bio_analyzed
+                  ? "testo estratto dallo screenshot e confrontato con il ruolo target"
+                  : "non analizzata; carica uno screenshot leggibile della bio"}
+              </p>
+              {digitalAnalysis.analysis_evidence.social_text_analyses?.instagram?.evaluation?.bio_candidate && (
+                <p>
+                  Testo profilo rilevato:{" "}
+                  <strong>
+                    {digitalAnalysis.analysis_evidence.social_text_analyses.instagram.evaluation.bio_candidate}
+                  </strong>
+                </p>
+              )}
+              <p>
                 Anteprime pubbliche analizzate:{" "}
                 <strong>
                   {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_preview_count || 0}
@@ -3825,7 +3839,8 @@ function App() {
               <h3>Completa il controllo delle immagini</h3>
               <p>
                 Puoi caricare fino a 8 screenshot per ciascun profilo. Le immagini vengono
-                analizzate senza essere salvate come file: eventuali contenuti sensibili
+                analizzate senza essere salvate come file. Il testo visibile viene estratto
+                per controllare bio e coerenza con il ruolo; eventuali contenuti sensibili
                 possono ridurre il punteggio complessivo.
               </p>
               <div className="screenshot-upload-grid">

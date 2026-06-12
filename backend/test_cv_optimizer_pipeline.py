@@ -2,14 +2,17 @@ import io
 import unittest
 
 from docx import Document
+from docx.shared import Pt
 
 from main import build_confirmed_skill_rewrite_instructions
 from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
 from services.cv_optimizer.pipeline import (
     DocxPreserver,
+    ResumeDocxOptimizationPipeline,
     ResumeParser,
     ResumeRewriter,
     RewriteInstruction,
+    StructuredRewriteInstruction,
 )
 
 
@@ -105,6 +108,148 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         document.save(output)
         return output.getvalue()
 
+    def test_profile_rewrite_can_mention_skills_in_a_normal_sentence(self):
+        pipeline = ResumeDocxOptimizationPipeline()
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="profile-data-analyst",
+            target_section="profilo",
+            action="replace",
+            old_text_hint="Studentessa magistrale in Ingegneria Informatica.",
+            new_text=(
+                "Studentessa magistrale orientata al ruolo di Data Analyst, "
+                "con hard skills in Python e SQL e attenzione ai dettagli."
+            ),
+            items=[],
+            reason="Profilo più mirato.",
+            confidence=0.8,
+        )
+
+        self.assertTrue(pipeline._is_safe_target_text(instruction))
+
+    def test_profile_rewrite_rejects_an_injected_section_heading(self):
+        pipeline = ResumeDocxOptimizationPipeline()
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="profile-injection",
+            target_section="profilo",
+            action="replace",
+            old_text_hint="Profilo originale.",
+            new_text="Profilo aggiornato.\nHARD SKILLS\nPython, SQL",
+            items=[],
+            reason="Test sicurezza.",
+            confidence=0.8,
+        )
+
+        self.assertFalse(pipeline._is_safe_target_text(instruction))
+
+    def test_structured_pipeline_applies_profile_and_skill_updates_together(self):
+        document = Document()
+        document.add_paragraph("CHI SONO")
+        document.add_paragraph(
+            "Sono una studentessa magistrale in Ingegneria Informatica."
+        )
+        document.add_paragraph("HARD SKILLS")
+        document.add_paragraph("Python, SQL, Java")
+        document.add_paragraph("SOFT SKILLS")
+        document.add_paragraph("Creatività, flessibilità, problem solving")
+
+        instructions = [
+            StructuredRewriteInstruction(
+                suggestion_id="profile-data-analyst",
+                target_section="profilo",
+                action="replace",
+                old_text_hint="Sono una studentessa magistrale in Ingegneria Informatica.",
+                new_text=(
+                    "Studentessa magistrale orientata al ruolo di Data Analyst, "
+                    "con hard skills in Python e SQL e approccio analitico."
+                ),
+                items=[],
+                reason="Profilo più mirato.",
+                confidence=0.8,
+            ),
+            StructuredRewriteInstruction(
+                suggestion_id="confirmed-hard-skills",
+                target_section="HARD SKILLS",
+                action="replace",
+                old_text_hint="Python, SQL, Java",
+                new_text="Python, SQL, Java, analisi dei dati",
+                items=[],
+                reason="Competenze confermate.",
+                confidence=0.8,
+            ),
+            StructuredRewriteInstruction(
+                suggestion_id="confirmed-soft-skills",
+                target_section="SOFT SKILLS",
+                action="replace",
+                old_text_hint="Creatività, flessibilità, problem solving",
+                new_text="Problem solving, attenzione ai dettagli, flessibilità",
+                items=[],
+                reason="Soft skill confermate.",
+                confidence=0.8,
+            ),
+        ]
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            instructions,
+        )
+
+        self.assertEqual(result.validation_report["status"], "applied")
+        self.assertEqual(len(result.applied_ids), 3)
+        self.assertIn("Studentessa magistrale orientata", result.validation_report["final_text"])
+        self.assertIn("CHI SONO", result.validation_report["final_text"])
+
+    def test_structured_pipeline_copies_direct_run_format_to_inserted_lines(self):
+        document = Document()
+        document.add_paragraph("ESPERIENZE PROFESSIONALI")
+        body = document.add_paragraph("Attività originale.")
+        body.runs[0].font.name = "Open Sans"
+        body.runs[0].font.size = Pt(10)
+
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="formatted-experience",
+            target_section="ESPERIENZE PROFESSIONALI",
+            action="replace",
+            old_text_hint="Attività originale.",
+            new_text="Prima attività aggiornata.\nSeconda attività aggiornata.",
+            items=[],
+            reason="Test formattazione.",
+            confidence=0.8,
+        )
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [instruction],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        inserted = next(
+            paragraph
+            for paragraph in updated.paragraphs
+            if paragraph.text == "Seconda attività aggiornata."
+        )
+
+        self.assertEqual(inserted.runs[0].font.name, "Open Sans")
+        self.assertEqual(inserted.runs[0].font.size.pt, 10)
+
+    def test_structured_pipeline_minimizes_trailing_paragraph_after_table(self):
+        document = Document()
+        table = document.add_table(rows=1, cols=1)
+        table.cell(0, 0).text = "HARD SKILLS"
+        table.rows[0].height = Pt(700)
+        document.add_paragraph("")
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [],
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        trailing = updated.paragraphs[-1]
+
+        self.assertEqual(trailing.paragraph_format.space_after.pt, 0)
+        self.assertEqual(trailing.runs[0].font.size.pt, 1)
+        self.assertTrue(trailing.runs[0].font.hidden)
+        row_xml = updated.tables[0].rows[0]._tr.xml
+        self.assertNotIn("trHeight", row_xml)
+
     def test_replaces_text_inside_table_section(self):
         document = Document()
         table = document.add_table(rows=2, cols=2)
@@ -156,6 +301,53 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         self.assertEqual(applied, 1)
         self.assertEqual(updated.tables[0].cell(0, 1).text, "Python, SQL")
         self.assertEqual(updated.tables[0].cell(1, 1).text, "Python · SQL · Power BI")
+
+    def test_table_column_with_own_headings_does_not_inherit_soft_skills(self):
+        document = Document()
+        table = document.add_table(rows=1, cols=2)
+        left = table.cell(0, 0)
+        left.text = "SOFT SKILLS"
+        left.add_paragraph("Problem solving")
+        right = table.cell(0, 1)
+        right.text = "SILVIA MUCCI\nIngegnere Informatico"
+        right.add_paragraph("CHI SONO")
+        right.add_paragraph("Profilo professionale.")
+
+        contexts = ResumeDocxOptimizationPipeline()._paragraph_contexts(document)
+        name_context = next(
+            context
+            for context in contexts
+            if "SILVIA MUCCI" in (context.paragraph.text or "")
+        )
+
+        self.assertEqual(name_context.section, "intestazione")
+
+    def test_validation_rejects_education_content_inside_hard_skills(self):
+        document = Document()
+        document.add_paragraph("HARD SKILLS")
+        document.add_paragraph("Python · SQL")
+        document.add_paragraph("Università degli Studi | 2019-2024 Laurea")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        warnings = pipeline._skill_section_contamination_warnings(
+            self._docx_bytes(document)
+        )
+
+        self.assertTrue(warnings)
+
+    def test_validation_rejects_narrative_fragments_and_names_inside_skills(self):
+        document = Document()
+        document.add_paragraph("HARD SKILLS")
+        document.add_paragraph("Python · SQL")
+        document.add_paragraph("e approccio analitico alla risoluzione di problemi complessi.")
+        document.add_paragraph("SOFT SKILLS")
+        document.add_paragraph("Problem solving · SILVIA MUCCI Ingegnere Informatico")
+
+        warnings = ResumeDocxOptimizationPipeline()._skill_section_contamination_warnings(
+            self._docx_bytes(document)
+        )
+
+        self.assertEqual(len(warnings), 2)
 
     def test_appends_to_existing_section_without_page_break(self):
         document = Document()

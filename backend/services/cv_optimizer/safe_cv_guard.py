@@ -498,17 +498,17 @@ ROLE_MATCHER_LIBRARY = {
     },
     "software engineer": {
         "role_terms": ["software engineer", "software developer", "sviluppatore", "developer", "programmatore"],
-        "hard_skills": ["Sviluppo software", "Debugging", "Version control", "Unit testing", "Code review", "API"],
-        "tools": ["Git", "GitHub", "Docker", "VS Code", "PostgreSQL"],
+        "hard_skills": ["Sviluppo software", "Debugging", "Version control", "Unit testing", "Code review", "API", "System design", "Testing automatico", "CI/CD"],
+        "tools": ["Git", "GitHub", "Docker", "VS Code", "PostgreSQL", "Jira", "CI/CD pipelines"],
         "languages": ["Python", "Java", "JavaScript", "C++"],
-        "soft_skills": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione"],
+        "soft_skills": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico", "Ownership", "Adattabilità"],
     },
     "frontend developer": {
         "role_terms": ["frontend developer", "front end", "frontend", "ui", "ux", "web developer", "web design"],
-        "hard_skills": ["HTML/CSS", "JavaScript", "TypeScript", "Responsive design", "Accessibility", "Design systems", "User interface"],
-        "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+        "hard_skills": ["HTML/CSS", "JavaScript", "TypeScript", "Responsive design", "Accessibility", "Design systems", "User interface", "Component architecture", "State management"],
+        "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack", "Vite", "Storybook"],
         "languages": ["JavaScript", "TypeScript", "React"],
-        "soft_skills": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving"],
+        "soft_skills": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving", "User empathy"],
     },
     "qa tester": {
         "role_terms": ["qa", "quality assurance", "tester", "software tester", "test engineer", "testing"],

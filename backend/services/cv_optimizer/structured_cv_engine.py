@@ -697,6 +697,38 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
                 item["proposed_text"] = "Competenze tecniche:\n" + "\n".join(f"- {line}" for line in grouped_lines[:10])
             suggestions.append(item)
 
+    soft_text = sections.get("soft_skills", "")
+    soft_terms = extract_skill_terms(soft_text or "\n".join(sections.values()))
+    soft_hits = unique([
+        skill for skill in [*target.get("soft_skills", []), *COMMON_SKILLS]
+        if any(normalize(skill) in normalize(term) or normalize(term) in normalize(skill) for term in soft_terms)
+    ])
+    if soft_text and soft_hits:
+        preferred_soft = {
+            "software engineer": ["Problem solving", "Collaborazione", "Comunicazione tecnica", "Precisione", "Pensiero logico", "Ownership"],
+            "backend developer": ["Problem solving", "Precisione", "Collaborazione", "Documentazione tecnica", "Comunicazione tecnica", "Pensiero logico"],
+            "frontend developer": ["Creatività", "Attenzione ai dettagli", "Collaborazione", "Comunicazione", "Problem solving", "User empathy"],
+            "data analyst": ["Pensiero analitico", "Attenzione ai dettagli", "Comunicazione dei risultati", "Problem solving", "Collaborazione"],
+            "data scientist": ["Pensiero analitico", "Problem solving", "Comunicazione scientifica", "Collaborazione", "Attenzione ai dettagli"],
+            "project manager": ["Organizzazione", "Gestione priorità", "Comunicazione", "Leadership", "Negoziazione"],
+        }.get(role_family, [])
+        ordered_soft = unique([*preferred_soft, *soft_hits])[:8]
+        if ordered_soft:
+            proposed_soft = "Soft skills:\n" + "\n".join(f"- {line}" for line in ordered_soft)
+            item = make_suggestion(
+                "soft_skills",
+                "SOFT SKILLS",
+                "Riorganizza le competenze trasversali già presenti",
+                soft_text,
+                proposed_soft,
+                "Rende più visibili le soft skill già presenti nel CV e le allinea meglio al ruolo scelto.",
+                "alto",
+                3,
+                ordered_soft,
+            )
+            if item:
+                suggestions.append(item)
+
     missing_keywords = unique([
         *evaluation.get("missing_keywords", []),
         *evaluation.get("missing_hard_skills", []),

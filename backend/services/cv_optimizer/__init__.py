@@ -11,6 +11,9 @@ from .pipeline import (
     RewriteInstruction,
     StructuredRewriteInstruction,
 )
+from .evaluation import evaluate_cv_for_job
+from .rewrite import build_resume_rewrite_result
+from .suggestions import build_cv_job_suggestions
 
 __all__ = [
     "CoachSuggestionEngine",
@@ -24,4 +27,7 @@ __all__ = [
     "ResumeRewriter",
     "RewriteInstruction",
     "StructuredRewriteInstruction",
+    "evaluate_cv_for_job",
+    "build_cv_job_suggestions",
+    "build_resume_rewrite_result",
 ]

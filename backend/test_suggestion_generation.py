@@ -3,17 +3,214 @@
 
 import sys
 import unittest
+from unittest.mock import patch
 sys.path.insert(0, '.')
 
 from main import (
+    build_coach_suggestions_from_evaluation,
+    canonical_skill_identity,
     build_role_skill_suggestions,
+    call_ollama,
+    clean_skill_section_source,
+    count_section_markers,
+    deterministic_section_consolidation,
+    extract_clean_skill_items,
+    format_skill_list_like_original,
     infer_skill_library_from_role,
     infer_role_family,
+    sanitize_cv_additional_data,
 )
+from services.cv_optimizer import RewriteInstruction
+from services.cv_optimizer.skill_suggestions import build_skill_mini_shot_suggestions
 
 
 class TestSuggestionGeneration(unittest.TestCase):
     """Test suggestion generation with fallback."""
+
+    def test_ollama_respects_explicit_short_timeout(self):
+        captured = {}
+
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"message": {"content": "{}"}}
+
+        def fake_post(*args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return FakeResponse()
+
+        with patch("main.requests.post", side_effect=fake_post):
+            call_ollama("test", timeout=25, json_mode=True)
+
+        self.assertEqual(captured["timeout"], 25)
+
+    def test_section_marker_detection_ignores_normal_sentences(self):
+        self.assertEqual(count_section_markers("Esperienza valorizzata per il ruolo"), 0)
+        self.assertEqual(count_section_markers("Soft skills rilevanti:\n- Collaborazione"), 0)
+        self.assertEqual(count_section_markers("HARD SKILLS\nPython, SQL"), 1)
+
+    def test_local_guard_generates_data_analyst_suggestions_without_llm(self):
+        evaluation = {
+            "cv_text": (
+                "PROFILO\nLaureato con interesse per analisi e visualizzazione dei dati.\n"
+                "HARD SKILLS\nPython, SQL, Excel, pandas\n"
+                "SOFT SKILLS\nProblem solving, collaborazione, precisione\n"
+                "PROGETTI\nAnalisi di un dataset e creazione di report con Python e SQL.\n"
+                "FORMAZIONE\nLaurea in Informatica"
+            ),
+            "target": {
+                "role": "Data Analyst",
+                "company": "Google",
+                "description": "Analisi dati, dashboard, KPI e reporting.",
+            },
+            "missing_keywords": ["Power BI", "Tableau", "KPI"],
+            "relevant_skills_found": ["Python", "SQL", "Excel"],
+        }
+
+        with patch(
+            "services.cv_optimizer.skill_suggestions.build_skill_mini_shot_suggestions",
+            side_effect=AssertionError("Il guard locale non deve richiedere il mini-shot"),
+        ):
+            suggestions = build_coach_suggestions_from_evaluation(evaluation)
+
+        self.assertGreater(len(suggestions), 0)
+        self.assertTrue(all(item.get("type") == "actionableEdit" for item in suggestions))
+
+    def test_validation_mode_never_calls_skill_mini_shot(self):
+        evaluation = {
+            "cv_text": "PROFILO\nCandidato junior.\nFORMAZIONE\nLaurea in Informatica",
+            "target": {"role": "Data Analyst", "company": "Google"},
+        }
+
+        with patch(
+            "services.cv_optimizer.skill_suggestions.build_skill_mini_shot_suggestions",
+            side_effect=AssertionError("Il mini-shot non deve bloccare la validazione"),
+        ):
+            suggestions = build_coach_suggestions_from_evaluation(
+                evaluation,
+                allow_llm=False,
+            )
+
+        self.assertIsInstance(suggestions, list)
+
+    def test_skill_source_stops_before_cross_column_education_text(self):
+        source = (
+            "Python ML & AI C++ SQL Java\n"
+            "e approccio analitico alla risoluzione di problemi complessi.\n"
+            "Università degli Studi di Roma Tre | 2019-2024"
+        )
+
+        cleaned = clean_skill_section_source(source)
+
+        self.assertEqual(cleaned, "Python ML & AI C++ SQL Java")
+
+    def test_skill_formatter_creates_compact_sidebar_rows(self):
+        formatted = format_skill_list_like_original(
+            "Python SQL Java",
+            [
+                "Python", "SQL", "Java", "KPI", "Reporting",
+                "Data visualization", "Power BI", "Tableau",
+            ],
+        )
+
+        self.assertIn(" · ", formatted)
+        self.assertTrue(all(len(line) <= 44 for line in formatted.splitlines()))
+
+    def test_soft_skill_extraction_removes_candidate_name_and_title(self):
+        source = (
+            "Creatività Flessibilità Capacità di adattamento "
+            "Attenzione ai dettagli Apprendimento continuo "
+            "Problem solving Team Working SILVIA MUCCI Ingegnere Informatico"
+        )
+
+        skills = extract_clean_skill_items(source, is_soft=True)
+
+        self.assertIn("Creatività", skills)
+        self.assertIn("Problem solving", skills)
+        self.assertNotIn("SILVIA MUCCI", " ".join(skills))
+
+    def test_compact_skill_mini_shot_builds_actionable_fields_locally(self):
+        evaluation = {
+            "cv_text": (
+                "PROFILO\nStudentessa di Informatica.\n"
+                "HARD SKILLS\nPython, SQL\n"
+                "SOFT SKILLS\nProblem solving"
+            ),
+            "target": {"role": "Data Analyst", "company": "Google"},
+            "missing_hard_skills": ["Power BI"],
+            "missing_soft_skills": ["Pensiero analitico"],
+            "relevant_skills_found": ["Python", "SQL"],
+        }
+        compact_result = {
+            "suggestions": [
+                {
+                    "bucket": "hard_add",
+                    "skill": "Power BI",
+                    "reason": "Utile per dashboard e reporting.",
+                }
+            ]
+        }
+
+        with patch("main.call_lightweight_analysis_llm", return_value=compact_result):
+            suggestions = build_skill_mini_shot_suggestions(evaluation)
+
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0]["section"], "hard_skills")
+        self.assertIn("Power BI", suggestions[0]["proposed_text"])
+        self.assertEqual(suggestions[0]["keywords_added"], ["Power BI"])
+
+    def test_confirmed_skill_payload_is_deduplicated_by_id_and_name(self):
+        skill = {
+            "id": "data-analyst-hard-skills-kpi",
+            "name": "KPI",
+            "category": "hard_skill",
+            "target_section": "HARD SKILLS",
+        }
+        sanitized, rejected = sanitize_cv_additional_data({
+            "confirmed_skills": [skill, dict(skill), {**skill, "id": "another-kpi"}],
+        })
+
+        self.assertEqual(len(sanitized["confirmed_skills"]), 1)
+        self.assertEqual(rejected, [])
+
+    def test_skill_identity_merges_common_synonyms(self):
+        self.assertEqual(
+            canonical_skill_identity("ML & AI"),
+            canonical_skill_identity("Machine Learning"),
+        )
+        self.assertEqual(
+            canonical_skill_identity("Team Working"),
+            canonical_skill_identity("Collaborazione"),
+        )
+
+    def test_deterministic_skill_consolidation_removes_synonym_duplicates(self):
+        replacement = deterministic_section_consolidation(
+            "Python · ML & AI",
+            [
+                RewriteInstruction(
+                    section="HARD SKILLS",
+                    original="Python · ML & AI",
+                    replacement="Python · Machine Learning · SQL",
+                    source_id="skills-1",
+                ),
+                RewriteInstruction(
+                    section="HARD SKILLS",
+                    original="Python · ML & AI",
+                    replacement="ML & AI · SQL · Power BI",
+                    source_id="skills-2",
+                ),
+            ],
+        )
+
+        identities = [
+            canonical_skill_identity(item)
+            for item in replacement.replace("\n", " · ").split(" · ")
+            if item.strip()
+        ]
+        self.assertEqual(len(identities), len(set(identities)))
 
     def test_data_scientist_generates_suggestions(self):
         """Test that Data Scientist generates appropriate suggestions."""

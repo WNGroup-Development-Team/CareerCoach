@@ -779,6 +779,8 @@ Dati aggiuntivi utente:
             else:
                 failed_ids.append(instruction.suggestion_id)
 
+        self._remove_oversized_table_row_minimums(document)
+        self._minimize_trailing_paragraph_after_table(document)
         output = io.BytesIO()
         document.save(output)
         file_bytes = output.getvalue()
@@ -793,6 +795,33 @@ Dati aggiuntivi utente:
             duplicate_warnings=duplicate_warnings,
             validation_report=validation_report,
         )
+
+    def _remove_oversized_table_row_minimums(self, document) -> None:
+        """Let full-page layout tables size to content instead of forcing overflow."""
+        for table in document.tables:
+            for row in table.rows:
+                tr_pr = row._tr.get_or_add_trPr()
+                for child in list(tr_pr):
+                    if child.tag.endswith("}trHeight"):
+                        tr_pr.remove(child)
+
+    def _minimize_trailing_paragraph_after_table(self, document) -> None:
+        """Prevent Word's mandatory paragraph after a full-page table becoming a blank page."""
+        from docx.shared import Pt
+
+        body = document._element.body
+        children = list(body)
+        if not children or not any(child.tag.endswith("}tbl") for child in children):
+            return
+        trailing = document.paragraphs[-1] if document.paragraphs else None
+        if trailing is None or (trailing.text or "").strip():
+            return
+        trailing.paragraph_format.space_before = Pt(0)
+        trailing.paragraph_format.space_after = Pt(0)
+        trailing.paragraph_format.line_spacing = Pt(1)
+        run = trailing.runs[0] if trailing.runs else trailing.add_run("")
+        run.font.size = Pt(1)
+        run.font.hidden = True
 
     def validate_generated_docx(
         self,
@@ -822,6 +851,9 @@ Dati aggiuntivi utente:
         for marker in self._duplicate_markers(final_text):
             duplicate_warnings.append(marker)
 
+        contamination_warnings = self._skill_section_contamination_warnings(
+            generated_file_bytes
+        )
         added_sections = self._unexpected_sections(normalized_original, normalized_final)
         status = "applied"
         if failed:
@@ -841,6 +873,18 @@ Dati aggiuntivi utente:
         if self._objective_followed_by_education(normalized_final):
             status = "failed"
             failed = [inst.suggestion_id for inst in instructions if canonical_section(inst.target_section) in education_targets] or failed
+        if contamination_warnings:
+            status = "failed"
+            failed = list(dict.fromkeys([
+                *failed,
+                *[
+                    inst.suggestion_id
+                    for inst in instructions
+                    if canonical_section(inst.target_section) in {
+                        "hard_skills", "soft_skills", "competenze",
+                    }
+                ],
+            ]))
 
         return {
             "status": status,
@@ -848,9 +892,42 @@ Dati aggiuntivi utente:
             "partially_applied": partial,
             "failed": failed,
             "duplicate_warnings": duplicate_warnings,
+            "contamination_warnings": contamination_warnings,
             "unexpected_sections": added_sections,
             "final_text": final_text,
         }
+
+    def _skill_section_contamination_warnings(self, file_bytes: bytes) -> List[str]:
+        from docx import Document
+
+        try:
+            document = Document(io.BytesIO(file_bytes))
+        except Exception:
+            return ["Impossibile verificare le sezioni skill del DOCX."]
+
+        warnings: List[str] = []
+        blocked_terms = {
+            "universita", "università", "laurea", "diploma", "liceo",
+            "tirocinio", "curriculare", "formazione", "esperienza professionale",
+        }
+        for context in self._paragraph_contexts(document):
+            if context.section not in {"hard_skills", "soft_skills", "competenze"}:
+                continue
+            text = (context.paragraph.text or "").strip()
+            plain = normalize_text(text)
+            if not text or is_section_heading(text):
+                continue
+            if (
+                any(term in plain for term in blocked_terms)
+                or bool(re.search(r"\b(?:19|20)\d{2}\b", text))
+                or plain.startswith(("e ", "in ", "con "))
+                or text.endswith((".", "!", "?"))
+                or bool(re.search(r"\b[A-ZÀ-ÖØ-Þ]{2,}\s+[A-ZÀ-ÖØ-Þ]{2,}\b", text))
+            ):
+                warnings.append(
+                    f"{context.section}: contenuto estraneo rilevato: {text[:140]}"
+                )
+        return warnings[:8]
 
     def _detect_sections(self, document) -> List[str]:
         sections: List[str] = []
@@ -921,13 +998,22 @@ Dati aggiuntivi utente:
 
     def _is_safe_target_text(self, instruction: StructuredRewriteInstruction) -> bool:
         section = canonical_section(instruction.target_section)
-        text = normalize_text(instruction.new_text)
-        headings = {"formazione", "esperienze", "progetti", "hard skills", "soft skills", "competenze", "contatti", "lingue", "certificazioni"}
-        if section in {"profilo", "objective", "obiettivo"} and any(title in text for title in headings):
+        heading_lines = {
+            canonical_section(line)
+            for line in (instruction.new_text or "").splitlines()
+            if is_section_heading(line)
+        }
+        if section in {"profilo", "objective", "obiettivo"} and heading_lines.intersection(
+            {"formazione", "esperienze", "progetti", "hard_skills", "soft_skills", "competenze", "contatti", "lingue", "certificazioni"}
+        ):
             return False
-        if section in {"formazione", "education"} and any(title in text for title in {"esperienze", "obiettivo", "profilo", "progetti"}):
+        if section in {"formazione", "education"} and heading_lines.intersection(
+            {"esperienze", "obiettivo", "profilo", "progetti"}
+        ):
             return False
-        if section in {"esperienze", "experience"} and any(title in text for title in {"formazione", "obiettivo", "profilo"}):
+        if section in {"esperienze", "experience"} and heading_lines.intersection(
+            {"formazione", "obiettivo", "profilo"}
+        ):
             return False
         return True
 
@@ -949,7 +1035,12 @@ Dati aggiuntivi utente:
             anchor = matching_contexts[0]
 
         section_name = anchor.section
-        section_contexts = [context for context in self._paragraph_contexts(document) if context.section == section_name]
+        section_contexts = [
+            context
+            for context in self._paragraph_contexts(document)
+            if context.section == section_name
+            and self._is_editable_paragraph(context.paragraph)
+        ]
         if not section_contexts:
             section_contexts = matching_contexts
 
@@ -1068,14 +1159,21 @@ Dati aggiuntivi utente:
             run.text = ""
 
     def _copy_paragraph_format(self, source, target) -> None:
-        target.style = source.style
-        target.alignment = source.alignment
-        if source.paragraph_format:
-            target.paragraph_format.left_indent = source.paragraph_format.left_indent
-            target.paragraph_format.right_indent = source.paragraph_format.right_indent
-            target.paragraph_format.space_before = source.paragraph_format.space_before
-            target.paragraph_format.space_after = source.paragraph_format.space_after
-            target.paragraph_format.line_spacing = source.paragraph_format.line_spacing
+        try:
+            target.style = source.style
+        except Exception:
+            pass
+        if source._p.pPr is not None:
+            if target._p.pPr is not None:
+                target._p.remove(target._p.pPr)
+            target._p.insert(0, deepcopy(source._p.pPr))
+
+        source_run = next((run for run in source.runs if (run.text or "").strip()), None)
+        target_run = target.runs[0] if target.runs else target.add_run()
+        if source_run is not None and source_run._r.rPr is not None:
+            if target_run._r.rPr is not None:
+                target_run._r.remove(target_run._r.rPr)
+            target_run._r.insert(0, deepcopy(source_run._r.rPr))
 
     def _duplicate_markers(self, final_text: str) -> List[str]:
         warnings: List[str] = []
@@ -1197,7 +1295,14 @@ Dati aggiuntivi utente:
                 if id(cell._tc) in seen_tc:
                     continue
                 seen_tc.add(id(cell._tc))
-                cell_section = row_section
+                cell_has_heading = any(
+                    is_section_heading(paragraph.text or "")
+                    for paragraph in cell.paragraphs
+                    if (paragraph.text or "").strip()
+                )
+                # A cell with its own headings starts an independent column.
+                # Heading-only cells still pass their section to an adjacent body cell.
+                cell_section = inherited_section if cell_has_heading else row_section
                 for paragraph in cell.paragraphs:
                     text = (paragraph.text or "").strip()
                     if is_section_heading(text):
