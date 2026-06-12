@@ -93,6 +93,12 @@ const previewSuggestionText = (value = "", expanded = false) => {
   return `${text.slice(0, 300).trim()}...`;
 };
 
+const splitTagList = (value = "") =>
+  String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
 const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => {
   if (!item) {
     return null;
@@ -3111,9 +3117,46 @@ function App() {
           id: `answer-${index}`,
           title: cvOptimizationQuestions[Number(index)]?.category || "Risposta extra confermata",
           detail: String(answer).trim(),
-        })),
+      })),
     ],
   };
+  const cvSummaryAcceptedSkillGroups = {
+    hard: [
+      ...acceptedSkillConfirmations.filter((item) => !["soft_skill", "tool"].includes(item.category)).map((item) => item.name),
+      ...splitTagList(cvAdditionalData.technical_skills),
+    ],
+    soft: [
+      ...acceptedSkillConfirmations.filter((item) => item.category === "soft_skill").map((item) => item.name),
+      ...splitTagList(cvAdditionalData.soft_skills),
+    ],
+    tool: [
+      ...acceptedSkillConfirmations.filter((item) => item.category === "tool").map((item) => item.name),
+      ...splitTagList(cvAdditionalData.tools),
+    ],
+  };
+  Object.keys(cvSummaryAcceptedSkillGroups).forEach((key) => {
+    cvSummaryAcceptedSkillGroups[key] = cvSummaryAcceptedSkillGroups[key].filter((item, index, list) =>
+      item && list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
+    );
+  });
+  const cvSummaryExtraItems = [
+    ...(cvAdditionalData.additional_notes?.trim() ? [{
+      title: "Note generali",
+      detail: cvAdditionalData.additional_notes.trim(),
+    }] : []),
+    ...Object.entries(cvAdaptationAnswers)
+      .filter(([, answer]) => String(answer || "").trim())
+      .map(([index, answer]) => ({
+        title: cvOptimizationQuestions[Number(index)]?.question || "Risposta extra",
+        detail: String(answer).trim(),
+      })),
+  ];
+  const cvSummaryAcceptedSuggestionCount = selectedCoachSuggestionItems.length;
+  const cvSummaryReviewedSuggestionCount = decidedCoachSuggestions.length || coachSuggestions.length;
+  const cvSummaryApplicationStatus = cvSummaryReviewedSuggestionCount > 0
+    ? `${cvSummaryAcceptedSuggestionCount} su ${cvSummaryReviewedSuggestionCount}`
+    : "0 su 0";
+  const cvSummaryJobLink = personalizeForm.link.trim() || cvOptimizationAnalysis?.target?.link || cvOptimizationAnalysis?.job_link || "";
 const screenshotUploadBoxes = [];
 
   return (
@@ -3196,11 +3239,13 @@ const screenshotUploadBoxes = [];
       {step === "home" && (
         <section className="home-page">
           <div className="home-heading">
-            <h2>Cosa vuoi fare oggi?</h2>
-            <p>Seleziona un’attività per continuare il tuo percorso.</p>
-            <p className="activity-orientation-text">
-              Puoi iniziare migliorando il CV oppure allenarti subito con una simulazione personalizzata.
-            </p>
+            <h2>
+              Cosa vuoi fare oggi
+              {userId && profile?.name?.trim() ? (
+                <span>, {profile.name.trim().split(/\s+/)[0]}</span>
+              ) : ""}?
+            </h2>
+            <p>Scegli un'attività per continuare il tuo percorso.</p>
           </div>
 
           <div className="activity-cards-grid">
@@ -3223,12 +3268,11 @@ const screenshotUploadBoxes = [];
               <div className="action-card-content">
                 <h3 className="action-card-title">Ottimizza il tuo CV</h3>
                 <p className="action-card-description">
-                  Ricevi suggerimenti personalizzati per migliorare struttura,
+                  Suggerimenti personalizzati su struttura,
                   competenze e coerenza con gli annunci.
                 </p>
                 <button className="action-card-button" onClick={startCvPath}>
-                  <span>Inizia Ottimizzazione</span>
-                  <span className="button-arrow" aria-hidden="true">→</span>
+                  <span>Inizia</span>
                 </button>
               </div>
             </div>
@@ -3251,19 +3295,18 @@ const screenshotUploadBoxes = [];
               <div className="action-card-content">
                 <h3 className="action-card-title">Preparati al Colloquio</h3>
                 <p className="action-card-description">
-                  Allenati con domande realistiche e ricevi feedback su contenuto,
-                  chiarezza e modo di parlare.
+                  Allenati con domande realistiche e ricevi feedback su contenuto e
+                  chiarezza.
                 </p>
                 <button className="action-card-button" onClick={() => transitionToStep("gym")}>
                   <span>Avvia simulazione</span>
-                  <span className="button-arrow" aria-hidden="true">→</span>
                 </button>
               </div>
             </div>
           </div>
 
           <p className="activity-footer-note">
-            Potrai modificare il tuo percorso in qualsiasi momento.
+            Puoi cambiare attività in qualsiasi momento.
           </p>
         </section>
       )}
@@ -3281,7 +3324,7 @@ const screenshotUploadBoxes = [];
           onSubmit={continuePersonalizedPath}
           validation={jobValidation}
           isValidating={jobValidation.status === "validating"}
-          submitLabel={personalizeIntent === "cv" ? "Continua al CV" : "Continua alla simulazione"}
+          submitLabel={personalizeIntent === "cv" ? "Continua" : "Continua alla simulazione"}
         />
       )}
 
@@ -3988,7 +4031,7 @@ const screenshotUploadBoxes = [];
       {step === "cv-strategy" && (
         <section className="cv-strategy-page">
           <div className="cv-strategy-heading">
-            <h2>Analisi Strategica CV</h2>
+            <h2>Analisi CV</h2>
             <p>
               {cvStrategyTargetRole} presso {cvStrategyTargetCompany}
             </p>
@@ -4003,73 +4046,41 @@ const screenshotUploadBoxes = [];
             >
               <span>{cvStrategyOverallScore}%</span>
             </div>
-            <h3>Valutazione CV completata</h3>
+            <h3>Punteggio complessivo</h3>
             <p>
               {getItalianCvIntroSummary(cvOptimizationAnalysis, cvStrategyTargetRole, cvStrategyTargetCompany)}
             </p>
           </div>
 
           <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Punteggi</h3>
-            </div>
-            <div className="scores-grid cv-job-scores">
-              {cvStrategyScoreItems.map((item) => (
-                <div className="cv-score-tile" key={item.label}>
-                  <strong>{item.value}</strong>
-                  <p>{item.label}</p>
-                </div>
-              ))}
+            <div
+              className="scores-grid cv-job-scores"
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 12,
+              }}
+            >
+              {cvStrategyScoreItems.map((item) => {
+                const scoreRaw = Number(item.value);
+                const score = Number.isFinite(scoreRaw) ? scoreRaw : 0;
+
+                const numberColor =
+                  score < 50
+                    ? "#ff3b3b" // rosso (50 escluso)
+                    : score < 70
+                      ? "#ff9f1a" // arancione (70 escluso)
+                      : "#22c55e"; // verde (70-100)
+
+                return (
+                  <div className="cv-score-tile" key={item.label}>
+                    <strong style={{ color: numberColor }}>{score}</strong>
+                    <p>{item.label}</p>
+                  </div>
+                );
+              })}
             </div>
           </div>
-
-          {cvStrategyScoreExplanation?.summary && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span>i</span>
-                <h3>Perché questo punteggio</h3>
-              </div>
-              <p className="cv-strategy-note">{cvStrategyScoreExplanation.summary}</p>
-              {Array.isArray(cvStrategyScoreExplanation.explanation) && cvStrategyScoreExplanation.explanation.length > 0 && (
-                <ul className="cv-score-explanation-list">
-                  {cvStrategyScoreExplanation.explanation.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          {cvOptimizationAnalysis?.ats_analysis && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span>i</span>
-                <h3>ATS simulato</h3>
-              </div>
-              <div className="ats-summary-grid">
-                <div>
-                  <strong>{cvOptimizationAnalysis.ats_analysis.ats_score || cvOptimizationAnalysis.ats_score || 0}</strong>
-                  <p>Compatibilità ATS stimata</p>
-                </div>
-                <div>
-                  <strong>{Math.round((cvOptimizationAnalysis.ats_analysis.keyword_coverage || 0) * 100)}%</strong>
-                  <p>Copertura keyword</p>
-                </div>
-              </div>
-              {cvAtsPresentKeywords.length > 0 && (
-                <>
-                  <p className="cv-strategy-note">Parole chiave già presenti</p>
-                  <div className="tag-row cv-skill-tags">
-                    {cvAtsPresentKeywords.map((keyword) => (
-                      <span key={keyword}>{keyword}</span>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
 
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
@@ -4081,7 +4092,20 @@ const screenshotUploadBoxes = [];
               const normalizedItem = normalizeStrategyItem(item);
               return (
                 <div className="cv-strategy-item success" key={`${normalizedItem.description}-${index}`}>
-                  <span>✓</span>
+                  <span aria-hidden="true" style={{ display: "grid", placeItems: "center" }}>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M6 9l4 7 8-14" />
+                    </svg>
+                  </span>
                   <div>
                     {normalizedItem.title && <strong>{normalizedItem.title}</strong>}
                     <p>{normalizedItem.description}</p>
@@ -4102,7 +4126,21 @@ const screenshotUploadBoxes = [];
               const normalizedItem = normalizeStrategyItem(item);
               return (
                 <div className="cv-strategy-item warning" key={`${normalizedItem.description}-${index}`}>
-                  <span>!</span>
+                  <span aria-hidden="true" style={{ display: "grid", placeItems: "center" }}>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M12 16v.01" />
+                      <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4" />
+                    </svg>
+                  </span>
                   <div>
                     {normalizedItem.title && <strong>{normalizedItem.title}</strong>}
                     <p>{normalizedItem.description}</p>
@@ -4140,26 +4178,6 @@ const screenshotUploadBoxes = [];
             )}
           </div>
 
-          <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span className="success">+</span>
-              <h3>Competenze già presenti nel CV</h3>
-            </div>
-            <p className="cv-strategy-note">
-              Queste competenze sono state rilevate nel documento corrente e non richiedono conferma.
-            </p>
-            {presentSkillItems.length > 0 ? (
-              <div className="cv-present-skills-list">
-                {presentSkillItems.map((item) => (
-                  <span key={`present-${item.id}`}>{item.name}</span>
-                ))}
-              </div>
-            ) : (
-              <p className="cv-strategy-note">Nessuna competenza specifica rilevata automaticamente.</p>
-            )}
-          </div>
-
-
           <button className="cv-next-button" onClick={() => transitionToStep("cv-optimize-details")}>
             Continua con l'ottimizzazione
           </button>
@@ -4171,7 +4189,7 @@ const screenshotUploadBoxes = [];
           <div className="cv-strategy-heading">
             <h2>
               {[
-                "Valuta i suggerimenti del coach",
+                "Suggerimenti del coach",
                 "Valuta skill e keyword",
                 "Informazioni extra",
                 "Modifiche accettate",
@@ -4180,17 +4198,47 @@ const screenshotUploadBoxes = [];
             </h2>
             <p>
               {[
-                "Valuta un suggerimento alla volta. Dopo la scelta vedrai lo stato e passerai automaticamente al successivo.",
-                "Valuta una skill o keyword alla volta. Accetta solo competenze reali, supportate da un esempio verificabile.",
+                "Esamina ogni suggerimento e decidi cosa applicare al tuo CV.",
+                "Conferma solo le competenze che possiedi davvero. Puoi aggiungere un esempio per renderle più credibili.",
                 "Aggiungi solo informazioni reali e verificabili, pertinenti al CV e alla candidatura corrente.",
                 "Controlla tutte le modifiche che saranno applicate al nuovo CV.",
                 "Genera il nuovo documento mantenendo stile e struttura del CV originale, ampliandolo solo quando necessario.",
               ][cvOptimizationStage]}
             </p>
-            <div className="cv-stage-progress" aria-label="Avanzamento ottimizzazione CV">
+          <div className="cv-stage-progress" aria-label="Avanzamento ottimizzazione CV">
               {["Suggerimenti", "Skill", "Informazioni", "Riepilogo", "Generazione"].map((label, index) => (
-                <span className={index <= cvOptimizationStage ? "active" : ""} key={label}>
-                  {index + 1}. {label}
+                <span
+                  className={index <= cvOptimizationStage ? "active" : ""}
+                  key={label}
+                >
+                  {index === 0 ? (
+                    <span className="cv-stage-progress-bulb" aria-hidden="true">
+                      💡
+                    </span>
+                  ) : index === 1 ? (
+                    <span className="cv-stage-progress-pentagon" aria-hidden="true" />
+                  ) : index === 2 ? (
+                    <span className="cv-stage-progress-plus" aria-hidden="true">
+                      +
+                    </span>
+                  ) : index === 3 ? (
+                    <span className="cv-stage-progress-summary-icon" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  ) : index === 4 ? (
+                    <span className="cv-stage-progress-sparkle" aria-hidden="true">
+                      <SparkleIcon size={12} />
+                    </span>
+                  ) : (
+                    <span className="cv-stage-progress-number" aria-hidden="true">
+                      {index + 1}.
+                    </span>
+                  )}
+                  <span className={index === 0 ? "cv-stage-progress-label" : ""}>
+                    {label}
+                  </span>
                 </span>
               ))}
             </div>
@@ -4198,107 +4246,118 @@ const screenshotUploadBoxes = [];
 
           {cvOptimizationStage === 0 && (
             <>
-          <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Suggerimenti del coach</h3>
-            </div>
-            {currentCoachSuggestion ? (
-              <div className="ai-suggestion-card-list">
-                {[currentCoachSuggestion].map((suggestion) => {
-                  const index = coachSuggestions.findIndex((item) => item.id === suggestion.id);
-                  const suggestionStatus = selectedCoachSuggestions[suggestion.id] || "pending";
-                  const isAccepted = suggestionStatus === "accepted";
-                  const isRejected = suggestionStatus === "rejected";
+              <div className="cv-strategy-section cv-optimize-details-page__suggestions">
+                <div className="cv-strategy-section-title">
+                  <span>i</span>
+                  <h3>Modifiche consigliate</h3>
+                </div>
+                {currentCoachSuggestion ? (
+                  <div className="ai-suggestion-card-list">
+                    {[currentCoachSuggestion].map((suggestion) => {
+                      const index = coachSuggestions.findIndex((item) => item.id === suggestion.id);
+                      const suggestionStatus = selectedCoachSuggestions[suggestion.id] || "pending";
+                      const isAccepted = suggestionStatus === "accepted";
+                      const isRejected = suggestionStatus === "rejected";
 
-                  return (
-                    <div className={`coach-suggestion-option ai-suggestion-card ${suggestionStatus}`} key={suggestion.id}>
-                      <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
-                      <span>
-                        <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
-                        <b>{suggestion.title}</b>
-                        <small><b>Categoria:</b> {suggestion.category_label}</small>
-                        <small><b>Sezione:</b> {suggestion.section}</small>
-                        <small>{suggestion.reason || suggestion.description}</small>
-                        <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
-                        {suggestion.original_text.length > 300 && (
-                          <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
-                            {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
-                          </button>
-                        )}
-                        <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
-                        {suggestion.proposed_text.length > 300 && (
-                          <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
-                            {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
-                          </button>
-                        )}
-                        {suggestion.keywords_added.length > 0 && (
-                          <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
-                        )}
-                        <small className={`suggestion-status-pill ${suggestionStatus}`}>
-                          Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
-                        </small>
-                        <div className="suggestion-choice-actions" aria-label={`Scelta per ${suggestion.title}`}>
+                      return (
+                        <div className={`coach-suggestion-option ai-suggestion-card ${suggestionStatus}`} key={suggestion.id}>
+                          <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
+                          <span>
+                            <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
+                            <b>{suggestion.title}</b>
+                            <small><b>Categoria:</b> {suggestion.category_label}</small>
+                            <small><b>Sezione:</b> {suggestion.section}</small>
+                            <small>{suggestion.reason || suggestion.description}</small>
+                            <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
+                            {suggestion.original_text.length > 300 && (
+                              <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
+                                {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
+                              </button>
+                            )}
+                            <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
+                            {suggestion.proposed_text.length > 300 && (
+                              <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
+                                {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
+                              </button>
+                            )}
+                            {suggestion.keywords_added.length > 0 && (
+                              <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
+                            )}
+                            <small className={`suggestion-status-pill ${suggestionStatus}`}>
+                              Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
+                            </small>
+                            <div className="suggestion-choice-actions" aria-label={`Scelta per ${suggestion.title}`}>
+                              <button
+                                className={`suggestion-choice-button accept ${isAccepted ? "active" : ""}`}
+                                type="button"
+                                aria-pressed={isAccepted}
+                                onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}
+                              >
+                                <span aria-hidden="true">✓</span>
+                                Accetta
+                              </button>
+                              <button
+                                className={`suggestion-choice-button reject ${isRejected ? "active" : ""}`}
+                                type="button"
+                                aria-pressed={isRejected}
+                                onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}
+                              >
+                                <span aria-hidden="true">✖</span>
+                                Rifiuta
+                              </button>
+                            </div>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="cv-strategy-note">
+                    Nessun suggerimento applicabile generato. Puoi continuare aggiungendo informazioni extra reali.
+                  </p>
+                )}
+                {decidedCoachSuggestions.length > 0 && (
+                  <div className="reviewed-choice-list">
+                    {decidedCoachSuggestions.map((item) => {
+                      const status = selectedCoachSuggestions[item.id];
+                      return (
+                        <div className={`reviewed-choice ${status}`} key={`reviewed-${item.id}`}>
+                          <span>{status === "accepted" ? "✓" : "×"}</span>
+                          <strong>{item.title}</strong>
+                          <small>{status === "accepted" ? "Accettato" : "Rifiutato"}</small>
                           <button
-                            className={`suggestion-choice-button accept ${isAccepted ? "active" : ""}`}
+                            className="reviewed-choice-edit"
                             type="button"
-                            aria-pressed={isAccepted}
-                            onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}
+                            onClick={() => updateCoachSuggestionStatus(item.id, "pending")}
                           >
-                            <span aria-hidden="true">✓</span>
-                            Accetta
-                          </button>
-                          <button
-                            className={`suggestion-choice-button reject ${isRejected ? "active" : ""}`}
-                            type="button"
-                            aria-pressed={isRejected}
-                            onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}
-                          >
-                            <span aria-hidden="true">✖</span>
-                            Rifiuta
+                            Modifica
                           </button>
                         </div>
-                      </span>
-                    </div>
-                  );
-                })}
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ) : (
-              <p className="cv-strategy-note">
-                Nessun suggerimento applicabile generato. Puoi continuare aggiungendo informazioni extra reali.
-              </p>
-            )}
-            {decidedCoachSuggestions.length > 0 && (
-              <div className="reviewed-choice-list">
-                {decidedCoachSuggestions.map((item) => {
-                  const status = selectedCoachSuggestions[item.id];
-                  return (
-                    <div className={`reviewed-choice ${status}`} key={`reviewed-${item.id}`}>
-                      <span>{status === "accepted" ? "✓" : "×"}</span>
-                      <strong>{item.title}</strong>
-                      <small>{status === "accepted" ? "Accettato" : "Rifiutato"}</small>
-                      <button
-                        className="reviewed-choice-edit"
-                        type="button"
-                        onClick={() => updateCoachSuggestionStatus(item.id, "pending")}
-                      >
-                        Modifica
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
 
-          <button
-            className="cv-next-button"
-            type="button"
-            onClick={() => setCvOptimizationStage(1)}
-            disabled={!allCoachSuggestionsReviewed}
-          >
-            {allCoachSuggestionsReviewed ? "Continua con skill e keyword" : "Valuta tutti i suggerimenti per continuare"}
-          </button>
+              <button
+                className="cv-next-button"
+                type="button"
+                onClick={() => setCvOptimizationStage(1)}
+                disabled={!allCoachSuggestionsReviewed}
+              >
+                {allCoachSuggestionsReviewed ? "Continua con skill e keyword" : "Valuta tutti i suggerimenti per continuare"}
+              </button>
+
+              <button
+                className="cv-next-button cv-return-analysis-button"
+                type="button"
+                onClick={() => {
+                  setCvOptimizationStage(0);
+                  transitionToStep("cv-strategy");
+                }}
+              >
+                Torna all'analisi
+              </button>
             </>
           )}
 
@@ -4324,19 +4383,13 @@ const screenshotUploadBoxes = [];
                         <small>{item.type === "keywordConfirmation" ? "Keyword ATS" : "Skill"} {index + 1} di {proposedSkillConfirmationItems.length}</small>
                         <b>{item.name}</b>
                         <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
-                        <small><b>Perche puo essere utile:</b> {item.reason}</small>
+                        <small><b>Perché è utile:</b> {item.reason}</small>
                         <small>
                           <b>Stato:</b> {item.already_present
-                            ? "Risulta gia presente o supportata dal CV."
+                            ? "Risulta già presente o supportata dal CV."
                             : "Non risulta chiaramente presente nel CV."}
                         </small>
-                        {!item.already_present && (
-                          <small>
-                            {item.type === "keywordConfirmation"
-                              ? "Puoi accettare questa keyword. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."
-                              : "Puoi accettare subito la skill. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."}
-                          </small>
-                        )}
+
                         <label className="cv-additional-field">
                           <span>Dove l'hai usata? (facoltativo)</span>
                           <textarea
@@ -4418,161 +4471,247 @@ const screenshotUploadBoxes = [];
           )}
 
           {cvOptimizationStage === 2 && (
-          <div className="cv-strategy-section cv-additional-data-form">
-            <div className="cv-strategy-section-title">
-              <span>+</span>
-              <h3>Informazioni extra</h3>
-            </div>
+            <>
+              <div className="cv-strategy-section cv-additional-data-form">
+                <div className="cv-strategy-section-title">
+                  <span>+</span>
+                  <h3>Informazioni extra</h3>
+                </div>
 
-            <TagInput
-              label="Hard Skills"
-              placeholder="Es. Python, Data Analysis, SQL..."
-              value={cvAdditionalData.technical_skills || ""}
-              onChange={(value) => updateCvAdditionalData("technical_skills", value)}
-            />
+                <TagInput
+                  label="Hard Skills"
+                  placeholder="Es. Python, Data Analysis, SQL..."
+                  value={cvAdditionalData.technical_skills || ""}
+                  onChange={(value) => updateCvAdditionalData("technical_skills", value)}
+                />
 
-            <TagInput
-              label="Soft Skills"
-              placeholder="Es. Problem Solving, Teamwork..."
-              value={cvAdditionalData.soft_skills || ""}
-              onChange={(value) => updateCvAdditionalData("soft_skills", value)}
-            />
+                <TagInput
+                  label="Soft Skills"
+                  placeholder="Es. Problem Solving, Teamwork..."
+                  value={cvAdditionalData.soft_skills || ""}
+                  onChange={(value) => updateCvAdditionalData("soft_skills", value)}
+                />
 
-            <TagInput
-              label="Parole Chiave / Tool"
-              placeholder="Es. Jira, SCRUM, B2B..."
-              value={cvAdditionalData.tools || ""}
-              onChange={(value) => updateCvAdditionalData("tools", value)}
-            />
-
-            <label
-              className={[
-                "cv-additional-field",
-                cvFieldErrors.additional.additional_notes ? "has-error" : "",
-              ].filter(Boolean).join(" ")}
-            >
-              <span>Vuoi aggiungere altre note generali?</span>
-              <textarea
-                value={cvAdditionalData.additional_notes}
-                onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
-                placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
-                rows={4}
-              />
-              <small>
-                Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
-              </small>
-              {cvFieldErrors.additional.additional_notes && (
-                <small className="cv-field-error">{cvFieldErrors.additional.additional_notes}</small>
-              )}
-            </label>
-
-            {cvOptimizationQuestions.length > 0 && (
-              <div className="coach-suggestion-group">
-                <strong>Domande facoltative</strong>
-                {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
-                  <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
-                    <span>{question.question}</span>
-                    <textarea
-                      value={cvAdaptationAnswers[index] || ""}
-                      onChange={(event) => updateCvAdaptationAnswer(index, event.target.value)}
-                      placeholder="Risposta facoltativa: aggiungi solo dettagli reali e verificabili."
-                      rows={3}
-                    />
-                    {question.reason && <small>{question.reason}</small>}
-                    {cvFieldErrors.adaptation[index] && (
-                      <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
-                    )}
-                  </label>
-                ))}
+                <TagInput
+                  label="Parole Chiave / Tool"
+                  placeholder="Es. Jira, SCRUM, B2B..."
+                  value={cvAdditionalData.tools || ""}
+                  onChange={(value) => updateCvAdditionalData("tools", value)}
+                />
               </div>
-            )}
 
-            {cvAdditionalDataError && (
-              <p className="cv-additional-error">{cvAdditionalDataError}</p>
-            )}
+              <div className="cv-strategy-section cv-additional-data-form">
+                <label
+                  className={[
+                    "cv-additional-field",
+                    cvFieldErrors.additional.additional_notes ? "has-error" : "",
+                  ].filter(Boolean).join(" ")}
+                >
+                  <span>Vuoi aggiungere altre note generali?</span>
+                  <textarea
+                    value={cvAdditionalData.additional_notes}
+                    onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
+                    placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
+                    rows={4}
+                  />
+                  <small>
+                    Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
+                  </small>
+                  {cvFieldErrors.additional.additional_notes && (
+                    <small className="cv-field-error">{cvFieldErrors.additional.additional_notes}</small>
+                  )}
+                </label>
 
-            <div className="cv-stage-actions">
-              <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(1)}>
-                Torna a skill e keyword
-              </button>
-              <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(3)}>
-                Continua al riepilogo
-              </button>
-            </div>
-          </div>
+                {cvOptimizationQuestions.length > 0 && (
+                  <div className="coach-suggestion-group">
+                    <strong>Domande facoltative</strong>
+                    {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
+                      <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
+                        <span>{question.question}</span>
+                        <textarea
+                          value={cvAdaptationAnswers[index] || ""}
+                          onChange={(event) => updateCvAdaptationAnswer(index, event.target.value)}
+                          placeholder="Risposta facoltativa: aggiungi solo dettagli reali e verificabili."
+                          rows={3}
+                        />
+                        {question.reason && <small>{question.reason}</small>}
+                        {cvFieldErrors.adaptation[index] && (
+                          <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {cvAdditionalDataError && (
+                  <p className="cv-additional-error">{cvAdditionalDataError}</p>
+                )}
+
+                <div className="cv-stage-actions">
+                  <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(3)}>
+                    Continua al riepilogo
+                  </button>
+                  <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(1)}>
+                    Torna a skill e keyword
+                  </button>
+                </div>
+              </div>
+            </>
           )}
 
           {cvOptimizationStage === 3 && (
             <>
-          <div className="cv-strategy-section confirmed-changes-summary">
-            <div className="cv-strategy-section-title">
-              <span>+</span>
-              <h3>Modifiche accettate</h3>
-            </div>
-            {[
-              ["Profilo", confirmedChangesSummary.profile],
-              ["Competenze", confirmedChangesSummary.skills],
-              ["Esperienze", confirmedChangesSummary.experience],
-              ["Formazione", confirmedChangesSummary.education],
-              ["Progetti", confirmedChangesSummary.projects],
-            ].map(([label, items]) => (
-              <div className="coach-suggestion-group" key={`summary-${label}`}>
-                <strong>{label}</strong>
-                {items.length > 0 ? (
-                  items.map((item, index) => (
-                    <div className="cv-strategy-item success" key={`summary-${label}-${item.id || item.name || index}`}>
-                      <span>+</span>
-                      <div>
-                        <strong>{item.title || item.name}</strong>
-                        {(item.proposed_text || item.user_example || item.detail || item.section) && (
-                          <p>{item.proposed_text || item.user_example || item.detail || item.section}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <p className="cv-strategy-note">Nessuna modifica accettata.</p>
-                )}
+          <div className="cv-review-summary">
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon target">⊙</span>
+                  <h3>Candidatura</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => transitionToStep("personalize")}>
+                  Modifica
+                </button>
+              </header>
+              <div className="cv-review-fields">
+                <div>
+                  <span>Azienda</span>
+                  <strong>{cvStrategyTargetCompany}</strong>
+                </div>
+                <div>
+                  <span>Ruolo</span>
+                  <strong>{cvStrategyTargetRole}</strong>
+                </div>
               </div>
-            ))}
+            </section>
+
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon idea">✧</span>
+                  <h3>Suggerimenti</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(0)}>
+                  Modifica
+                </button>
+              </header>
+              <div className="cv-review-status-row">
+                <span>Applicati</span>
+                <strong>✓ {cvSummaryApplicationStatus}</strong>
+              </div>
+              {selectedCoachSuggestionItems.length > 0 && (
+                <div className="cv-review-compact-list">
+                  {selectedCoachSuggestionItems.slice(0, 4).map((item, index) => (
+                    <span key={`review-suggestion-${item.id || index}`}>{item.title}</span>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon star">☆</span>
+                  <h3>Skill accettate</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(1)}>
+                  Modifica
+                </button>
+              </header>
+              {[
+                ["HARD", cvSummaryAcceptedSkillGroups.hard],
+                ["SOFT", cvSummaryAcceptedSkillGroups.soft],
+                ["TOOL", cvSummaryAcceptedSkillGroups.tool],
+              ].map(([label, items]) => (
+                <div className="cv-review-skill-row" key={`review-skill-${label}`}>
+                  <div className="cv-review-divider">
+                    <span>{label}</span>
+                  </div>
+                  {items.length > 0 ? (
+                    <div className="cv-review-tags">
+                      {items.map((item) => (
+                        <span key={`${label}-${item}`}>{item}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>Nessuna skill confermata.</p>
+                  )}
+                </div>
+              ))}
+            </section>
+
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon plus">+</span>
+                  <h3>Informazioni extra</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(2)}>
+                  Modifica
+                </button>
+              </header>
+              {cvSummaryExtraItems.length > 0 ? (
+                <div className="cv-review-extra-list">
+                  {cvSummaryExtraItems.map((item, index) => (
+                    <div key={`review-extra-${index}`}>
+                      <strong>{item.title}</strong>
+                      <p>{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="cv-review-empty">Nessuna informazione extra aggiunta.</p>
+              )}
+            </section>
           </div>
 
           <div className="cv-stage-actions">
-            <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(2)}>
-              Modifica informazioni extra
-            </button>
             <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(4)}>
               Continua alla generazione
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(2)}>
+              Modifica informazioni extra
             </button>
           </div>
             </>
           )}
 
           {cvOptimizationStage === 4 && (
-          <div className="cv-strategy-section optimized-cv-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Genera CV ottimizzato</h3>
+          <div className="cv-generation-card">
+            <div className="cv-generation-copy">
+              <h3>Cosa verrà generato</h3>
+              <p>
+                Un CV ottimizzato per <strong>{cvStrategyTargetRole}</strong> presso <strong>{cvStrategyTargetCompany}</strong>, mantenendo stile e struttura originali.
+              </p>
             </div>
-            <p className="cv-strategy-note">
-              Genera una versione adattata alla candidatura applicando solo le modifiche selezionate e usando solo informazioni reali o accettate.
-            </p>
-            <div className="optimized-cv-actions">
+
+            <div className="cv-generation-summary">
+              <div>
+                <span aria-hidden="true">✓</span>
+                <p><strong>{selectedCoachSuggestionItems.length}</strong> suggerimenti del coach applicati</p>
+              </div>
+              <div>
+                <span aria-hidden="true">✓</span>
+                <p><strong>{acceptedSkillConfirmations.length}</strong> skill accettate, <strong>{rejectedSkillConfirmations.length}</strong> rifiutate</p>
+              </div>
+              <div>
+                <span aria-hidden="true">✓</span>
+                <p>
+                  {cvSummaryExtraItems.length > 0
+                    ? `${cvSummaryExtraItems.length} informazioni extra aggiunte`
+                    : "Nessuna informazione extra aggiunta"}
+                </p>
+              </div>
+            </div>
+
+            <div className="cv-generation-actions">
               <button
-                className="cv-next-button"
+                className="cv-generation-button"
                 type="button"
                 onClick={optimizeCv}
                 disabled={loading}
               >
+                <SparkleIcon size={14} />
                 {loading ? "Sto generando il tuo CV ottimizzato..." : "Genera CV ottimizzato"}
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => setCvOptimizationStage(3)}
-                disabled={loading}
-              >
-                Torna alle modifiche accettate
               </button>
             </div>
           </div>

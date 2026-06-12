@@ -9532,12 +9532,12 @@ def build_fallback_cv_job_evaluation(
     strengths = [
         "Il CV contiene elementi utili per una prima valutazione della candidatura.",
         "La struttura include sezioni riconoscibili di un curriculum.",
-        "Sono presenti alcune informazioni confrontabili con ruolo e descrizione inseriti.",
+        "Sono presenti informazioni confrontabili con ruolo e descrizione inseriti.",
     ]
     weaknesses = [
         f"Rendi più evidente la coerenza con il ruolo {role}." if role else "Rendi più chiaro l'obiettivo professionale.",
-        "Valorizza soltanto competenze e parole chiave già presenti nel CV o confermate dall'utente.",
-        "Rendi più specifiche le attività descritte, senza aggiungere risultati o responsabilità non documentati.",
+        "Valorizza solo competenze e parole chiave già presenti nel CV o confermate dall'utente.",
+        "Rendi più specifiche le attività descritte, senza aggiungere risultati non documentati.",
     ]
 
     evaluation = {
@@ -9576,7 +9576,7 @@ def build_fallback_cv_job_evaluation(
         ],
         "questions_for_user": questions_for_user,
         "cv_text": cv_text,
-        "summary": "Il CV e valido e analizzabile. Per renderlo piu competitivo, va personalizzato meglio rispetto a ruolo, azienda e descrizione inseriti.",
+        "summary": "Il CV è valido ma va personalizzato su ruolo, azienda e parole chiave per essere competitivo.",
     }
     evaluation["score_explanation"] = build_cv_score_explanation(evaluation)
     evaluation["coach_suggestions"] = build_cv_job_suggestions(evaluation, allow_llm=False)
