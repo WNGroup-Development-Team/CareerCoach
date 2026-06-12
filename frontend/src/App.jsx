@@ -4,6 +4,18 @@ import "./App.css";
 import logoCareerCoach from "./assets/career-coach-logo.png";
 import PersonalizeExperience from "./PersonalizeExperience";
 import TagInput from "./TagInput";
+import {
+  SparkleIcon,
+  LinkedInIcon,
+  LinkIcon,
+  InstagramIcon,
+  CheckCircleIcon,
+  ExportIcon,
+  BrainIcon,
+  HammerIcon,
+  PuzzleIcon,
+} from "./digital-icons";
+
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
@@ -81,19 +93,11 @@ const previewSuggestionText = (value = "", expanded = false) => {
   return `${text.slice(0, 300).trim()}...`;
 };
 
-const formatCvPreviewSectionLabel = (section = "") => {
-  const normalized = String(section || "").replace(/_/g, " ").trim();
-  if (!normalized) {
-    return "Sezione";
-  }
-  if (normalized.toUpperCase() === normalized) {
-    return normalized;
-  }
-  return normalized
-    .split(" ")
-    .map((word) => word ? word[0].toUpperCase() + word.slice(1) : "")
-    .join(" ");
-};
+const splitTagList = (value = "") =>
+  String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 
 const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => {
   if (!item) {
@@ -107,9 +111,6 @@ const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => 
     return null;
   }
   const idSource = item.id || `${category}-${title}-${description}-${index}`;
-  const section = item.section || title || label;
-  const originalText = item.original_text || item.original || item.source_text || item.action || section;
-  const proposedText = item.proposed_text || item.replacement || item.new_text || description || item.action || title;
   return {
     id: String(idSource).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
     type: item.type || "",
@@ -118,9 +119,9 @@ const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => 
     title,
     description,
     action: item.action || item.coach_tip || item.suggestion || "",
-    section,
-    original_text: originalText,
-    proposed_text: proposedText,
+    section: item.section || "",
+    original_text: item.original_text || item.original || "",
+    proposed_text: item.proposed_text || item.replacement || "",
     reason: item.reason || item.description || "",
     supported_by_cv: item.supported_by_cv !== false,
     keywords_added: Array.isArray(item.keywords_added) ? item.keywords_added : [],
@@ -178,7 +179,7 @@ const getConfirmationCategoryLabel = (category = "") => {
 };
 
 const isActionableCoachSuggestion = (item) =>
-  (item?.type === "actionableEdit" || (item?.supported_by_cv !== false && Boolean(item?.section?.trim()))) &&
+  item?.type === "actionableEdit" &&
   Boolean(item.section?.trim()) &&
   Boolean(item.original_text?.trim()) &&
   Boolean(item.proposed_text?.trim()) &&
@@ -204,12 +205,9 @@ const getCoachSuggestionsFromAnalysis = (analysis) => {
     return [];
   }
   if (Array.isArray(analysis.coach_suggestions) && analysis.coach_suggestions.length) {
-    const actionableSuggestions = analysis.coach_suggestions
+    return analysis.coach_suggestions
       .map((item, index) => normalizeCoachSuggestion(item, index, item.category || "phrases"))
       .filter(isActionableCoachSuggestion);
-    if (actionableSuggestions.length > 0) {
-      return actionableSuggestions;
-    }
   }
 
   const generated = [
@@ -1926,17 +1924,14 @@ function App() {
     const userAdditionalData = skipAdditional
       ? {}
       : {
-        ...cvAdditionalData,
         additional_notes: cvAdditionalData.additional_notes || "",
+        adaptation_answers: cvOptimizationQuestions.map((question, index) => ({
+          question: question.question,
+          reason: question.reason,
+          category: question.category,
+          answer: cvAdaptationAnswers[index] || "",
+        })).filter((item) => item.answer.trim()),
       };
-    const adaptationAnswers = Object.entries(cvAdaptationAnswers)
-      .map(([index, answer]) => ({
-        question: `Domanda extra ${Number(index) + 1}`,
-        reason: "",
-        category: "approfondimento",
-        answer: String(answer || "").trim(),
-      }))
-      .filter((item) => item.answer);
     const confirmedSkillPayload = acceptedSkillConfirmations.map((item) => ({
       id: item.id,
       type: item.type,
@@ -1958,10 +1953,7 @@ function App() {
       status: "rejected",
       target_section: item.target_section,
     }));
-    const hasAdditionalInfo =
-      Boolean(Object.values(userAdditionalData).some((value) => typeof value === "string" && value.trim())) ||
-      adaptationAnswers.length > 0 ||
-      confirmedSkillPayload.length > 0;
+    const hasAdditionalInfo = Boolean(userAdditionalData.additional_notes?.trim()) || (userAdditionalData.adaptation_answers || []).length > 0 || confirmedSkillPayload.length > 0;
     if (selectedCoachSuggestionItems.filter(isActionableCoachSuggestion).length === 0 && !hasAdditionalInfo) {
       setError("Non hai accettato modifiche da applicare.");
       return;
@@ -2003,9 +1995,8 @@ function App() {
           accepted_suggestions: selectedCoachSuggestionItems.filter(isActionableCoachSuggestion),
           rejected_suggestions: rejectedCoachSuggestionItems,
           user_additional_data: userAdditionalData,
-          additionalInfo: userAdditionalData,
-          answers: adaptationAnswers,
-          extraAnswers: adaptationAnswers,
+          answers: userAdditionalData.adaptation_answers || [],
+          extraAnswers: userAdditionalData.adaptation_answers || [],
           confirmedSkills: confirmedSkillPayload,
           acceptedSkillConfirmations: confirmedSkillPayload,
           rejectedSkillConfirmations: rejectedSkillPayload,
@@ -3008,6 +2999,14 @@ function App() {
   ]
     .map((item) => normalizeStrategyItem(item, "Adattamento consigliato"))
     .filter((item) => item.description || item.title);
+  const cvOptimizationQuestions = (cvOptimizationAnalysis?.optimization_questions || []).length > 0
+    ? cvOptimizationAnalysis.optimization_questions
+    : recommendedAdaptations.map((item, index) => ({
+      id: `fallback_${index}`,
+      question: getAdaptationQuestion(item, index),
+      reason: item.description || item.coach_tip || "",
+      category: "approfondimento",
+    }));
   const formatHistoryDate = (value) => {
     if (!value) return "";
     const normalized = String(value).trim().replace(" ", "T");
@@ -3112,25 +3111,53 @@ function App() {
         title: "Informazioni extra confermate",
         detail: cvAdditionalData.additional_notes.trim(),
       }] : []),
+      ...Object.entries(cvAdaptationAnswers)
+        .filter(([, answer]) => String(answer || "").trim())
+        .map(([index, answer]) => ({
+          id: `answer-${index}`,
+          title: cvOptimizationQuestions[Number(index)]?.category || "Risposta extra confermata",
+          detail: String(answer).trim(),
+      })),
     ],
   };
-  const screenshotUploadBoxes = [
-    {
-      type: "instagram",
-      title: "Screenshot Instagram",
-      description: "Carica schermate del profilo, della bio o dei post pubblici visibili.",
-    },
-    {
-      type: "facebook",
-      title: "Screenshot Facebook",
-      description: "Utile quando Facebook richiede il login e impedisce il recupero automatico.",
-    },
-    {
-      type: "other",
-      title: "Screenshot di un altro profilo",
-      description: "Puoi caricare schermate di TikTok, GitHub, portfolio o altri profili pubblici.",
-    },
+  const cvSummaryAcceptedSkillGroups = {
+    hard: [
+      ...acceptedSkillConfirmations.filter((item) => !["soft_skill", "tool"].includes(item.category)).map((item) => item.name),
+      ...splitTagList(cvAdditionalData.technical_skills),
+    ],
+    soft: [
+      ...acceptedSkillConfirmations.filter((item) => item.category === "soft_skill").map((item) => item.name),
+      ...splitTagList(cvAdditionalData.soft_skills),
+    ],
+    tool: [
+      ...acceptedSkillConfirmations.filter((item) => item.category === "tool").map((item) => item.name),
+      ...splitTagList(cvAdditionalData.tools),
+    ],
+  };
+  Object.keys(cvSummaryAcceptedSkillGroups).forEach((key) => {
+    cvSummaryAcceptedSkillGroups[key] = cvSummaryAcceptedSkillGroups[key].filter((item, index, list) =>
+      item && list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
+    );
+  });
+  const cvSummaryExtraItems = [
+    ...(cvAdditionalData.additional_notes?.trim() ? [{
+      title: "Note generali",
+      detail: cvAdditionalData.additional_notes.trim(),
+    }] : []),
+    ...Object.entries(cvAdaptationAnswers)
+      .filter(([, answer]) => String(answer || "").trim())
+      .map(([index, answer]) => ({
+        title: cvOptimizationQuestions[Number(index)]?.question || "Risposta extra",
+        detail: String(answer).trim(),
+      })),
   ];
+  const cvSummaryAcceptedSuggestionCount = selectedCoachSuggestionItems.length;
+  const cvSummaryReviewedSuggestionCount = decidedCoachSuggestions.length || coachSuggestions.length;
+  const cvSummaryApplicationStatus = cvSummaryReviewedSuggestionCount > 0
+    ? `${cvSummaryAcceptedSuggestionCount} su ${cvSummaryReviewedSuggestionCount}`
+    : "0 su 0";
+  const cvSummaryJobLink = personalizeForm.link.trim() || cvOptimizationAnalysis?.target?.link || cvOptimizationAnalysis?.job_link || "";
+const screenshotUploadBoxes = [];
 
   return (
     <div className={step === "auth" ? "page auth-page" : "page"}>
@@ -3212,11 +3239,13 @@ function App() {
       {step === "home" && (
         <section className="home-page">
           <div className="home-heading">
-            <h2>Cosa vuoi fare oggi?</h2>
-            <p>Seleziona un’attività per continuare il tuo percorso.</p>
-            <p className="activity-orientation-text">
-              Puoi iniziare migliorando il CV oppure allenarti subito con una simulazione personalizzata.
-            </p>
+            <h2>
+              Cosa vuoi fare oggi
+              {userId && profile?.name?.trim() ? (
+                <span>, {profile.name.trim().split(/\s+/)[0]}</span>
+              ) : ""}?
+            </h2>
+            <p>Scegli un'attività per continuare il tuo percorso.</p>
           </div>
 
           <div className="activity-cards-grid">
@@ -3239,12 +3268,11 @@ function App() {
               <div className="action-card-content">
                 <h3 className="action-card-title">Ottimizza il tuo CV</h3>
                 <p className="action-card-description">
-                  Ricevi suggerimenti personalizzati per migliorare struttura,
+                  Suggerimenti personalizzati su struttura,
                   competenze e coerenza con gli annunci.
                 </p>
                 <button className="action-card-button" onClick={startCvPath}>
-                  <span>Inizia Ottimizzazione</span>
-                  <span className="button-arrow" aria-hidden="true">→</span>
+                  <span>Inizia</span>
                 </button>
               </div>
             </div>
@@ -3267,35 +3295,36 @@ function App() {
               <div className="action-card-content">
                 <h3 className="action-card-title">Preparati al Colloquio</h3>
                 <p className="action-card-description">
-                  Allenati con domande realistiche e ricevi feedback su contenuto,
-                  chiarezza e modo di parlare.
+                  Allenati con domande realistiche e ricevi feedback su contenuto e
+                  chiarezza.
                 </p>
                 <button className="action-card-button" onClick={() => transitionToStep("gym")}>
                   <span>Avvia simulazione</span>
-                  <span className="button-arrow" aria-hidden="true">→</span>
                 </button>
               </div>
             </div>
           </div>
 
           <p className="activity-footer-note">
-            Potrai modificare il tuo percorso in qualsiasi momento.
+            Puoi cambiare attività in qualsiasi momento.
           </p>
         </section>
       )}
 
       {step === "personalize" && (
-      <PersonalizeExperience
-        company={personalizeForm.company}
-        goal={personalizeForm.goal}
-        role={personalizeForm.role}
-        sector={personalizeForm.sector}
-        onBack={() => transitionToStep("home")}
-        onChange={updatePersonalizeForm}
-        onSubmit={continuePersonalizedPath}
+        <PersonalizeExperience
+          company={personalizeForm.company}
+          goal={personalizeForm.goal}
+          link={personalizeForm.link}
+          role={personalizeForm.role}
+          roleLevel={personalizeForm.role_level}
+          sector={personalizeForm.sector}
+          onBack={() => transitionToStep("home")}
+          onChange={updatePersonalizeForm}
+          onSubmit={continuePersonalizedPath}
           validation={jobValidation}
           isValidating={jobValidation.status === "validating"}
-          submitLabel={personalizeIntent === "cv" ? "Continua al CV" : "Continua alla simulazione"}
+          submitLabel={personalizeIntent === "cv" ? "Continua" : "Continua alla simulazione"}
         />
       )}
 
@@ -3506,6 +3535,14 @@ function App() {
               selectCvFile(event.dataTransfer.files?.[0]);
             }}
           >
+            {isCvDragging && (
+              <div className="cv-drop-overlay" aria-hidden="true">
+                <div className="cv-drop-overlay-inner">
+                  <strong>Rilascia per caricare</strong>
+                  <span>PDF o DOCX fino a 5MB</span>
+                </div>
+              </div>
+            )}
             <div className="cv-upload-icon">CV</div>
             <h3>Trascina qui il tuo CV</h3>
             <p>PDF o DOCX fino a 5 MB</p>
@@ -3517,9 +3554,12 @@ function App() {
               accept=".pdf,.docx"
               onChange={(event) => selectCvFile(event.target.files?.[0])}
             />
-            <label className="browse-file-btn" htmlFor="cv-file-input">
-              Sfoglia file
-            </label>
+            <div className="cv-file-choose-row">
+              <label className="browse-file-btn" htmlFor="cv-file-input">
+                Scegli file
+              </label>
+              <span className="cv-file-choose-hint">oppure trascina qui il CV</span>
+            </div>
           </div>
 
           <div className="cv-format-note">
@@ -3575,355 +3615,423 @@ function App() {
       )}
 
       {step === "cv-digital" && (
-        <section className="cv-flow-page digital-profile-page">
-          <div className="cv-loaded-card">
-            <span className="cv-loaded-check" aria-hidden="true">✓</span>
-            <div>
-              <h2>CV caricato correttamente</h2>
-              <p>
-                <strong>{profile.cv_filename || "CV"}</strong> è pronto per l'analisi.
-              </p>
-            </div>
-          </div>
+        <section className="cv-flow-page digital-profile-page digital-redesign-page">
 
-          <div className="cv-analysis-card digital-profile-card">
-            <h3 className="digital-profile-title">Collega i tuoi profili online</h3>
-            <p>
-              Rafforza la tua candidatura. Collega i tuoi profili social per permettere
-              all'AI di analizzare la coerenza tra il tuo CV e la tua presenza online.
-            </p>
+          <div className="digital-redesign-cards">
+            {/* Card 1: LinkedIn + extra URL + export + Instagram */}
+            <div className="digital-card digital-card--main">
+              <h3 className="digital-card-title">Collega i tuoi profili online</h3>
+              <p className="digital-card-subtitle">Permettici di confrontare il tuo CV con la tua presenza digitale</p>
 
-            <label>LinkedIn Profile Link</label>
-            {isLinkedInConnected && (
-              <div className="linkedin-connected-badge">
-                <span aria-hidden="true">✓</span>
-                <div>
-                  <strong>LinkedIn collegato</strong>
-                  <p>Accesso effettuato tramite LinkedIn.</p>
+              {isLinkedInConnected && (
+                <div className="linkedin-connected-badge digital-compact-badge">
+                  <span aria-hidden="true">✓</span>
+                  <div>
+                    <strong>LinkedIn collegato</strong>
+                    <p>Accesso effettuato tramite LinkedIn.</p>
+                  </div>
                 </div>
-              </div>
-            )}
-            <input
-              value={digitalPresence.linkedin_url}
-              onChange={(event) => updateDigitalPresence("linkedin_url", event.target.value)}
-              placeholder="https://linkedin.com/in/tuonome"
-            />
-            <p className="linkedin-access-note">
-              Dal link pubblico possiamo verificare il profilo e leggere solo dati base o
-              snippet pubblici. Le sezioni complete di LinkedIn richiedono autorizzazioni dedicate.
-            </p>
-
-            <div className="linkedin-export-box">
-              <div>
-                <strong>Confronto completo con LinkedIn</strong>
-                <p>
-                  Carica l'esportazione PDF del tuo profilo LinkedIn per confrontare
-                  esperienze, formazione e competenze con il CV.
-                </p>
-              </div>
-
-              <input
-                id="linkedin-profile-file"
-                ref={linkedinFileInputRef}
-                type="file"
-                accept=".pdf,.docx"
-                onChange={(event) => uploadLinkedinProfile(event.target.files?.[0])}
-              />
-
-              {profile.linkedin_profile_uploaded ? (
-                <div className="linkedin-export-status">
-                  <span>
-                    File pronto: <strong>{profile.linkedin_profile_filename}</strong>
-                  </span>
-                  <button type="button" onClick={deleteLinkedinProfile} disabled={loading}>
-                    Rimuovi
-                  </button>
-                </div>
-              ) : (
-                <label className="linkedin-export-button" htmlFor="linkedin-profile-file">
-                  Carica esportazione LinkedIn
-                </label>
               )}
 
-              {linkedinUploadMessage && <p className="linkedin-upload-message">{linkedinUploadMessage}</p>}
-            </div>
+              <div className="digital-fields">
+                <label className="digital-field-label">
+                  <span className="digital-field-icon" aria-hidden="true">
+                    <LinkedInIcon />
+                  </span>
+                  LinkedIn
+                </label>
+                <input
+                  className="digital-input"
+                  value={digitalPresence.linkedin_url}
+                  onChange={(event) => updateDigitalPresence("linkedin_url", event.target.value)}
+                  placeholder="https://linkedin.com/in/tuonome"
+                  autoComplete="off"
+                />
 
-            <label>Link aggiuntivo <span>(opzionale)</span></label>
-            <input
-              value={digitalPresence.portfolio_url}
-              onChange={(event) => updateDigitalPresence("portfolio_url", event.target.value)}
-              placeholder="https://..."
-            />
-            <p className="linkedin-access-note">
-              Puoi inserire qualsiasi URL pubblico: un altro profilo social, un sito
-              personale o una pagina professionale. Se il contenuto non e accessibile,
-              viene segnalato senza inventare un'analisi.
-            </p>
-
-            <label>Instagram <span>(opzionale)</span></label>
-            <input
-              value={digitalPresence.instagram_handle}
-              onChange={(event) => updateDigitalPresence("instagram_handle", event.target.value)}
-              placeholder="@tuo_handle"
-            />
-            <p className="linkedin-access-note">
-              Proviamo automaticamente a recuperare i media visibili dal link pubblico.
-              Se Instagram blocca il recupero o il profilo e privato, puoi caricare
-              qui sotto uno screenshot leggibile del profilo e della bio.
-            </p>
-
-            <div className="cv-analysis-card linkedin-basic-card">
-              <h3>Completa il controllo delle immagini</h3>
-              <p>
-                Puoi caricare fino a 8 screenshot per ciascun profilo. Le immagini vengono
-                analizzate senza essere salvate come file. Il testo visibile viene estratto
-                per controllare identità, bio e coerenza con il CV.
-              </p>
-              <div className="screenshot-upload-grid">
-                {screenshotUploadBoxes.map((box) => {
-                  const isCurrentAnalysis =
-                    screenshotAnalysisProgress.active && screenshotAnalysisProgress.profileType === box.type;
-                  return (
-                    <div className="screenshot-upload-box" key={box.type}>
-                      <h4>{box.title}</h4>
-                      <p>{box.description}</p>
-                      <input
-                        id={`social-screenshot-files-${box.type}`}
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        multiple
-                        disabled={screenshotAnalysisProgress.active}
-                        onChange={(event) => {
-                          analyzeSocialScreenshots(box.type, event.target.files);
-                          event.target.value = "";
-                        }}
-                      />
-                      <label
-                        className={`linkedin-export-button ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
-                        htmlFor={`social-screenshot-files-${box.type}`}
-                      >
-                        {isCurrentAnalysis ? "Analisi in corso..." : "Carica screenshot"}
-                      </label>
-                      {isCurrentAnalysis && (
-                        <div className="screenshot-analysis-progress" role="status">
-                          <div className="screenshot-analysis-spinner" />
-                          <div>
-                            <strong>
-                              Analisi locale di {screenshotAnalysisProgress.fileCount}{" "}
-                              {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
-                            </strong>
-                            <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
-                          </div>
-                        </div>
-                      )}
-                      {socialScreenshotMessages[box.type] && (
-                        <p className="linkedin-upload-message">{socialScreenshotMessages[box.type]}</p>
-                      )}
+                <div
+                  className="digital-export-dropzone digital-export-dropzone--linkedin"
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (loading) return;
+                    uploadLinkedinProfile(event.dataTransfer.files?.[0]);
+                  }}
+                >
+                  <label className="digital-export-zone-copy" htmlFor="linkedin-profile-file">
+                    <span className="digital-export-icon" aria-hidden="true">
+                      <ExportIcon size={18} />
+                    </span>
+                    <div>
+                      <strong>Esportazione LinkedIn</strong>
+                      <p>Carica il PDF del tuo profilo (o DOCX) per il confronto con il CV.</p>
+                      <small className="digital-export-drop-hint">oppure trascina qui il file</small>
                     </div>
-                  );
-                })}
+                  </label>
+
+                  <input
+                    id="linkedin-profile-file"
+                    className="digital-file-input"
+                    ref={linkedinFileInputRef}
+                    type="file"
+                    accept=".pdf,.docx"
+                    onChange={(event) => uploadLinkedinProfile(event.target.files?.[0])}
+                  />
+
+                  {profile.linkedin_profile_uploaded ? (
+                    <div className="linkedin-export-status">
+                      <span>
+                        File pronto: <strong>{profile.linkedin_profile_filename}</strong>
+                      </span>
+                      <button type="button" onClick={deleteLinkedinProfile} disabled={loading}>
+                        Rimuovi
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="digital-export-button" htmlFor="linkedin-profile-file">
+                      Carica esportazione
+                    </label>
+                  )}
+
+                  {linkedinUploadMessage && <p className="linkedin-upload-message">{linkedinUploadMessage}</p>}
+                </div>
+
+                <label className="digital-field-label">
+                  <span className="digital-field-icon" aria-hidden="true">
+                    <LinkIcon />
+                  </span>
+                  Link aggiuntivo <span className="optional-pill">opzionale</span>
+                </label>
+                <input
+                  className="digital-input"
+                  value={digitalPresence.portfolio_url}
+                  onChange={(event) => updateDigitalPresence("portfolio_url", event.target.value)}
+                  placeholder="https://..."
+                  autoComplete="off"
+                />
+                <p className="digital-field-hint">
+                  Portfolio, sito personale o altro profilo social. Se non accessibile, verrà segnalato nell'analisi.
+                </p>
+
+                <label className="digital-field-label">
+                  <span className="digital-field-icon" aria-hidden="true">
+                    <InstagramIcon />
+                  </span>
+                  Instagram <span className="optional-pill">opzionale</span>
+                </label>
+                <input
+                  className="digital-input"
+                  value={digitalPresence.instagram_handle}
+                  onChange={(event) => updateDigitalPresence("instagram_handle", event.target.value)}
+                  placeholder="@tuo_handle"
+                  autoComplete="off"
+                />
+
+                {!canAnalyzeDigitalPresence && (
+                  <p className="digital-profile-help">
+                    Inserisci almeno un profilo online oppure salta questo passaggio.
+                  </p>
+                )}
               </div>
             </div>
 
-            <p className="privacy-note">
-              <span aria-hidden="true">i</span>
-              I profili inseriti verranno usati solo per valutare la coerenza professionale del tuo percorso.
-            </p>
+            {/* Card 2: screenshots */}
+            <div className="digital-card digital-card--screens">
+              <h3 className="digital-card-title">Screenshot del profilo</h3>
+              <p className="digital-card-subtitle">Fino a 8 immagini — vengono analizzate e non salvate</p>
 
-            {!canAnalyzeDigitalPresence && (
-              <p className="digital-profile-help">
-                Inserisci almeno un profilo online oppure salta questo passaggio.
-              </p>
-            )}
+              <div
+                className={`screenshot-dropzone digital-screenshot-dropzone ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+
+                  if (screenshotAnalysisProgress.active) {
+                    return;
+                  }
+
+                  const dt = event.dataTransfer;
+
+                  const filesFromList = dt?.files ? Array.from(dt.files) : [];
+                  const filesFromItems = dt?.items
+                    ? Array.from(dt.items)
+                        .map((item) => item?.getAsFile?.())
+                        .filter(Boolean)
+                    : [];
+
+                  const files = [...filesFromList, ...filesFromItems];
+
+                  if (!files.length) {
+                    setSocialScreenshotMessages((current) => ({
+                      ...current,
+                      instagram:
+                        "Non sono riuscito a riconoscere file immagine dal trascinamento. Usa “Scegli file” oppure trascina un PNG/JPG/WebP dal file system.",
+                    }));
+                    return;
+                  }
+
+                  const imageFiles = files.filter((f) =>
+                    (f?.type || "").startsWith("image/")
+                  );
+
+                  if (!imageFiles.length) {
+                    setSocialScreenshotMessages((current) => ({
+                      ...current,
+                      instagram:
+                        "Formato non supportato: trascina immagini (PNG/JPG/WebP) oppure usa “Scegli file”.",
+                    }));
+                    return;
+                  }
+
+                  analyzeSocialScreenshots("instagram", imageFiles);
+                }}
+              >
+                <div className="screenshot-dropzone-content">
+                  <h4>Trascina le screenshot qui</h4>
+                  <p>Oppure usa “Scegli file”.</p>
+
+                  <input
+                    id="social-screenshot-files"
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    multiple
+                    disabled={screenshotAnalysisProgress.active}
+                    onChange={(event) => {
+                      analyzeSocialScreenshots("instagram", event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                  <label
+                    className={`digital-upload-button ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
+                    htmlFor="social-screenshot-files"
+                  >
+                    {screenshotAnalysisProgress.active ? "Analisi in corso..." : "Scegli file"}
+                  </label>
+
+                  {screenshotAnalysisProgress.active && (
+                    <div className="screenshot-analysis-progress" role="status">
+                      <div className="screenshot-analysis-spinner" />
+                      <div>
+                        <strong>
+                          Analisi locale di {screenshotAnalysisProgress.fileCount}{" "}
+                          {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
+                        </strong>
+                        <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {socialScreenshotMessages.instagram && (
+                    <p className="linkedin-upload-message">{socialScreenshotMessages.instagram}</p>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
 
+          {/* bottom text + CTA */}
+          <p className="privacy-note digital-privacy-bottom">
+            <span aria-hidden="true">i</span>
+            I profili inseriti verranno usati solo per valutare la coerenza professionale del tuo percorso.
+          </p>
+
           <button
-            className="cv-next-button digital-analyze-btn"
+            className="digital-cta-button"
             onClick={analyzeDigitalPresence}
             disabled={loading || !canAnalyzeDigitalPresence}
           >
-            <span>Analizza Coerenza Digitale</span>
+            <span className="digital-cta-sparkle" aria-hidden="true">
+              <SparkleIcon size={18} />
+            </span>
+            Analizza coerenza digitale
           </button>
 
-          <button className="cv-skip-button" onClick={() => transitionToStep("home")}>
+          <a
+            className="digital-skip-link"
+            onClick={() => transitionToStep("home")}
+          >
             Salta per ora
-          </button>
+          </a>
         </section>
       )}
 
       {step === "cv-analysis" && (
-        <section className="cv-flow-page">
+        <section className="cv-flow-page digital-profile-page digital-redesign-page">
           <div className="cv-analysis-heading">
             <h2>Analisi Coerenza Digitale</h2>
-            <p>Confronto tra il tuo CV e i profili online.</p>
+            <p>Confronto tra il tuo CV e i profili online: cosa è allineato e cosa migliorare.</p>
           </div>
 
-          <div className="cv-score-card">
-            <div
-              className="cv-score-ring"
-              style={{
-                background: `radial-gradient(circle at center, #ffffff 58%, transparent 60%), conic-gradient(#3d735e 0 ${digitalAnalysis?.score || 0}%, #dfe8ef ${digitalAnalysis?.score || 0}% 100%)`,
-              }}
-            >
-              <span>{digitalAnalysis?.score || 0}%</span>
-            </div>
-            <h3>{digitalAnalysis?.headline || "Analisi completata"}</h3>
-            <p>
-              {digitalAnalysis?.summary ||
-                "Abbiamo confrontato CV, LinkedIn e profili inseriti per stimare l'impatto sul tuo profilo professionale."}
-            </p>
-          </div>
+          <div className="digital-redesign-cards">
+            {/* Card 1: score */}
+            <div className="digital-card digital-card--main">
+              <h3 className="digital-card-title">Score di coerenza</h3>
+              <p className="digital-card-subtitle">Quanto il tuo CV “parla” lo stesso linguaggio della tua presenza online</p>
 
-          <h3 className="cv-detail-title">Dettagli Analisi</h3>
+              <div
+                className="digital-analysis-score"
+                style={{
+                  background: `radial-gradient(circle at center, #ffffff 58%, transparent 60%), conic-gradient(#139ff2 0 ${digitalCoherenceScore}%, #dfe8ef ${digitalCoherenceScore}% 100%)`,
+                }}
+              >
+                <span>{digitalCoherenceScore}%</span>
+              </div>
 
-          {digitalAnalysis?.analysis_evidence && (
-            <div className="cv-analysis-card linkedin-basic-card">
-              <h3>Cosa abbiamo confrontato davvero</h3>
-              <p>
-                CV del profilo:{" "}
-                {digitalAnalysis.analysis_evidence.cv_profile_loaded
-                  ? `caricato (${digitalAnalysis.analysis_evidence.cv_filename || profile.cv_filename || "CV"})`
-                  : "non disponibile"}
-              </p>
-              <p>
-                PDF LinkedIn:{" "}
-                {digitalAnalysis.analysis_evidence.linkedin_export_compared
-                  ? `caricato e confrontato (${digitalAnalysis.analysis_evidence.linkedin_export_filename || profile.linkedin_profile_filename || "PDF LinkedIn"})`
-                  : "non caricato"}
-              </p>
-              <p>
-                Link LinkedIn pubblico: {digitalAnalysis.analysis_evidence.linkedin_public_identity?.message}
-              </p>
-              <p>
-                Fonti API/OAuth ufficiali:{" "}
-                {(digitalAnalysis.analysis_evidence.official_profile_source_count || 0) > 0 ? (
-                  <>
-                    <strong>{digitalAnalysis.analysis_evidence.official_profile_source_count}</strong>
-                    {digitalAnalysis.analysis_evidence.linkedin_official_identity?.message
-                      ? ` - ${digitalAnalysis.analysis_evidence.linkedin_official_identity.message}`
-                      : ""}
-                  </>
-                ) : (
-                  "non collegate"
-                )}
-              </p>
-              <p>
-                Profili pubblici verificati:{" "}
-                <strong>{digitalAnalysis.analysis_evidence.verified_profile_count || 0}</strong>
-              </p>
-              {!digitalAnalysis.analysis_evidence.can_compare_with_cv && (
-                <p>
-                  {digitalAnalysis.analysis_evidence.zero_score_reason}
-                </p>
-              )}
-              <p>
-                Instagram:{" "}
-                {digitalAnalysis.analysis_evidence.instagram_media_analyzed
-                  ? "screenshot o contenuti caricati analizzati"
-                  : digitalAnalysis.analysis_evidence.public_preview_analyzed
-                    ? "analizzata solo un'anteprima pubblica del profilo; foto e post non sono stati analizzati"
-                  : digitalAnalysis.analysis_evidence.instagram_metadata_found
-                    ? "profilo rintracciabile sul web: foto, video e post non sono stati analizzati"
-                    : "profilo non accessibile: foto e post non sono stati analizzati"}
-              </p>
-              <p>
-                Bio Instagram:{" "}
-                {digitalAnalysis.analysis_evidence.instagram_bio_analyzed
-                  ? "testo estratto dallo screenshot e confrontato con il ruolo target"
-                  : "non analizzata; carica uno screenshot leggibile della bio"}
-              </p>
-              {digitalAnalysis.analysis_evidence.social_text_analyses?.instagram?.evaluation?.bio_candidate && (
-                <p>
-                  Testo profilo rilevato:{" "}
-                  <strong>
-                    {digitalAnalysis.analysis_evidence.social_text_analyses.instagram.evaluation.bio_candidate}
-                  </strong>
-                </p>
-              )}
-              <p>
-                Anteprime pubbliche analizzate:{" "}
-                <strong>
-                  {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_preview_count || 0}
-                </strong>
-                {" "}· Screenshot/contenuti caricati:{" "}
-                <strong>
-                  {digitalAnalysis.analysis_evidence.visual_media_analysis?.analyzed_content_count || 0}
-                </strong>
-              </p>
-              <p>
-                Impatto delle analisi visuali sul punteggio:{" "}
-                <strong>
-                  {(digitalAnalysis.analysis_evidence.visual_score_adjustment || 0) > 0 ? "+" : ""}
-                  {digitalAnalysis.analysis_evidence.visual_score_adjustment || 0}
-                </strong>
-              </p>
-              <p>
-                Link aggiuntivo:{" "}
-                {digitalAnalysis.analysis_evidence.additional_link?.message}
+
+              <h4 style={{ margin: "14px 0 6px", color: "#263548", fontSize: 18, fontWeight: 900 }}>
+                {displayedDigitalAnalysis?.headline || digitalCoherenceScore >= 75
+                  ? "Allineamento forte"
+                  : digitalCoherenceScore >= 45
+                    ? "Buona base, margine di crescita"
+                    : "Coerenza da migliorare"}
+              </h4>
+              <p style={{ margin: 0, color: "#6d7784", fontWeight: 800, lineHeight: 1.45, fontSize: 13 }}>
+                {displayedDigitalAnalysis?.summary ||
+                  "Abbiamo confrontato CV, LinkedIn e i profili inseriti per stimare l'impatto sul tuo profilo professionale."}
               </p>
             </div>
-          )}
 
-          {(displayedDigitalAnalysis?.findings || []).map((finding, index) => (
-            <div
-              className={`cv-detail-card ${finding.status === "warning" ? "warning" : "success"}`}
-              key={`${finding.title}-${index}`}
-            >
-              <h4>{finding.title}</h4>
-              <p>{finding.description}</p>
-              {finding.coach_tip && (
-                <div className="coach-tip">
-                  <strong>Il consiglio del coach</strong>
-                  <p>{finding.coach_tip}</p>
+            {/* Card 2: evidence */}
+            {digitalAnalysis?.analysis_evidence && (
+              <div className="digital-card digital-card--main">
+                <h3 className="digital-card-title">Cosa abbiamo confrontato davvero</h3>
+                <p className="digital-card-subtitle">Trasparenza su fonti e contenuti usati nell'analisi</p>
+
+                <div className="digital-fields">
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>CV:</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.cv_profile_loaded
+                      ? `caricato (${digitalAnalysis.analysis_evidence.cv_filename || profile.cv_filename || "CV"})`
+                      : "non disponibile"}
+                  </p>
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>LinkedIn (export):</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.linkedin_export_compared
+                      ? `caricato e confrontato (${digitalAnalysis.analysis_evidence.linkedin_export_filename || profile.linkedin_profile_filename || "PDF LinkedIn"})`
+                      : "non caricato"}
+                  </p>
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>LinkedIn pubblico:</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.linkedin_public_identity?.message || "—"}
+                  </p>
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>Fonti ufficiali:</strong>{" "}
+                    {(digitalAnalysis.analysis_evidence.official_profile_source_count || 0) > 0
+                      ? `${digitalAnalysis.analysis_evidence.official_profile_source_count} collegate${digitalAnalysis.analysis_evidence.linkedin_official_identity?.message ? ` - ${digitalAnalysis.analysis_evidence.linkedin_official_identity.message}` : ""}`
+                      : "non collegate"}
+                  </p>
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>Profili verificati:</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.verified_profile_count || 0}
+                  </p>
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>Instagram:</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.instagram_media_analyzed
+                      ? "screenshot o contenuti caricati analizzati"
+                      : digitalAnalysis.analysis_evidence.public_preview_analyzed
+                        ? "analizzata solo un'anteprima pubblica del profilo; foto e post non sono stati analizzati"
+                        : digitalAnalysis.analysis_evidence.instagram_metadata_found
+                          ? "profilo rintracciabile sul web: foto, video e post non sono stati analizzati"
+                          : "profilo non accessibile: foto e post non sono stati analizzati"}
+                  </p>
+
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>Bio Instagram:</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.instagram_bio_analyzed
+                      ? "testo estratto dallo screenshot e confrontato con il ruolo target"
+                      : "non analizzata; carica uno screenshot leggibile della bio"}
+                  </p>
+
+                  {digitalAnalysis.analysis_evidence.visual_media_analysis && (
+                    <p className="digital-field-hint" style={{ margin: 0 }}>
+                      <strong style={{ color: "#263548" }}>Impatto analisi visuali:</strong>{" "}
+                      {(digitalAnalysis.analysis_evidence.visual_score_adjustment || 0) > 0 ? "+" : ""}
+                      {digitalAnalysis.analysis_evidence.visual_score_adjustment || 0}
+                    </p>
+                  )}
+
+                  <p className="digital-field-hint" style={{ margin: 0 }}>
+                    <strong style={{ color: "#263548" }}>Link aggiuntivo:</strong>{" "}
+                    {digitalAnalysis.analysis_evidence.additional_link?.message || "—"}
+                  </p>
                 </div>
-              )}
-            </div>
-          ))}
+              </div>
+            )}
 
-          {["provider_not_configured", "provider_unavailable"].includes(
-            digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
-          ) && (
-            <div className="cv-analysis-card linkedin-basic-card">
-              <h3>Analisi visuale da configurare</h3>
-              <p>
-                Per analizzare gratuitamente le immagini in locale, installa Ollama, esegui
-                <strong> ollama pull moondream</strong> e assicurati che il servizio
-                Ollama sia avviato.
-              </p>
-              {digitalAnalysis?.analysis_evidence?.visual_media_analysis?.message && (
-                <p>{digitalAnalysis.analysis_evidence.visual_media_analysis.message}</p>
-              )}
-            </div>
-          )}
+            {/* Card 3: findings */}
+            <div className="digital-card digital-card--main">
+              <h3 className="digital-card-title">Risultati & coach tips</h3>
+              <p className="digital-card-subtitle">Le aree più rilevanti per aumentare la coerenza</p>
 
-          {connectedDigitalProfiles.length > 0 && (
-            <div className="cv-analysis-card">
-              <h3>Profili collegati</h3>
-              <div className="source-list">
-                {connectedDigitalProfiles.map((source) => (
-                  <a
-                    href={source.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    key={getCanonicalProfileKey(source.url)}
+              <div className="digital-fields" style={{ gap: 12 }}>
+                {(displayedDigitalAnalysis?.findings || []).map((finding, index) => (
+                  <div
+                    className={`cv-detail-card ${finding.status === "warning" ? "warning" : "success"}`}
+                    key={`${finding.title}-${index}`}
                   >
-                    {source.title || source.url}
-                  </a>
+                    <h4>{finding.title}</h4>
+                    <p>{finding.description}</p>
+                    {finding.coach_tip && (
+                      <div className="coach-tip">
+                        <strong>Il consiglio del coach</strong>
+                        <p>{finding.coach_tip}</p>
+                      </div>
+                    )}
+                  </div>
                 ))}
+
+                {["provider_not_configured", "provider_unavailable"].includes(
+                  digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
+                ) && (
+                  <div className="cv-analysis-card linkedin-basic-card" style={{ borderRadius: 14 }}>
+                    <h3 style={{ margin: "0 0 10px", fontSize: 18 }}>Analisi visuale da configurare</h3>
+                    <p style={{ margin: 0, color: "#6d7784", fontWeight: 800, lineHeight: 1.5, fontSize: 13 }}>
+                      Per analizzare gratuitamente le immagini in locale, installa Ollama, esegui
+                      <strong> ollama pull moondream</strong> e assicurati che il servizio Ollama sia avviato.
+                    </p>
+                    {digitalAnalysis?.analysis_evidence?.visual_media_analysis?.message && (
+                      <p style={{ margin: "8px 0 0", color: "#6d7784", fontWeight: 800, lineHeight: 1.5, fontSize: 13 }}>
+                        {digitalAnalysis.analysis_evidence.visual_media_analysis.message}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {connectedDigitalProfiles.length > 0 && (
+                  <div className="cv-analysis-card" style={{ borderRadius: 14 }}>
+                    <h3 style={{ margin: "0 0 10px", fontSize: 18 }}>Profili collegati</h3>
+                    <div className="source-list" style={{ justifyContent: "flex-start" }}>
+                      {connectedDigitalProfiles.map((source) => (
+                        <a
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          key={getCanonicalProfileKey(source.url)}
+                        >
+                          {source.title || source.url}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
-          )}
+          </div>
 
-          <button className="cv-next-button" onClick={() => transitionToStep("home")}>
-            Vai alla home
+          <button className="digital-cta-button" onClick={() => transitionToStep("home")}>
+            Torna alla home
           </button>
         </section>
       )}
 
+
       {step === "cv-strategy" && (
         <section className="cv-strategy-page">
           <div className="cv-strategy-heading">
-            <h2>Analisi Strategica CV</h2>
+            <h2>Analisi CV</h2>
             <p>
               {cvStrategyTargetRole} presso {cvStrategyTargetCompany}
             </p>
@@ -3938,73 +4046,41 @@ function App() {
             >
               <span>{cvStrategyOverallScore}%</span>
             </div>
-            <h3>Valutazione CV completata</h3>
+            <h3>Punteggio complessivo</h3>
             <p>
               {getItalianCvIntroSummary(cvOptimizationAnalysis, cvStrategyTargetRole, cvStrategyTargetCompany)}
             </p>
           </div>
 
           <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Punteggi</h3>
-            </div>
-            <div className="scores-grid cv-job-scores">
-              {cvStrategyScoreItems.map((item) => (
-                <div className="cv-score-tile" key={item.label}>
-                  <strong>{item.value}</strong>
-                  <p>{item.label}</p>
-                </div>
-              ))}
+            <div
+              className="scores-grid cv-job-scores"
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 12,
+              }}
+            >
+              {cvStrategyScoreItems.map((item) => {
+                const scoreRaw = Number(item.value);
+                const score = Number.isFinite(scoreRaw) ? scoreRaw : 0;
+
+                const numberColor =
+                  score < 50
+                    ? "#ff3b3b" // rosso (50 escluso)
+                    : score < 70
+                      ? "#ff9f1a" // arancione (70 escluso)
+                      : "#22c55e"; // verde (70-100)
+
+                return (
+                  <div className="cv-score-tile" key={item.label}>
+                    <strong style={{ color: numberColor }}>{score}</strong>
+                    <p>{item.label}</p>
+                  </div>
+                );
+              })}
             </div>
           </div>
-
-          {cvStrategyScoreExplanation?.summary && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span>i</span>
-                <h3>Perché questo punteggio</h3>
-              </div>
-              <p className="cv-strategy-note">{cvStrategyScoreExplanation.summary}</p>
-              {Array.isArray(cvStrategyScoreExplanation.explanation) && cvStrategyScoreExplanation.explanation.length > 0 && (
-                <ul className="cv-score-explanation-list">
-                  {cvStrategyScoreExplanation.explanation.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
-          {cvOptimizationAnalysis?.ats_analysis && (
-            <div className="cv-strategy-section">
-              <div className="cv-strategy-section-title">
-                <span>i</span>
-                <h3>ATS simulato</h3>
-              </div>
-              <div className="ats-summary-grid">
-                <div>
-                  <strong>{cvOptimizationAnalysis.ats_analysis.ats_score || cvOptimizationAnalysis.ats_score || 0}</strong>
-                  <p>Compatibilità ATS stimata</p>
-                </div>
-                <div>
-                  <strong>{Math.round((cvOptimizationAnalysis.ats_analysis.keyword_coverage || 0) * 100)}%</strong>
-                  <p>Copertura keyword</p>
-                </div>
-              </div>
-              {cvAtsPresentKeywords.length > 0 && (
-                <>
-                  <p className="cv-strategy-note">Parole chiave già presenti</p>
-                  <div className="tag-row cv-skill-tags">
-                    {cvAtsPresentKeywords.map((keyword) => (
-                      <span key={keyword}>{keyword}</span>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
 
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
@@ -4016,7 +4092,20 @@ function App() {
               const normalizedItem = normalizeStrategyItem(item);
               return (
                 <div className="cv-strategy-item success" key={`${normalizedItem.description}-${index}`}>
-                  <span>✓</span>
+                  <span aria-hidden="true" style={{ display: "grid", placeItems: "center" }}>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M6 9l4 7 8-14" />
+                    </svg>
+                  </span>
                   <div>
                     {normalizedItem.title && <strong>{normalizedItem.title}</strong>}
                     <p>{normalizedItem.description}</p>
@@ -4037,7 +4126,21 @@ function App() {
               const normalizedItem = normalizeStrategyItem(item);
               return (
                 <div className="cv-strategy-item warning" key={`${normalizedItem.description}-${index}`}>
-                  <span>!</span>
+                  <span aria-hidden="true" style={{ display: "grid", placeItems: "center" }}>
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M12 16v.01" />
+                      <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4" />
+                    </svg>
+                  </span>
                   <div>
                     {normalizedItem.title && <strong>{normalizedItem.title}</strong>}
                     <p>{normalizedItem.description}</p>
@@ -4075,26 +4178,6 @@ function App() {
             )}
           </div>
 
-          <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span className="success">+</span>
-              <h3>Competenze già presenti nel CV</h3>
-            </div>
-            <p className="cv-strategy-note">
-              Queste competenze sono state rilevate nel documento corrente e non richiedono conferma.
-            </p>
-            {presentSkillItems.length > 0 ? (
-              <div className="cv-present-skills-list">
-                {presentSkillItems.map((item) => (
-                  <span key={`present-${item.id}`}>{item.name}</span>
-                ))}
-              </div>
-            ) : (
-              <p className="cv-strategy-note">Nessuna competenza specifica rilevata automaticamente.</p>
-            )}
-          </div>
-
-
           <button className="cv-next-button" onClick={() => transitionToStep("cv-optimize-details")}>
             Continua con l'ottimizzazione
           </button>
@@ -4106,24 +4189,56 @@ function App() {
           <div className="cv-strategy-heading">
             <h2>
               {[
-                "Valuta i suggerimenti del coach",
+                "Suggerimenti del coach",
                 "Valuta skill e keyword",
+                "Informazioni extra",
                 "Modifiche accettate",
                 "Genera CV ottimizzato",
               ][cvOptimizationStage]}
             </h2>
             <p>
               {[
-                "Valuta un suggerimento alla volta. Dopo la scelta vedrai lo stato e passerai automaticamente al successivo.",
-                "Valuta una skill o keyword alla volta. Accetta solo competenze reali, supportate da un esempio verificabile.",
+                "Esamina ogni suggerimento e decidi cosa applicare al tuo CV.",
+                "Conferma solo le competenze che possiedi davvero. Puoi aggiungere un esempio per renderle più credibili.",
+                "Aggiungi solo informazioni reali e verificabili, pertinenti al CV e alla candidatura corrente.",
                 "Controlla tutte le modifiche che saranno applicate al nuovo CV.",
                 "Genera il nuovo documento mantenendo stile e struttura del CV originale, ampliandolo solo quando necessario.",
               ][cvOptimizationStage]}
             </p>
-            <div className="cv-stage-progress" aria-label="Avanzamento ottimizzazione CV">
-              {["Suggerimenti", "Skill", "Riepilogo", "Generazione"].map((label, index) => (
-                <span className={index <= cvOptimizationStage ? "active" : ""} key={label}>
-                  {index + 1}. {label}
+          <div className="cv-stage-progress" aria-label="Avanzamento ottimizzazione CV">
+              {["Suggerimenti", "Skill", "Informazioni", "Riepilogo", "Generazione"].map((label, index) => (
+                <span
+                  className={index <= cvOptimizationStage ? "active" : ""}
+                  key={label}
+                >
+                  {index === 0 ? (
+                    <span className="cv-stage-progress-bulb" aria-hidden="true">
+                      💡
+                    </span>
+                  ) : index === 1 ? (
+                    <span className="cv-stage-progress-pentagon" aria-hidden="true" />
+                  ) : index === 2 ? (
+                    <span className="cv-stage-progress-plus" aria-hidden="true">
+                      +
+                    </span>
+                  ) : index === 3 ? (
+                    <span className="cv-stage-progress-summary-icon" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  ) : index === 4 ? (
+                    <span className="cv-stage-progress-sparkle" aria-hidden="true">
+                      <SparkleIcon size={12} />
+                    </span>
+                  ) : (
+                    <span className="cv-stage-progress-number" aria-hidden="true">
+                      {index + 1}.
+                    </span>
+                  )}
+                  <span className={index === 0 ? "cv-stage-progress-label" : ""}>
+                    {label}
+                  </span>
                 </span>
               ))}
             </div>
@@ -4131,107 +4246,118 @@ function App() {
 
           {cvOptimizationStage === 0 && (
             <>
-          <div className="cv-strategy-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Suggerimenti del coach</h3>
-            </div>
-            {currentCoachSuggestion ? (
-              <div className="ai-suggestion-card-list">
-                {[currentCoachSuggestion].map((suggestion) => {
-                  const index = coachSuggestions.findIndex((item) => item.id === suggestion.id);
-                  const suggestionStatus = selectedCoachSuggestions[suggestion.id] || "pending";
-                  const isAccepted = suggestionStatus === "accepted";
-                  const isRejected = suggestionStatus === "rejected";
+              <div className="cv-strategy-section cv-optimize-details-page__suggestions">
+                <div className="cv-strategy-section-title">
+                  <span>i</span>
+                  <h3>Modifiche consigliate</h3>
+                </div>
+                {currentCoachSuggestion ? (
+                  <div className="ai-suggestion-card-list">
+                    {[currentCoachSuggestion].map((suggestion) => {
+                      const index = coachSuggestions.findIndex((item) => item.id === suggestion.id);
+                      const suggestionStatus = selectedCoachSuggestions[suggestion.id] || "pending";
+                      const isAccepted = suggestionStatus === "accepted";
+                      const isRejected = suggestionStatus === "rejected";
 
-                  return (
-                    <div className={`coach-suggestion-option ai-suggestion-card ${suggestionStatus}`} key={suggestion.id}>
-                      <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
-                      <span>
-                        <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
-                        <b>{suggestion.title}</b>
-                        <small><b>Categoria:</b> {suggestion.category_label}</small>
-                        <small><b>Sezione:</b> {suggestion.section}</small>
-                        <small>{suggestion.reason || suggestion.description}</small>
-                        <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
-                        {suggestion.original_text.length > 300 && (
-                          <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
-                            {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
-                          </button>
-                        )}
-                        <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
-                        {suggestion.proposed_text.length > 300 && (
-                          <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
-                            {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
-                          </button>
-                        )}
-                        {suggestion.keywords_added.length > 0 && (
-                          <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
-                        )}
-                        <small className={`suggestion-status-pill ${suggestionStatus}`}>
-                          Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
-                        </small>
-                        <div className="suggestion-choice-actions" aria-label={`Scelta per ${suggestion.title}`}>
+                      return (
+                        <div className={`coach-suggestion-option ai-suggestion-card ${suggestionStatus}`} key={suggestion.id}>
+                          <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
+                          <span>
+                            <small>Suggerimento {index + 1} di {coachSuggestions.length}</small>
+                            <b>{suggestion.title}</b>
+                            <small><b>Categoria:</b> {suggestion.category_label}</small>
+                            <small><b>Sezione:</b> {suggestion.section}</small>
+                            <small>{suggestion.reason || suggestion.description}</small>
+                            <small><b>Testo originale:</b> {previewSuggestionText(suggestion.original_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:original`]))}</small>
+                            {suggestion.original_text.length > 300 && (
+                              <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "original")}>
+                                {expandedCoachSuggestionText[`${suggestion.id}:original`] ? "Mostra meno" : "Mostra di piu"}
+                              </button>
+                            )}
+                            <small><b>Modifica proposta:</b> {previewSuggestionText(suggestion.proposed_text, Boolean(expandedCoachSuggestionText[`${suggestion.id}:proposed`]))}</small>
+                            {suggestion.proposed_text.length > 300 && (
+                              <button className="inline-link-button" type="button" onClick={() => toggleCoachSuggestionPreview(suggestion.id, "proposed")}>
+                                {expandedCoachSuggestionText[`${suggestion.id}:proposed`] ? "Mostra meno" : "Mostra di piu"}
+                              </button>
+                            )}
+                            {suggestion.keywords_added.length > 0 && (
+                              <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
+                            )}
+                            <small className={`suggestion-status-pill ${suggestionStatus}`}>
+                              Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
+                            </small>
+                            <div className="suggestion-choice-actions" aria-label={`Scelta per ${suggestion.title}`}>
+                              <button
+                                className={`suggestion-choice-button accept ${isAccepted ? "active" : ""}`}
+                                type="button"
+                                aria-pressed={isAccepted}
+                                onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}
+                              >
+                                <span aria-hidden="true">✓</span>
+                                Accetta
+                              </button>
+                              <button
+                                className={`suggestion-choice-button reject ${isRejected ? "active" : ""}`}
+                                type="button"
+                                aria-pressed={isRejected}
+                                onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}
+                              >
+                                <span aria-hidden="true">✖</span>
+                                Rifiuta
+                              </button>
+                            </div>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="cv-strategy-note">
+                    Nessun suggerimento applicabile generato. Puoi continuare aggiungendo informazioni extra reali.
+                  </p>
+                )}
+                {decidedCoachSuggestions.length > 0 && (
+                  <div className="reviewed-choice-list">
+                    {decidedCoachSuggestions.map((item) => {
+                      const status = selectedCoachSuggestions[item.id];
+                      return (
+                        <div className={`reviewed-choice ${status}`} key={`reviewed-${item.id}`}>
+                          <span>{status === "accepted" ? "✓" : "×"}</span>
+                          <strong>{item.title}</strong>
+                          <small>{status === "accepted" ? "Accettato" : "Rifiutato"}</small>
                           <button
-                            className={`suggestion-choice-button accept ${isAccepted ? "active" : ""}`}
+                            className="reviewed-choice-edit"
                             type="button"
-                            aria-pressed={isAccepted}
-                            onClick={() => updateCoachSuggestionStatus(suggestion.id, "accepted")}
+                            onClick={() => updateCoachSuggestionStatus(item.id, "pending")}
                           >
-                            <span aria-hidden="true">✓</span>
-                            Accetta
-                          </button>
-                          <button
-                            className={`suggestion-choice-button reject ${isRejected ? "active" : ""}`}
-                            type="button"
-                            aria-pressed={isRejected}
-                            onClick={() => updateCoachSuggestionStatus(suggestion.id, "rejected")}
-                          >
-                            <span aria-hidden="true">✖</span>
-                            Rifiuta
+                            Modifica
                           </button>
                         </div>
-                      </span>
-                    </div>
-                  );
-                })}
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ) : (
-              <p className="cv-strategy-note">
-                Nessun suggerimento applicabile generato. Puoi continuare aggiungendo informazioni extra reali.
-              </p>
-            )}
-            {decidedCoachSuggestions.length > 0 && (
-              <div className="reviewed-choice-list">
-                {decidedCoachSuggestions.map((item) => {
-                  const status = selectedCoachSuggestions[item.id];
-                  return (
-                    <div className={`reviewed-choice ${status}`} key={`reviewed-${item.id}`}>
-                      <span>{status === "accepted" ? "✓" : "×"}</span>
-                      <strong>{item.title}</strong>
-                      <small>{status === "accepted" ? "Accettato" : "Rifiutato"}</small>
-                      <button
-                        className="reviewed-choice-edit"
-                        type="button"
-                        onClick={() => updateCoachSuggestionStatus(item.id, "pending")}
-                      >
-                        Modifica
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
 
-          <button
-            className="cv-next-button"
-            type="button"
-            onClick={() => setCvOptimizationStage(1)}
-            disabled={!allCoachSuggestionsReviewed}
-          >
-            {allCoachSuggestionsReviewed ? "Continua con skill e keyword" : "Valuta tutti i suggerimenti per continuare"}
-          </button>
+              <button
+                className="cv-next-button"
+                type="button"
+                onClick={() => setCvOptimizationStage(1)}
+                disabled={!allCoachSuggestionsReviewed}
+              >
+                {allCoachSuggestionsReviewed ? "Continua con skill e keyword" : "Valuta tutti i suggerimenti per continuare"}
+              </button>
+
+              <button
+                className="cv-next-button cv-return-analysis-button"
+                type="button"
+                onClick={() => {
+                  setCvOptimizationStage(0);
+                  transitionToStep("cv-strategy");
+                }}
+              >
+                Torna all'analisi
+              </button>
             </>
           )}
 
@@ -4257,19 +4383,13 @@ function App() {
                         <small>{item.type === "keywordConfirmation" ? "Keyword ATS" : "Skill"} {index + 1} di {proposedSkillConfirmationItems.length}</small>
                         <b>{item.name}</b>
                         <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
-                        <small><b>Perche puo essere utile:</b> {item.reason}</small>
+                        <small><b>Perché è utile:</b> {item.reason}</small>
                         <small>
                           <b>Stato:</b> {item.already_present
-                            ? "Risulta gia presente o supportata dal CV."
+                            ? "Risulta già presente o supportata dal CV."
                             : "Non risulta chiaramente presente nel CV."}
                         </small>
-                        {!item.already_present && (
-                          <small>
-                            {item.type === "keywordConfirmation"
-                              ? "Puoi accettare questa keyword. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."
-                              : "Puoi accettare subito la skill. Se aggiungi un esempio reale, verrà riformulata e inserita nella sezione più coerente del CV."}
-                          </small>
-                        )}
+
                         <label className="cv-additional-field">
                           <span>Dove l'hai usata? (facoltativo)</span>
                           <textarea
@@ -4345,93 +4465,253 @@ function App() {
             onClick={() => setCvOptimizationStage(2)}
             disabled={!allSkillConfirmationsReviewed}
           >
-            {allSkillConfirmationsReviewed ? "Continua al riepilogo" : "Valuta tutte le skill e keyword per continuare"}
+            {allSkillConfirmationsReviewed ? "Continua con le informazioni extra" : "Valuta tutte le skill e keyword per continuare"}
           </button>
             </>
           )}
 
           {cvOptimizationStage === 2 && (
             <>
-          <div className="cv-strategy-section confirmed-changes-summary">
-            <div className="cv-strategy-section-title">
-              <span>+</span>
-              <h3>Modifiche accettate</h3>
-            </div>
-            <div className="coach-suggestion-group">
-              <strong>Informazioni extra libere</strong>
-              <label className="cv-additional-field">
-                <span>Scrivi qui eventuali dettagli aggiuntivi da inserire nel CV</span>
-                <textarea
-                  value={cvAdditionalData.additional_notes}
-                  onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
-                  placeholder="Aggiungi solo informazioni reali e verificabili che vuoi vedere nel CV ottimizzato."
-                  rows={4}
+              <div className="cv-strategy-section cv-additional-data-form">
+                <div className="cv-strategy-section-title">
+                  <span>+</span>
+                  <h3>Informazioni extra</h3>
+                </div>
+
+                <TagInput
+                  label="Hard Skills"
+                  placeholder="Es. Python, Data Analysis, SQL..."
+                  value={cvAdditionalData.technical_skills || ""}
+                  onChange={(value) => updateCvAdditionalData("technical_skills", value)}
                 />
-                <small>
-                  Queste informazioni saranno usate nel CV ottimizzato solo se coerenti con il contenuto già presente.
-                </small>
-              </label>
-            </div>
-            {[
-              ["Profilo", confirmedChangesSummary.profile],
-              ["Competenze", confirmedChangesSummary.skills],
-              ["Informazioni extra", confirmedChangesSummary.projects],
-            ]
-              .filter(([, items]) => items.length > 0)
-              .map(([label, items]) => (
-                <div className="coach-suggestion-group" key={`summary-${label}`}>
-                  <strong>{label}</strong>
-                  {items.map((item, index) => (
-                    <div className="cv-strategy-item success" key={`summary-${label}-${item.id || item.name || index}`}>
-                      <span>+</span>
-                      <div>
-                        <strong>{item.title || item.name}</strong>
-                        {(item.proposed_text || item.user_example || item.detail || item.section) && (
-                          <p>{item.proposed_text || item.user_example || item.detail || item.section}</p>
+
+                <TagInput
+                  label="Soft Skills"
+                  placeholder="Es. Problem Solving, Teamwork..."
+                  value={cvAdditionalData.soft_skills || ""}
+                  onChange={(value) => updateCvAdditionalData("soft_skills", value)}
+                />
+
+                <TagInput
+                  label="Parole Chiave / Tool"
+                  placeholder="Es. Jira, SCRUM, B2B..."
+                  value={cvAdditionalData.tools || ""}
+                  onChange={(value) => updateCvAdditionalData("tools", value)}
+                />
+              </div>
+
+              <div className="cv-strategy-section cv-additional-data-form">
+                <label
+                  className={[
+                    "cv-additional-field",
+                    cvFieldErrors.additional.additional_notes ? "has-error" : "",
+                  ].filter(Boolean).join(" ")}
+                >
+                  <span>Vuoi aggiungere altre note generali?</span>
+                  <textarea
+                    value={cvAdditionalData.additional_notes}
+                    onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
+                    placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
+                    rows={4}
+                  />
+                  <small>
+                    Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
+                  </small>
+                  {cvFieldErrors.additional.additional_notes && (
+                    <small className="cv-field-error">{cvFieldErrors.additional.additional_notes}</small>
+                  )}
+                </label>
+
+                {cvOptimizationQuestions.length > 0 && (
+                  <div className="coach-suggestion-group">
+                    <strong>Domande facoltative</strong>
+                    {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
+                      <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
+                        <span>{question.question}</span>
+                        <textarea
+                          value={cvAdaptationAnswers[index] || ""}
+                          onChange={(event) => updateCvAdaptationAnswer(index, event.target.value)}
+                          placeholder="Risposta facoltativa: aggiungi solo dettagli reali e verificabili."
+                          rows={3}
+                        />
+                        {question.reason && <small>{question.reason}</small>}
+                        {cvFieldErrors.adaptation[index] && (
+                          <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
                         )}
-                      </div>
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {cvAdditionalDataError && (
+                  <p className="cv-additional-error">{cvAdditionalDataError}</p>
+                )}
+
+                <div className="cv-stage-actions">
+                  <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(3)}>
+                    Continua al riepilogo
+                  </button>
+                  <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(1)}>
+                    Torna a skill e keyword
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {cvOptimizationStage === 3 && (
+            <>
+          <div className="cv-review-summary">
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon target">⊙</span>
+                  <h3>Candidatura</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => transitionToStep("personalize")}>
+                  Modifica
+                </button>
+              </header>
+              <div className="cv-review-fields">
+                <div>
+                  <span>Azienda</span>
+                  <strong>{cvStrategyTargetCompany}</strong>
+                </div>
+                <div>
+                  <span>Ruolo</span>
+                  <strong>{cvStrategyTargetRole}</strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon idea">✧</span>
+                  <h3>Suggerimenti</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(0)}>
+                  Modifica
+                </button>
+              </header>
+              <div className="cv-review-status-row">
+                <span>Applicati</span>
+                <strong>✓ {cvSummaryApplicationStatus}</strong>
+              </div>
+              {selectedCoachSuggestionItems.length > 0 && (
+                <div className="cv-review-compact-list">
+                  {selectedCoachSuggestionItems.slice(0, 4).map((item, index) => (
+                    <span key={`review-suggestion-${item.id || index}`}>{item.title}</span>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon star">☆</span>
+                  <h3>Skill accettate</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(1)}>
+                  Modifica
+                </button>
+              </header>
+              {[
+                ["HARD", cvSummaryAcceptedSkillGroups.hard],
+                ["SOFT", cvSummaryAcceptedSkillGroups.soft],
+                ["TOOL", cvSummaryAcceptedSkillGroups.tool],
+              ].map(([label, items]) => (
+                <div className="cv-review-skill-row" key={`review-skill-${label}`}>
+                  <div className="cv-review-divider">
+                    <span>{label}</span>
+                  </div>
+                  {items.length > 0 ? (
+                    <div className="cv-review-tags">
+                      {items.map((item) => (
+                        <span key={`${label}-${item}`}>{item}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p>Nessuna skill confermata.</p>
+                  )}
+                </div>
+              ))}
+            </section>
+
+            <section className="cv-review-card">
+              <header className="cv-review-card-header">
+                <div className="cv-review-card-title">
+                  <span className="cv-review-icon plus">+</span>
+                  <h3>Informazioni extra</h3>
+                </div>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(2)}>
+                  Modifica
+                </button>
+              </header>
+              {cvSummaryExtraItems.length > 0 ? (
+                <div className="cv-review-extra-list">
+                  {cvSummaryExtraItems.map((item, index) => (
+                    <div key={`review-extra-${index}`}>
+                      <strong>{item.title}</strong>
+                      <p>{item.detail}</p>
                     </div>
                   ))}
                 </div>
-              ))}
+              ) : (
+                <p className="cv-review-empty">Nessuna informazione extra aggiunta.</p>
+              )}
+            </section>
           </div>
 
           <div className="cv-stage-actions">
-            <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(1)}>
-              Torna a skill e keyword
-            </button>
-            <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(3)}>
+            <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(4)}>
               Continua alla generazione
+            </button>
+            <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(2)}>
+              Modifica informazioni extra
             </button>
           </div>
             </>
           )}
 
-          {cvOptimizationStage === 3 && (
-          <div className="cv-strategy-section optimized-cv-section">
-            <div className="cv-strategy-section-title">
-              <span>i</span>
-              <h3>Genera CV ottimizzato</h3>
+          {cvOptimizationStage === 4 && (
+          <div className="cv-generation-card">
+            <div className="cv-generation-copy">
+              <h3>Cosa verrà generato</h3>
+              <p>
+                Un CV ottimizzato per <strong>{cvStrategyTargetRole}</strong> presso <strong>{cvStrategyTargetCompany}</strong>, mantenendo stile e struttura originali.
+              </p>
             </div>
-            <p className="cv-strategy-note">
-              Genera una versione adattata alla candidatura applicando solo le modifiche selezionate e usando solo informazioni reali o accettate.
-            </p>
-            <div className="optimized-cv-actions">
+
+            <div className="cv-generation-summary">
+              <div>
+                <span aria-hidden="true">✓</span>
+                <p><strong>{selectedCoachSuggestionItems.length}</strong> suggerimenti del coach applicati</p>
+              </div>
+              <div>
+                <span aria-hidden="true">✓</span>
+                <p><strong>{acceptedSkillConfirmations.length}</strong> skill accettate, <strong>{rejectedSkillConfirmations.length}</strong> rifiutate</p>
+              </div>
+              <div>
+                <span aria-hidden="true">✓</span>
+                <p>
+                  {cvSummaryExtraItems.length > 0
+                    ? `${cvSummaryExtraItems.length} informazioni extra aggiunte`
+                    : "Nessuna informazione extra aggiunta"}
+                </p>
+              </div>
+            </div>
+
+            <div className="cv-generation-actions">
               <button
-                className="cv-next-button"
+                className="cv-generation-button"
                 type="button"
                 onClick={optimizeCv}
                 disabled={loading}
               >
+                <SparkleIcon size={14} />
                 {loading ? "Sto generando il tuo CV ottimizzato..." : "Genera CV ottimizzato"}
-              </button>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => setCvOptimizationStage(2)}
-                disabled={loading}
-              >
-                Torna al riepilogo
               </button>
             </div>
           </div>
@@ -4654,12 +4934,9 @@ function App() {
             ) : cvPreview?.previewFinalCvContent && Object.keys(cvPreview.previewFinalCvContent).length > 0 ? (
               <div className="cv-preview-structured" style={{ textAlign: 'left' }}>
                 {Object.entries(cvPreview.previewFinalCvContent).map(([section, content]) => (
-                  <div key={section} className="cv-preview-section">
-                    <div className="cv-preview-section-header">
-                      <span className="cv-preview-section-badge">Sezione</span>
-                      <h3>{formatCvPreviewSectionLabel(section)}</h3>
-                    </div>
-                    <pre className="cv-preview-section-content">{content}</pre>
+                  <div key={section} className="cv-preview-section" style={{ marginBottom: '1rem' }}>
+                    <h3 style={{ textTransform: 'uppercase', fontSize: '1.1em', borderBottom: '1px solid #ddd', paddingBottom: '0.5rem', marginBottom: '0.5rem' }}>{section}</h3>
+                    <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0, fontSize: '0.95em' }}>{content}</pre>
                   </div>
                 ))}
               </div>
@@ -4937,7 +5214,20 @@ function App() {
               className={interviewType === "conoscitive_motivazionali" ? "choice active" : "choice"}
               onClick={() => setInterviewType("conoscitive_motivazionali")}
             >
-              <h3>Conoscitive e motivazionali</h3>
+              <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 40,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <BrainIcon size={24} />
+                </span>
+                Conoscitive e motivazionali
+              </h3>
               <p>
                 Domande su chi sei, obiettivi, aspettative, motivazione,
                 azienda, percorso personale e lavoro di gruppo.
@@ -4948,7 +5238,20 @@ function App() {
               className={interviewType === "tecniche" ? "choice active" : "choice"}
               onClick={() => setInterviewType("tecniche")}
             >
-              <h3>Tecniche</h3>
+              <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 40,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <HammerIcon size={24} />
+                </span>
+                Tecniche
+              </h3>
               <p>
                 Domande specifiche sul ruolo scelto, sulle competenze richieste,
                 sugli strumenti e sulle capacità operative.
@@ -4959,7 +5262,20 @@ function App() {
               className={interviewType === "logica" ? "choice active" : "choice"}
               onClick={() => setInterviewType("logica")}
             >
-              <h3>Logica e ragionamento</h3>
+              <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 40,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <PuzzleIcon size={24} />
+                </span>
+                Logica e ragionamento
+              </h3>
               <p>
                 Domande a trabocchetto, serie numeriche o alfabetiche,
                 stime, problem solving e ragionamento.
@@ -4969,25 +5285,83 @@ function App() {
 
           <label>Difficoltà</label>
           <div className="difficulty-grid">
-            {difficultyOptions.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                className={difficulty === option.value ? "difficulty-pill active" : "difficulty-pill"}
-                onClick={() => setDifficulty(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
+            {difficultyOptions.map((option) => {
+              const starsByDifficulty = {
+                base: { stars: "★" },
+                intermedio: { stars: "★★" },
+                avanzato: { stars: "★★★" },
+              };
+
+              const starSpec = starsByDifficulty[option.value] || { stars: "★" };
+
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={difficulty === option.value ? "difficulty-pill active" : "difficulty-pill"}
+                  onClick={() => setDifficulty(option.value)}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      marginRight: 8,
+                      verticalAlign: "middle",
+                      color: "#f5c400",
+                      fontWeight: 900,
+                      fontSize: 18,
+                      lineHeight: 1,
+                    }}
+                  >
+                    {starSpec.stars}
+                  </span>
+                  {option.label}
+                </button>
+              );
+            })}
           </div>
           <p className="difficulty-description">{currentDifficulty.description}</p>
 
-          <div className="actions">
-            <button className="primary-button" onClick={generateQuestion} disabled={loading}>
+          <div className="actions" style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
+            <button
+              className="digital-cta-button gym-cta-shape"
+              onClick={generateQuestion}
+              disabled={loading}
+              type="button"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+              }}
+            >
+              <span className="digital-cta-sparkle" aria-hidden="true" style={{ display: "inline-flex" }}>
+                <SparkleIcon size={18} />
+              </span>
               Genera 10 domande
             </button>
 
-            <button className="secondary-button" onClick={loadHistory} disabled={loading}>
+              <button
+                className="secondary-button gym-cta-shape"
+                onClick={loadHistory}
+                disabled={loading}
+                type="button"
+                style={{
+                  width: "100%",
+                  flex: "unset",
+                  minWidth: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  paddingLeft: 8,
+                  paddingRight: 8,
+                  fontSize: 14,
+                  minHeight: 46,
+                }}
+              >
               Vedi storico
             </button>
           </div>

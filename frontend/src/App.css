@@ -353,7 +353,7 @@ textarea {
 
 .cv-onboarding-copy,
 .cv-success-hero,
-.cv-analysis-heading,
+.cv-ysis-heading,
 .cv-score-card {
   text-align: center;
 }
@@ -475,6 +475,278 @@ textarea {
 .digital-profile-page {
   width: min(100%, 540px);
 }
+
+/* ====== Digital redesign boxes (Collega i tuoi profili online) ====== */
+
+.digital-redesign-cards {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+  margin-top: 14px;
+}
+
+
+.digital-card {
+  border: 1px solid #dceffa;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+  padding: 18px 18px 16px;
+}
+
+.digital-card-title {
+  margin: 0 0 6px;
+  color: #0f5f94;
+  font-size: 22px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.digital-card-subtitle {
+  margin: 0 0 14px;
+  color: #6d7784;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.digital-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.digital-field-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #263548;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.digital-field-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: #eaf4ff;
+  color: #0f76a8;
+  flex: 0 0 auto;
+}
+
+.digital-field-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.digital-input {
+  border: 1px solid #d8e1ea;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 800;
+  color: #1f2933;
+  outline: none;
+}
+
+.digital-input:focus {
+  border-color: #0f76a8;
+  box-shadow: 0 0 0 3px rgba(15, 118, 168, 0.14);
+}
+
+.digital-field-hint {
+  margin: -4px 0 6px;
+  color: #6d7784;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.optional-pill {
+  margin-left: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef4ff;
+  border: 1px solid #cfe2f2;
+  color: #4f6b86;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.digital-export-dropzone {
+  border: 1px dashed #bfe3fb;
+  border-radius: 14px;
+  background: #f8fcff;
+  padding: 12px 12px;
+  margin-top: 6px;
+}
+
+.digital-export-zone-copy {
+  display: block;
+  cursor: pointer;
+}
+
+.digital-export-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  background: #eaf4ff;
+  color: #0f76a8;
+  margin-right: 10px;
+}
+
+.digital-export-drop-hint {
+  display: block;
+  margin-top: 6px;
+  color: #7b8794;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.digital-analysis-score {
+  width: 132px;
+  height: 132px;
+  margin: 0 auto 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  box-shadow: 0 18px 40px rgba(15, 118, 187, 0.10);
+}
+
+.digital-analysis-score span {
+  color: #0f76a8;
+  font-size: 34px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+
+.digital-file-input {
+  display: none;
+}
+
+.digital-export-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid #0f76bb;
+  background: #ffffff;
+  color: #0f76bb;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.digital-cta-button {
+  width: 100%;
+  margin-top: 16px;
+  min-height: 54px;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(120deg, #139ff2 0%, #0f76bb 100%);
+  color: #ffffff;
+  font-weight: 900;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.24);
+}
+
+/* Palestra colloqui: forma esterna condivisa tra “Genera 10 domande” e “Vedi storico” (colori/simboli restano quelli delle classi originali) */
+.gym-cta-shape {
+  min-height: 54px;
+  border-radius: 999px;
+  padding: 0 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.24);
+}
+
+.gym-cta-shape:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+  box-shadow: none;
+}
+
+
+.digital-cta-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  background: #d9e6f0;
+  color: #7c8b99;
+  box-shadow: none;
+}
+
+.digital-skip-link {
+  display: block;
+  width: 100%;
+  text-align: center;
+  margin-top: 12px;
+  color: #0f76a8;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+/* Screenshot dropzone */
+.screenshot-dropzone {
+  border: 1px dashed #bfe3fb;
+  border-radius: 14px;
+  background: #f8fcff;
+  padding: 12px;
+}
+
+.screenshot-dropzone-content {
+  display: grid;
+  gap: 10px;
+}
+
+.screenshot-dropzone-content h4 {
+  margin: 0;
+  color: #17395d;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.screenshot-dropzone-content p {
+  margin: 0;
+  color: #6d7784;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.digital-card--main,
+.digital-card--screens {
+  position: relative;
+}
+
+/* Forza colonna singola anche su schermi grandi (UI web più leggibile) */
+@media (min-width: 900px) {
+  .digital-redesign-cards {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+}
+
+
+
 
 .cv-loaded-card {
   display: grid;
@@ -955,6 +1227,47 @@ textarea {
   display: none;
 }
 
+.cv-drop-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 24px;
+  background: rgba(15, 118, 168, 0.08);
+  border: 2px dashed #139ff2;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.cv-drop-overlay-inner {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(19, 159, 242, 0.35);
+  border-radius: 16px;
+  padding: 14px 18px;
+  text-align: center;
+  box-shadow: 0 18px 40px rgba(15, 118, 187, 0.14);
+}
+
+.cv-file-choose-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.cv-file-choose-hint {
+  color: #4b6a82;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.digital-export-dropzone--linkedin {
+  position: relative;
+  overflow: hidden;
+}
+
+.digital-export-dropzone--linkedin:has(.digital-file-drag-hint) {}
+
 .browse-file-btn,
 .cv-next-button,
 .analyze-cv-btn,
@@ -993,13 +1306,13 @@ textarea {
 .cv-next-button {
   width: 100%;
   margin-top: auto;
-  min-height: 50px;
-  padding: 14px 22px;
-  border-radius: 14px;
+  min-height: 54px;
+  padding: 0 22px;
+  border-radius: 999px;
   background: linear-gradient(90deg, #149eea 0%, #1683c3 100%);
   font-size: 16px;
   line-height: 1.2;
-  box-shadow: 0 8px 18px rgba(20, 137, 202, 0.2);
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.24);
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -1374,7 +1687,11 @@ textarea {
   margin-top: 18px;
 }
 
-.cv-stage-progress span {
+.cv-stage-progress > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   padding: 7px 5px;
   border-radius: 999px;
   background: #e8eef5;
@@ -1383,9 +1700,68 @@ textarea {
   font-weight: 900;
 }
 
-.cv-stage-progress span.active {
+.cv-stage-progress > span.active {
   background: #0f76a8;
   color: #ffffff;
+}
+
+.cv-stage-progress > span > span {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.cv-stage-progress > span > .cv-stage-progress-pentagon {
+  width: 10px;
+  height: 10px;
+  display: inline-block;
+  background: currentColor;
+  clip-path: polygon(50% 0, 100% 38%, 82% 100%, 18% 100%, 0 38%);
+}
+
+.cv-stage-progress-plus {
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.cv-stage-progress-summary-icon {
+  width: 12px;
+  display: grid;
+  gap: 2px;
+}
+
+.cv-stage-progress-summary-icon span {
+  position: relative;
+  display: block;
+  height: 2px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.cv-stage-progress-summary-icon span::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: 50%;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  transform: translateY(-50%);
+}
+
+.cv-stage-progress-sparkle {
+  width: 12px;
+  height: 12px;
+  display: inline-grid;
+  place-items: center;
+}
+
+.cv-stage-progress-sparkle svg {
+  display: block;
 }
 
 .cv-present-skills-list {
@@ -1828,6 +2204,210 @@ textarea {
   gap: 12px;
 }
 
+.cv-review-summary {
+  display: grid;
+  gap: 16px;
+}
+
+.cv-review-card {
+  overflow: hidden;
+  border: 1px solid #cfe2f2;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #263548;
+  box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+}
+
+.cv-review-card-header {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 20px;
+  border-bottom: 1px solid #dceffa;
+  background: #ffffff;
+}
+
+.cv-review-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.cv-review-card-title h3 {
+  margin: 0;
+  color: #263548;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.cv-review-icon {
+  width: 14px;
+  display: inline-grid;
+  place-items: center;
+  color: #1683c3;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.cv-review-edit-button {
+  border: 0;
+  background: transparent;
+  color: #1587d1;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cv-review-fields,
+.cv-review-status-row,
+.cv-review-extra-list {
+  padding: 18px 20px;
+}
+
+.cv-review-fields {
+  display: grid;
+  gap: 0;
+}
+
+.cv-review-fields > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(0, 1.2fr);
+  gap: 16px;
+  align-items: center;
+  min-height: 34px;
+  border-bottom: 1px solid #dceffa;
+}
+
+.cv-review-fields > div:last-child {
+  border-bottom: 0;
+}
+
+.cv-review-fields span,
+.cv-review-status-row span {
+  color: #526173;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cv-review-fields strong,
+.cv-review-fields a {
+  min-width: 0;
+  color: #263548;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: right;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.cv-review-fields a {
+  color: #1587d1;
+}
+
+.cv-review-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cv-review-status-row strong {
+  color: #0ca36f;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.cv-review-compact-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 20px 18px;
+}
+
+.cv-review-compact-list span,
+.cv-review-tags span {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #e7f5ff;
+  color: #0f76a8;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.cv-review-skill-row {
+  padding: 16px 20px 0;
+}
+
+.cv-review-skill-row:last-child {
+  padding-bottom: 20px;
+}
+
+.cv-review-divider {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.cv-review-divider::before,
+.cv-review-divider::after {
+  content: "";
+  height: 1px;
+  background: #dceffa;
+}
+
+.cv-review-divider span {
+  color: #6a7b8e;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.cv-review-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cv-review-skill-row p,
+.cv-review-empty {
+  margin: 0;
+  color: #6a7b8e;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cv-review-extra-list {
+  display: grid;
+  gap: 14px;
+}
+
+.cv-review-extra-list strong {
+  display: block;
+  color: #263548;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.3;
+}
+
+.cv-review-extra-list p {
+  margin: 5px 0 0;
+  color: #526173;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.cv-review-empty {
+  padding: 18px 20px;
+}
+
 .inline-link-button {
   justify-self: start;
   border: 0;
@@ -1897,6 +2477,113 @@ textarea {
   gap: 12px;
 }
 
+.cv-generation-card {
+  display: grid;
+  gap: 24px;
+  padding: 26px 24px;
+  border: 1px solid #cfe2f2;
+  border-radius: 8px;
+  background: #f8fbff;
+  box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+}
+
+.cv-generation-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.cv-generation-copy h3 {
+  margin: 0;
+  color: #263548;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.cv-generation-copy p {
+  max-width: 520px;
+  margin: 0;
+  color: #526173;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.cv-generation-copy strong {
+  color: #263548;
+  font-weight: 900;
+}
+
+.cv-generation-summary {
+  display: grid;
+}
+
+.cv-generation-summary > div {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  min-height: 32px;
+  border-bottom: 1px solid #dceffa;
+}
+
+.cv-generation-summary > div:last-child {
+  border-bottom: 0;
+}
+
+.cv-generation-summary span {
+  color: #0ca36f;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.cv-generation-summary p {
+  margin: 0;
+  color: #526173;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.cv-generation-summary strong {
+  color: #263548;
+  font-weight: 900;
+}
+
+.cv-generation-actions {
+  display: grid;
+}
+
+.cv-generation-button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 0 18px;
+  border: 1px solid #9fd4fb;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f76a8;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 900;
+  box-shadow: 0 10px 22px rgba(20, 137, 202, 0.10);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.cv-generation-button:hover:not(:disabled) {
+  border-color: #149eea;
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(20, 137, 202, 0.16);
+}
+
+.cv-generation-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  transform: none;
+}
+
 .cv-stage-actions {
   display: grid;
   gap: 12px;
@@ -1910,6 +2597,25 @@ textarea {
 
 .cv-optimize-details-page {
   width: min(100%, 720px);
+}
+
+/* Stage 0: “Suggerimenti del coach” (lampadina) senza sfondo grigio */
+.cv-optimize-details-page--stage-0 .cv-optimize-details-page__suggestions,
+.cv-optimize-details-page--stage-0 .cv-optimize-details-page__suggestions .coach-suggestion-option.ai-suggestion-card {
+  background: #ffffff !important;
+}
+
+.cv-return-analysis-button {
+  margin-top: 10px;
+  background: #e8eef5;
+  color: var(--primary);
+  box-shadow: 0 8px 18px rgba(20, 137, 202, 0.10);
+}
+
+.cv-return-analysis-button:hover {
+  background: #e7edf6;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px rgba(20, 137, 202, 0.14);
 }
 
 .cv-optimize-details-page .cv-strategy-heading p {
@@ -2151,58 +2857,6 @@ textarea {
   color: #263548;
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.5;
-}
-
-.cv-preview-structured {
-  display: grid;
-  gap: 14px;
-}
-
-.cv-preview-section {
-  padding: 16px;
-  border: 1px solid #dceffa;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #fafdff 0%, #f4f9fe 100%);
-  box-shadow: 0 8px 24px rgba(15, 118, 168, 0.06);
-}
-
-.cv-preview-section-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-
-.cv-preview-section-badge {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: #e7f4fb;
-  color: #0f76a8;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.cv-preview-section-header h3 {
-  margin: 0;
-  color: #263548;
-  font-size: 1rem;
-  font-weight: 900;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.cv-preview-section-content {
-  margin: 0;
-  white-space: pre-wrap;
-  font-family: inherit;
-  font-size: 0.96em;
-  line-height: 1.55;
-  color: #263548;
 }
 
 .cv-word-preview {
@@ -4794,5 +5448,4 @@ textarea {
   color: #8c96a3;
   margin-top: 2px;
 }
-
 

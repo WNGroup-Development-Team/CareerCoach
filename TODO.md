@@ -1,0 +1,3 @@
+- [ ] Aggiornare `frontend/src/PersonalizeExperience.jsx`: rimuovere dalla UI campi `role_level` e `link` (label, input, errori, coerenza/validazioni collegate).
+- [ ] Aggiornare `frontend/src/App.jsx` se necessario solo per props non usate (in questo caso no, perché payload/backend devono restare funzionanti).
+- [ ] Verifica build/lint e controllare che lo step “personalize” funzioni senza riferimenti mancanti.

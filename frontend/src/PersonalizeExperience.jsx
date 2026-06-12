@@ -20,13 +20,25 @@ function BriefcaseIcon() {
   );
 }
 
+function LinkIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M10 13a5 5 0 0 0 7.07 0l2-2a5 5 0 0 0-7.07-7.07l-1.14 1.14" />
+      <path d="M14 11a5 5 0 0 0-7.07 0l-2 2A5 5 0 0 0 12 20.07l1.14-1.14" />
+    </svg>
+  );
+}
+
 export default function PersonalizeExperience({
   company,
   goal,
+  link, // kept for backend compatibility (not used in UI anymore)
   onBack,
   onChange,
   onSubmit,
   role,
+  roleLevel, // kept for backend compatibility (not used in UI anymore)
+  sector = "",
   validation = { status: "idle", errors: {}, warnings: [], message: "" },
   isValidating = false,
   submitLabel = "Continua",
@@ -37,15 +49,18 @@ export default function PersonalizeExperience({
   const hasRole = normalizedRole && normalizedRole.toLowerCase() !== "da definire";
   const hasQuickMethod = normalizedGoal.length > 19;
   const hasSpecificDetails = normalizedCompany.length > 2 && hasRole && normalizedRole.length > 3;
+
   const localErrors = {
-    description: hasQuickMethod || hasSpecificDetails ? "" : "Compila il metodo rapido oppure i dettagli dell'azienda.",
-    company: hasQuickMethod || !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
-    role: hasQuickMethod || !normalizedRole || (hasRole && normalizedRole.length > 3) ? "" : "Inserisci un ruolo lavorativo reale.",
+    description: hasQuickMethod || hasSpecificDetails ? "" : "Compila il metodo rapido o i dettagli dell'azienda.",
+    company: hasQuickMethod || (!normalizedCompany || normalizedCompany.length > 2) ? "" : "Inserisci un nome azienda valido.",
+    role: hasQuickMethod || (!normalizedRole || (hasRole && normalizedRole.length > 3)) ? "" : "Inserisci un ruolo lavorativo reale.",
   };
+
   const fieldErrors = {
     ...Object.fromEntries(Object.entries(localErrors).filter(([, value]) => value)),
     ...(validation.errors || {}),
   };
+
   const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails) && !localErrors.company && !localErrors.role;
   const canSubmit = hasLocalValidFields && !isValidating;
 
@@ -61,13 +76,13 @@ export default function PersonalizeExperience({
   return (
     <section className="personalize-page">
       <div className="personalize-heading">
-        <h2>Personalizza la simulazione</h2>
-        <p>Inserisci il ruolo o l'annuncio per ricevere domande e feedback più mirati.</p>
+        <h2>A quale ruolo stai puntando?</h2>
+        <p>Queste informazioni verranno usate per ottimizzare il tuo CV e personalizzare la simulazione del colloquio.</p>
       </div>
 
       <form className="personalize-card" onSubmit={handleSubmit}>
         <div className="quick-method-label">Metodo rapido</div>
-        <label htmlFor="goal">Per quale colloquio vuoi prepararti?</label>
+        <label htmlFor="goal">Descrivilo in una frase</label>
         <textarea
           id="goal"
           className={`interview-textarea ${fieldErrors.description ? "input-error" : ""}`}
@@ -79,7 +94,7 @@ export default function PersonalizeExperience({
 
         <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
-        <label htmlFor="personalize-company">Nome Azienda</label>
+        <label htmlFor="personalize-company">Azienda</label>
         <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
           <BuildingIcon />
           <input
@@ -91,8 +106,8 @@ export default function PersonalizeExperience({
         </div>
         {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
 
-        <label htmlFor="personalize-role">Ruolo desiderato</label>
-        <div className={`personalize-field ${fieldErrors.role ? "input-error" : ""}`}>
+        <label htmlFor="personalize-role">Ruolo</label>
+        <div className={`personalize-field ${fieldErrors.role || fieldErrors.coherence ? "input-error" : ""}`}>
           <BriefcaseIcon />
           <input
             id="personalize-role"
@@ -102,10 +117,6 @@ export default function PersonalizeExperience({
           />
         </div>
         {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
-
-        <p className="personalize-hint form-helper-text">
-          Inserendo metodo rapido, azienda e ruolo la simulazione e l'ottimizzazione CV saranno più specifiche.
-        </p>
         {validation.message && (
           <p className={`job-validation-message ${validation.status}`}>
             {validation.message}
@@ -128,11 +139,6 @@ export default function PersonalizeExperience({
             {isValidating ? "Validazione..." : submitLabel}
           </button>
         </div>
-        {!hasLocalValidFields && (
-          <p className="continue-helper-text">
-            Usa il metodo rapido oppure compila azienda e ruolo per continuare.
-          </p>
-        )}
       </form>
     </section>
   );
