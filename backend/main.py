@@ -672,6 +672,12 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
 
 
 def user_to_response(row):
+    digital_analysis_json = row[19] if len(row) > 19 else None
+    linkedin_profile_filename = row[20] if len(row) > 20 else None
+    linkedin_profile_text = row[21] if len(row) > 21 else None
+    linkedin_oauth_profile_json = row[22] if len(row) > 22 else None
+    auth_provider = row[23] if len(row) > 23 else None
+    profile_image_data_url = row[24] if len(row) > 24 else None
     return {
         "id": row[0],
         "name": row[1],
@@ -690,12 +696,12 @@ def user_to_response(row):
         "linkedin_url": row[16],
         "portfolio_url": row[17],
         "instagram_handle": row[18],
-        "digital_analysis": json.loads(row[19]) if row[19] else None,
-        "linkedin_profile_filename": row[20],
-        "linkedin_profile_uploaded": bool(row[20]),
-        "linkedin_oauth_profile": json.loads(row[22]) if row[22] else None,
-        "auth_provider": row[23] if len(row) > 23 else None,
-        "profile_image_data_url": row[24] if len(row) > 24 else None,
+        "digital_analysis": json.loads(digital_analysis_json) if digital_analysis_json else None,
+        "linkedin_profile_filename": linkedin_profile_filename,
+        "linkedin_profile_uploaded": bool(linkedin_profile_filename),
+        "linkedin_oauth_profile": json.loads(linkedin_oauth_profile_json) if linkedin_oauth_profile_json else None,
+        "auth_provider": auth_provider,
+        "profile_image_data_url": profile_image_data_url,
     }
 
 
@@ -736,7 +742,8 @@ def fetch_user_by_id(cursor, user_id: int):
         linkedin_profile_filename,
         linkedin_profile_text,
         linkedin_oauth_profile_json,
-        auth_provider
+        auth_provider,
+        profile_image_data_url
     FROM users
     WHERE id = ?
     """, (user_id,))
