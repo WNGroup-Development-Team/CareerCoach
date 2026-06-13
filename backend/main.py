@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import smtplib
 import base64
+import binascii
 import urllib.parse
 import io
 import ipaddress
@@ -324,6 +325,7 @@ def init_db():
     add_column_if_not_exists(cursor, "users", "linkedin_profile_filename", "TEXT")
     add_column_if_not_exists(cursor, "users", "linkedin_profile_text", "TEXT")
     add_column_if_not_exists(cursor, "users", "linkedin_oauth_profile_json", "TEXT")
+    add_column_if_not_exists(cursor, "users", "profile_image_data_url", "TEXT")
 
     add_column_if_not_exists(cursor, "interview_sessions", "company", "TEXT")
     add_column_if_not_exists(cursor, "interview_sessions", "question_mode", "TEXT")
@@ -413,6 +415,10 @@ class DigitalPresenceUpdate(BaseModel):
     portfolio_url: Optional[str] = None
     instagram_handle: Optional[str] = None
     linkedin_connected: bool = False
+
+
+class ProfileImageUpdate(BaseModel):
+    image_data_url: str
 
 
 class CvOptimizationAnalysisRequest(BaseModel):
@@ -689,6 +695,7 @@ def user_to_response(row):
         "linkedin_profile_uploaded": bool(row[20]),
         "linkedin_oauth_profile": json.loads(row[22]) if row[22] else None,
         "auth_provider": row[23] if len(row) > 23 else None,
+        "profile_image_data_url": row[24] if len(row) > 24 else None,
     }
 
 
@@ -6932,7 +6939,8 @@ def get_user(user_id: int):
         linkedin_url,
         portfolio_url,
         instagram_handle,
-        auth_provider
+        auth_provider,
+        profile_image_data_url
     FROM users
     WHERE id = ?
     """, (user_id,))
@@ -6961,7 +6969,86 @@ def get_user(user_id: int):
         "portfolio_url": row[16],
         "instagram_handle": row[17],
         "auth_provider": row[18],
+        "profile_image_data_url": row[19],
     }
+
+
+def require_user_session(user_id: int, authorization: Optional[str]) -> None:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Sessione mancante.")
+
+    token = authorization.replace("Bearer ", "", 1).strip()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT user_id, expires_at
+    FROM user_sessions
+    WHERE token = ?
+    """, (token,))
+    session = cursor.fetchone()
+    conn.close()
+
+    if not session or session[0] != user_id:
+        raise HTTPException(status_code=403, detail="Sessione non autorizzata.")
+    if datetime.fromisoformat(session[1]) < utc_now():
+        raise HTTPException(status_code=401, detail="Sessione scaduta.")
+
+
+@app.put("/users/{user_id}/profile-image")
+def update_profile_image(
+    user_id: int,
+    data: ProfileImageUpdate,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
+    match = re.fullmatch(
+        r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\s]+)",
+        data.image_data_url.strip(),
+    )
+    if not match:
+        raise HTTPException(status_code=400, detail="Formato immagine non valido.")
+
+    try:
+        image_bytes = base64.b64decode(match.group(2), validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status_code=400, detail="Immagine non valida.")
+
+    if not image_bytes or len(image_bytes) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="L'immagine deve essere inferiore a 2 MB.")
+
+    content_type = match.group(1)
+    valid_signature = (
+        (content_type == "image/jpeg" and image_bytes.startswith(b"\xff\xd8\xff"))
+        or (content_type == "image/png" and image_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        or (content_type == "image/webp" and len(image_bytes) >= 12 and image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP")
+    )
+    if not valid_signature:
+        raise HTTPException(status_code=400, detail="Immagine non supportata.")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE users SET profile_image_data_url = ? WHERE id = ?",
+        (data.image_data_url.strip(), user_id),
+    )
+    conn.commit()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return {"message": "Foto profilo aggiornata.", "user": user_to_response(row), "profile_image_data_url": data.image_data_url.strip()}
+
+
+@app.delete("/users/{user_id}/profile-image")
+def delete_profile_image(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET profile_image_data_url = NULL WHERE id = ?", (user_id,))
+    conn.commit()
+    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return {"message": "Foto profilo rimossa.", "user": user_to_response(row)}
 
 
 @app.delete("/users/{user_id}")

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+﻿import React, { useEffect, useRef, useState } from "react";
 import "./App.css";
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
@@ -630,6 +630,7 @@ function App() {
   const linkedinFileInputRef = useRef(null);
   const chatContainerRef = useRef(null);
   const answerRef = useRef(null);
+  const profileImageInputRef = useRef(null);
   const [linkedinUploadMessage, setLinkedinUploadMessage] = useState("");
   const [socialScreenshotMessages, setSocialScreenshotMessages] = useState({});
   const [screenshotAnalysisProgress, setScreenshotAnalysisProgress] = useState({
@@ -674,6 +675,8 @@ function App() {
     message: "",
   });
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [profileImageSaving, setProfileImageSaving] = useState(false);
+  const [profileImageMessage, setProfileImageMessage] = useState("");
   const [stepHistory, setStepHistory] = useState([]);
 
   const [interviewType, setInterviewType] = useState("conoscitive_motivazionali");
@@ -1283,6 +1286,89 @@ function App() {
       } catch (err) {
         console.error(err);
       }
+    }
+  };
+
+  const updateProfileImage = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    setProfileImageMessage("");
+
+    if (!file) {
+      return;
+    }
+
+    const allowedImageTypes = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowedImageTypes.includes(file.type)) {
+      setProfileImageMessage("Seleziona un'immagine JPG, PNG o WEBP valida.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setProfileImageMessage("La foto profilo deve essere inferiore a 2 MB.");
+      return;
+    }
+
+    const previousImage = profile.profile_image_data_url || null;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const imageDataUrl = String(reader.result || "");
+      setProfile((current) => ({ ...current, profile_image_data_url: imageDataUrl }));
+      setProfileImageSaving(true);
+
+      try {
+        const response = await fetchWithTimeout(`${API_URL}/users/${userId}/profile-image`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ image_data_url: imageDataUrl }),
+        }, 15000);
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || "Impossibile salvare la foto profilo.");
+        }
+        setProfile((current) => ({
+          ...current,
+          profile_image_data_url: data.profile_image_data_url,
+        }));
+        setProfileImageMessage("Foto profilo aggiornata.");
+      } catch (err) {
+        setProfile((current) => ({ ...current, profile_image_data_url: previousImage }));
+        setProfileImageMessage(err.message || "Impossibile salvare la foto profilo.");
+      } finally {
+        setProfileImageSaving(false);
+      }
+    };
+    reader.onerror = () => {
+      setProfileImageMessage("Impossibile leggere l'immagine selezionata.");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeProfileImage = async () => {
+    const previousImage = profile.profile_image_data_url;
+    setProfileImageMessage("");
+    setProfile((current) => ({ ...current, profile_image_data_url: null }));
+    setProfileImageSaving(true);
+
+    try {
+      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/profile-image`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      }, 15000);
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || "Impossibile rimuovere la foto profilo.");
+      }
+      setProfileImageMessage("Foto profilo rimossa.");
+    } catch (err) {
+      setProfile((current) => ({ ...current, profile_image_data_url: previousImage }));
+      setProfileImageMessage(err.message || "Impossibile rimuovere la foto profilo.");
+    } finally {
+      setProfileImageSaving(false);
     }
   };
 
@@ -2839,7 +2925,6 @@ function App() {
   const canGoBack = userId && step !== "auth" && stepHistory.length > 0;
   const profileInitial = (profile.name || profile.email || "U").trim().charAt(0).toUpperCase();
   const firstName = (profile.name || "Silvia").trim().split(/\s+/)[0];
-  const interviewPreparationScore = progress?.average_total_score ?? 0;
   const displayedDigitalAnalysis = normalizeDigitalAnalysis(digitalAnalysis);
   const digitalCoherenceScore = displayedDigitalAnalysis?.score ?? 0;
   const isLinkedInConnected = profile.auth_provider === "linkedin";
@@ -2946,6 +3031,44 @@ function App() {
   const acceptedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "confirmed" || item.status === "accepted");
   const rejectedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "rejected");
   const latestOptimizedCv = optimizedCvsList[0] || null;
+  const hasMeaningfulProfileValue = (value) => {
+    const normalized = String(value || "").trim().toLowerCase();
+    return Boolean(normalized && !["da definire", "generica", "settore"].includes(normalized));
+  };
+  const preferredCompanies = [
+    personalizeForm.company,
+    company,
+    ...history.map((item) => item.company),
+    ...optimizedCvsList.map((item) => item.target_company),
+  ]
+    .map((item) => String(item || "").trim())
+    .filter((item) => item && item.toLowerCase() !== "generica")
+    .filter((item, index, list) =>
+      list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
+    );
+  const hasMasterCv = Boolean(profile.cv_filename);
+  const hasTargetRole = hasMeaningfulProfileValue(profile.target_role);
+  const hasTargetCompany = preferredCompanies.length > 0;
+  const hasOptimizedCv = optimizedCvsList.length > 0;
+  const hasProfileDetails = Boolean(
+    profile.name &&
+    hasMeaningfulProfileValue(profile.sector)
+  );
+  const hasCvAnalysis = Boolean(digitalAnalysis || cvOptimizationAnalysis);
+  const hasInterviewPreparation = Boolean((progress?.total_answers || 0) > 0 || history.length > 0);
+  const careerPathItems = [
+    { label: "CV caricato", complete: hasMasterCv },
+    { label: "Ruolo target impostato", complete: hasTargetRole },
+    { label: "Azienda target aggiunta", complete: hasTargetCompany },
+    { label: "Analisi CV completata", complete: hasCvAnalysis },
+    { label: "CV ottimizzato generato", complete: hasOptimizedCv },
+    { label: "Preparazione colloquio avviata", complete: hasInterviewPreparation },
+  ];
+  const totalProfileSteps = careerPathItems.length;
+  const completedProfileSteps = careerPathItems.filter((item) => item.complete).length;
+  const profileCompletionPercentage = Math.round(
+    (completedProfileSteps / totalProfileSteps) * 100
+  );
 
   // Calcolo delle medie per il riepilogo finale della sessione
   const sessionSummary = {
@@ -4974,174 +5097,254 @@ const screenshotUploadBoxes = [];
       {step === "profile" && (
         <section className="profile-dashboard">
           <div className="profile-page-title">
-            <h2>Profilo</h2>
+            <div>
+              <span>Area personale</span>
+              <h2>Il tuo profilo</h2>
+              <p>Monitora i progressi e completa il tuo percorso professionale.</p>
+            </div>
           </div>
 
           <div className="profile-hero-card">
-            <button className="profile-settings" type="button" aria-label="Impostazioni profilo">
-              ...
-            </button>
-            <div className="profile-avatar-large">
-              <span>{profileInitial}</span>
-              <button type="button" aria-label="Modifica immagine profilo">+</button>
-            </div>
-            <h2>{profile.name || "Il tuo profilo"}</h2>
-            <p>{profile.target_role || "Ruolo target da definire"}</p>
-            <div className="profile-chip-row">
-              <span>{profile.sector || "Settore"}</span>
-              <span>{profile.experience_level || "Junior"}</span>
+            <div className="profile-hero-main">
+              <div className="profile-avatar-large">
+                <button
+                  className="profile-avatar-button"
+                  type="button"
+                  onClick={() => profileImageInputRef.current?.click()}
+                  disabled={profileImageSaving}
+                  aria-label={profile.profile_image_data_url ? "Cambia foto profilo" : "Aggiungi foto profilo"}
+                >
+                  {profile.profile_image_data_url ? (
+                    <img src={profile.profile_image_data_url} alt="Foto profilo" />
+                  ) : (
+                    <span>{profileInitial}</span>
+                  )}
+                </button>
+                <button
+                  className="profile-avatar-add"
+                  type="button"
+                  onClick={() => profileImageInputRef.current?.click()}
+                  disabled={profileImageSaving}
+                  aria-label={profile.profile_image_data_url ? "Cambia foto profilo" : "Aggiungi foto profilo"}
+                  title={profile.profile_image_data_url ? "Cambia foto" : "Aggiungi foto"}
+                >
+                  +
+                </button>
+                <input
+                  ref={profileImageInputRef}
+                  className="profile-image-input"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  onChange={updateProfileImage}
+                />
+              </div>
+              <div className="profile-hero-copy">
+                <span className="profile-status-label">
+                  {hasProfileDetails ? "Profilo professionale" : "Profilo professionale da completare"}
+                </span>
+                <h2>{profile.name || "Il tuo profilo"}</h2>
+                <p>{hasTargetRole ? profile.target_role : "Ruolo target non impostato"}</p>
+                <div className="profile-chip-row">
+                  <span>{hasMeaningfulProfileValue(profile.sector) ? profile.sector : "Settore da definire"}</span>
+                </div>
+                <div className="profile-image-controls">
+                  <button type="button" onClick={() => profileImageInputRef.current?.click()} disabled={profileImageSaving}>
+                    {profile.profile_image_data_url ? "Cambia foto" : "Aggiungi foto"}
+                  </button>
+                  {profile.profile_image_data_url && (
+                    <button type="button" onClick={removeProfileImage} disabled={profileImageSaving}>
+                      Rimuovi
+                    </button>
+                  )}
+                  {profileImageMessage && <span role="status">{profileImageMessage}</span>}
+                </div>
+              </div>
             </div>
             <button className="profile-analysis-button" type="button" onClick={() => transitionToStep("cv-digital")}>
               Analisi digitale
-            
             </button>
           </div>
 
-          <div className="profile-section-title">
-            <h3>Traguardi Colloqui</h3>
-          </div>
-
-          <div className="profile-progress-card">
-            <div>
-              <strong>Preparazione Generale</strong>
-              <span>{interviewPreparationScore}%</span>
-            </div>
-            <div className="profile-progress-track">
-              <span style={{ width: `${interviewPreparationScore}%` }} />
-            </div>
-            <p>
-              {progress?.total_answers
-                ? `${progress.total_answers} risposte valutate finora.`
-                : "Pronta per iniziare i colloqui tecnici."}
-            </p>
-          </div>
-
-          <div className="profile-stats-grid">
-            <div>
-              <span className="profile-stat-icon">^</span>
-              <strong>{progress?.total_answers || 0}</strong>
-              <p>Colloqui Superati</p>
-            </div>
-            <div>
-              <span className="profile-stat-icon">*</span>
-              <strong>{digitalCoherenceScore}%</strong>
-              <p>Coerenza Digitale</p>
-            </div>
-          </div>
-
-          <div className="profile-section-title">
-            <h3>Aziende Preferite</h3>
-            <button type="button" onClick={() => transitionToStep("gym")}>Vedi tutte</button>
-          </div>
-
-          <div className="favorite-company-grid">
-            {[company].filter(c => c && c !== "Generica").length > 0 ? (
-              [company].filter(c => c && c !== "Generica").map((item) => (
-                <div key={item}>
-                  <span>{item.charAt(0).toUpperCase()}</span>
-                  <strong>{item}</strong>
-                </div>
-              ))
-            ) : (
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", gridColumn: "1 / -1" }}>Nessuna azienda aggiunta.</p>
-            )}
-          </div>
-
-          <div className="profile-section-title">
-            <h3>I Tuoi Documenti</h3>
-          </div>
-
-          <div className="document-list">
-            <div className="document-item">
-              <span>CV</span>
-              <div>
-                <strong>CV Master Caricato</strong>
-                <p>{profile.cv_filename || "Carica il tuo CV per iniziare"}</p>
-              </div>
-              <div className="document-actions">
-                <button
-                  type="button"
-                  onClick={() => transitionToStep("cv-view")}
-                  disabled={!profile.cv_filename}
-                  aria-label="Vedi CV caricato"
-                  title="Vedi CV caricato"
-                >
-                  <EyeIcon />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => transitionToStep("cv-upload")}
-                  aria-label="Modifica CV"
-                  title="Modifica CV"
-                >
-                  <PencilIcon />
-                </button>
-                <button
-                  className="danger-icon-button"
-                  type="button"
-                  onClick={deleteCv}
-                  disabled={!profile.cv_filename || loading}
-                  aria-label="Elimina CV"
-                  title="Elimina CV"
-                >
-                  <TrashIcon />
-                </button>
-              </div>
-            </div>
-            <div className="document-item">
-              <span>AI</span>
-              <div>
-                <strong>{latestOptimizedCv ? "CV Ottimizzato" : "Nessun CV ottimizzato generato"}</strong>
-                <p>{latestOptimizedCv ? `${latestOptimizedCv.target_role || "Ruolo"} - ${latestOptimizedCv.target_company || "Azienda"} · ${latestOptimizedCv.created_at || ""}` : "Genera una versione ottimizzata dalla pagina Analisi Strategica CV"}</p>
-              </div>
-              <div className="document-actions">
-                {latestOptimizedCv?.has_docx && (
-                  <a href={`${API_URL}${latestOptimizedCv.docx_download_url}`} download aria-label="Scarica DOCX" title="Scarica DOCX">DOCX</a>
-                )}
-                {latestOptimizedCv?.has_pdf && (
-                  <a href={`${API_URL}${latestOptimizedCv.pdf_download_url}`} download aria-label="Scarica PDF" title="Scarica PDF">PDF</a>
-                )}
-                {optimizedCvsList.length > 1 && (
-                  <button type="button" onClick={() => setShowOptimizedCvVersions((current) => !current)} aria-label="Vedi tutte le versioni" title="Vedi tutte le versioni">
-                    Vedi tutte
-                  </button>
-                )}
-                {latestOptimizedCv && (
-                  <button className="danger-icon-button" type="button" onClick={() => deleteOptimizedCv(latestOptimizedCv.id)} disabled={loading} aria-label="Elimina ultimo CV ottimizzato" title="Elimina ultimo CV ottimizzato">
-                    <TrashIcon />
-                  </button>
-                )}
-              </div>
-            </div>
-            {showOptimizedCvVersions && optimizedCvsList.map((item) => (
-              <div className="document-item" key={`profile-optimized-${item.id}`}>
-                <span>CV</span>
+          <div className="profile-overview-grid">
+            <div className="profile-progress-card">
+              <div className="profile-card-heading">
                 <div>
-                  <strong>{item.target_role || "Ruolo"} - {item.target_company || "Azienda"}</strong>
-                  <p>{item.created_at || ""}{item.generation_status ? ` - ${item.generation_status}` : ""}</p>
+                  <span>Completamento profilo</span>
+                  <strong>{profileCompletionPercentage}% completato</strong>
                 </div>
-                <div className="document-actions">
-                  {item.has_docx && (
-                    <a href={`${API_URL}${item.docx_download_url}`} download aria-label="Scarica DOCX" title="Scarica DOCX">DOCX</a>
-                  )}
-                  {item.has_pdf && (
-                    <a href={`${API_URL}${item.pdf_download_url}`} download aria-label="Scarica PDF" title="Scarica PDF">PDF</a>
-                  )}
-                  <button type="button" onClick={() => { setOptimizedCv(item); transitionToStep("cv-optimized"); }} aria-label="Visualizza dettagli" title="Visualizza dettagli">
-                    <EyeIcon />
-                  </button>
-                  <button className="danger-icon-button" type="button" onClick={() => deleteOptimizedCv(item.id)} disabled={loading} aria-label="Elimina CV ottimizzato" title="Elimina CV ottimizzato">
-                    <TrashIcon />
-                  </button>
+                <span className="profile-completion-score">{profileCompletionPercentage}%</span>
+              </div>
+              <div
+                className="profile-progress-track"
+                role="progressbar"
+                aria-label="Completamento profilo"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={profileCompletionPercentage}
+              >
+                <span style={{ width: `${profileCompletionPercentage}%` }} />
+              </div>
+              <p>
+                {completedProfileSteps} di {totalProfileSteps} elementi completati.
+              </p>
+            </div>
+
+            <div className="profile-path-card">
+              <div className="profile-card-heading">
+                <div>
+                  <span>Percorso CareerCoach</span>
+                  <strong>I prossimi passi</strong>
+                </div>
+                <span className="profile-path-count">
+                  {careerPathItems.filter((item) => item.complete).length}/{careerPathItems.length}
+                </span>
+              </div>
+              <div className="profile-checklist">
+                {careerPathItems.map((item) => (
+                  <div className={item.complete ? "complete" : ""} key={item.label}>
+                    <span aria-hidden="true" />
+                    <p>{item.label}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="profile-content-grid">
+            <div className="profile-dashboard-section">
+              <div className="profile-section-title">
+                <div>
+                  <span>Target professionali</span>
+                  <h3>Aziende preferite</h3>
                 </div>
               </div>
-            ))}
+
+              {preferredCompanies.length > 0 ? (
+                <div className="favorite-company-grid">
+                  {preferredCompanies.map((item) => (
+                    <div key={item}>
+                      <span>{item.charAt(0).toUpperCase()}</span>
+                      <div>
+                        <strong>{item}</strong>
+                        <p>Azienda rilevata dalle tue preferenze</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="profile-empty-state">
+                  <span className="profile-empty-icon" aria-hidden="true">A</span>
+                  <div>
+                    <strong>Nessuna azienda preferita rilevata</strong>
+                    <p>Le aziende compariranno automaticamente quando le inserirai in Personalizza la tua esperienza.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="profile-dashboard-section profile-documents-section">
+              <div className="profile-section-title">
+                <div>
+                  <span>Archivio personale</span>
+                  <h3>I tuoi documenti</h3>
+                </div>
+              </div>
+
+              <div className="document-group">
+                <div className="document-group-heading">
+                  <strong>CV Master</strong>
+                  <span>Documento principale</span>
+                </div>
+                <div className="document-item">
+                  <span>CV</span>
+                  <div>
+                    <strong>{profile.cv_filename || "CV Master non caricato"}</strong>
+                    <p>{profile.cv_filename ? "File principale usato per analisi e ottimizzazioni." : "Carica il tuo CV per iniziare il percorso."}</p>
+                  </div>
+                  <div className="document-actions">
+                    <button className="secondary-button change-cv-button" type="button" onClick={() => transitionToStep("cv-upload")}
+                      aria-label={profile.cv_filename ? "Cambia CV" : "Carica CV"}
+                      title={profile.cv_filename ? "Cambia CV" : "Carica CV"}
+                    >
+                      {profile.cv_filename ? "Cambia CV" : "Carica CV"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="document-group">
+                <div className="document-group-heading">
+                  <strong>CV ottimizzati</strong>
+                  <span>{optimizedCvsList.length} {optimizedCvsList.length === 1 ? "versione" : "versioni"}</span>
+                </div>
+                {latestOptimizedCv ? (
+                  <div className="document-item document-item-optimized">
+                    <span>AI</span>
+                    <div>
+                      <strong>{latestOptimizedCv.target_role || "CV Ottimizzato"}</strong>
+                      <p>{`${latestOptimizedCv.target_company || "Azienda"}${latestOptimizedCv.created_at ? ` - ${latestOptimizedCv.created_at}` : ""}`}</p>
+                    </div>
+                    <div className="document-actions">
+                      {latestOptimizedCv.has_docx && (
+                        <a href={`${API_URL}${latestOptimizedCv.docx_download_url}`} download aria-label="Scarica DOCX" title="Scarica DOCX">DOCX</a>
+                      )}
+                      {latestOptimizedCv.has_pdf && (
+                        <a href={`${API_URL}${latestOptimizedCv.pdf_download_url}`} download aria-label="Scarica PDF" title="Scarica PDF">PDF</a>
+                      )}
+                      {optimizedCvsList.length > 1 && (
+                        <button className="document-text-button" type="button" onClick={() => setShowOptimizedCvVersions((current) => !current)}>
+                          {showOptimizedCvVersions ? "Chiudi" : "Tutte"}
+                        </button>
+                      )}
+                      <button className="danger-icon-button" type="button" onClick={() => deleteOptimizedCv(latestOptimizedCv.id)} disabled={loading} aria-label="Elimina ultimo CV ottimizzato" title="Elimina ultimo CV ottimizzato">
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="profile-empty-state document-empty-state">
+                    <span className="profile-empty-icon" aria-hidden="true">AI</span>
+                    <div>
+                      <strong>Nessun CV ottimizzato</strong>
+                      <p>Genera una versione mirata per il ruolo e l'azienda che vuoi raggiungere.</p>
+                    </div>
+                    <button type="button" onClick={() => transitionToStep(hasMasterCv ? "home" : "cv-upload")}>
+                      {hasMasterCv ? "Vai agli strumenti CV" : "Carica CV Master"}
+                    </button>
+                  </div>
+                )}
+                {showOptimizedCvVersions && optimizedCvsList.slice(1).map((item) => (
+                  <div className="document-item document-item-version" key={`profile-optimized-${item.id}`}>
+                    <span>CV</span>
+                    <div>
+                      <strong>{item.target_role || "Ruolo"} - {item.target_company || "Azienda"}</strong>
+                      <p>{item.created_at || ""}{item.generation_status ? ` - ${item.generation_status}` : ""}</p>
+                    </div>
+                    <div className="document-actions">
+                      {item.has_docx && (
+                        <a href={`${API_URL}${item.docx_download_url}`} download aria-label="Scarica DOCX" title="Scarica DOCX">DOCX</a>
+                      )}
+                      {item.has_pdf && (
+                        <a href={`${API_URL}${item.pdf_download_url}`} download aria-label="Scarica PDF" title="Scarica PDF">PDF</a>
+                      )}
+                      <button type="button" onClick={() => { setOptimizedCv(item); transitionToStep("cv-optimized"); }} aria-label="Visualizza dettagli" title="Visualizza dettagli">
+                        <EyeIcon />
+                      </button>
+                      <button className="danger-icon-button" type="button" onClick={() => deleteOptimizedCv(item.id)} disabled={loading} aria-label="Elimina CV ottimizzato" title="Elimina CV ottimizzato">
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className="profile-danger-zone">
             <div>
-              <strong>Elimina profilo</strong>
-              <p>Rimuove account, CV e storico salvato in CareerCoach.</p>
+              <span>Zona pericolosa</span>
+              <strong>Elimina definitivamente il profilo</strong>
+              <p>Questa azione rimuove account, CV e storico salvato in CareerCoach.</p>
             </div>
             <button type="button" onClick={deleteProfile} disabled={loading}>
               Elimina profilo
