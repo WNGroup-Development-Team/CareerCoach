@@ -1012,6 +1012,14 @@ def build_optimized_cv_text(
             return "projects"
         if normalized_label in {"education", "istruzione", "formazione"}:
             return "education"
+        if normalized_label in {"certifications", "certificazioni", "certificati", "attestati", "certification"}:
+            return "certifications"
+        if normalized_label in {"languages", "lingue", "lingua", "language"}:
+            return "languages"
+        if normalized_label in {"attivita rilevanti", "pagina aggiuntiva", "extra", "extra page", "extra_page", "altre attivita", "altre informazioni", "informazioni aggiuntive"}:
+            return "projects"
+        if normalized_label in {"contacts", "contatti", "contact"}:
+            return "contacts"
         return "profile"
 
     for item in accepted:
@@ -1202,6 +1210,45 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
         if merged_education:
             sections["education"] = merged_education
 
+    if "certifications" in section_buckets:
+        base = sections.get("certifications", "")
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["certifications"]]
+        merged_certifications = _apply_forced_section_change("certifications", base, proposed_texts)
+        if merged_certifications:
+            sections["certifications"] = merged_certifications
+            if "certifications" not in parsed.order:
+                parsed.order.append("certifications")
+        elif proposed_texts:
+            fallback = _fallback_section_merge(base, proposed_texts)
+            if fallback:
+                sections["certifications"] = fallback
+                if "certifications" not in parsed.order:
+                    parsed.order.append("certifications")
+
+    if "languages" in section_buckets:
+        base = sections.get("languages", "")
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["languages"]]
+        merged_languages = _apply_forced_section_change("languages", base, proposed_texts)
+        if merged_languages:
+            sections["languages"] = merged_languages
+            if "languages" not in parsed.order:
+                parsed.order.append("languages")
+        elif proposed_texts:
+            fallback = _fallback_section_merge(base, proposed_texts)
+            if fallback:
+                sections["languages"] = fallback
+                if "languages" not in parsed.order:
+                    parsed.order.append("languages")
+
+    if "contacts" in section_buckets:
+        base = sections.get("contacts", "")
+        proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["contacts"]]
+        merged_contacts = _apply_forced_section_change("contacts", base, proposed_texts)
+        if merged_contacts:
+            sections["contacts"] = merged_contacts
+            if "contacts" not in parsed.order:
+                parsed.order.append("contacts")
+
     if any(key in section_buckets for key in ("skills", "hard_skills", "soft_skills")):
         current = sections.get("hard_skills", "")
         incoming = []
@@ -1278,8 +1325,21 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
                 if line:
                     cleaned_lines.append(line)
             cleaned = "\n".join(cleaned_lines)
-        if section_key == "projects" and not re.search(r"\b(progetto|project|tesi|pipeline|dataset|analisi|svilupp|implement)\b", normalize(cleaned)):
+        if section_key == "projects" and not re.search(r"\b(progetto|project|tesi|pipeline|dataset|analisi|svilupp|implement|collabor|coordin|attivit|risult|esperien|stage|tirocin|volont|hackathon|laborator|ricerc)\b", normalize(cleaned)):
             return ""
+        if section_key in {"certifications", "languages"}:
+            cleaned_lines = []
+            seen_lines = set()
+            for raw_line in cleaned.splitlines():
+                line = clean_line(raw_line)
+                if not line:
+                    continue
+                marker = normalize(line)
+                if marker in seen_lines:
+                    continue
+                seen_lines.add(marker)
+                cleaned_lines.append(line)
+            cleaned = "\n".join(cleaned_lines)
         return cleaned
 
     order = [key for key in SECTION_ORDER if key in sections]

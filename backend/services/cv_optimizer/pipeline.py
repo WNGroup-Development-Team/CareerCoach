@@ -807,16 +807,60 @@ Dati aggiuntivi utente:
         cleaned: List[StructuredRewriteInstruction] = []
         seen = set()
 
+        # Le info extra confermate dall'utente possono creare nuove sezioni anche se assenti nell'originale.
+        user_provided_sections: set[str] = set()
+        if isinstance(user_additional_data, dict):
+            field_to_section = {
+                "experiences": "esperienze",
+                "projects": "progetti",
+                "certifications": "certificazioni",
+                "languages": "lingue",
+                "technical_skills": "hard_skills",
+                "tools": "hard_skills",
+                "soft_skills": "soft_skills",
+                "measurable_results": "esperienze",
+                "company_role_notes": "profilo",
+            }
+            for field_name, section_name in field_to_section.items():
+                if str(user_additional_data.get(field_name) or "").strip():
+                    user_provided_sections.add(section_name)
+            answers = user_additional_data.get("adaptation_answers") or []
+            if isinstance(answers, list):
+                category_to_section = {
+                    "experiences": "esperienze",
+                    "esperienze": "esperienze",
+                    "projects": "progetti",
+                    "progetti": "progetti",
+                    "certifications": "certificazioni",
+                    "certificazioni": "certificazioni",
+                    "languages": "lingue",
+                    "lingue": "lingue",
+                    "technical_skills": "hard_skills",
+                    "tools": "hard_skills",
+                    "soft_skills": "soft_skills",
+                    "measurable_results": "esperienze",
+                    "company_role_notes": "profilo",
+                }
+                for ans in answers:
+                    if not isinstance(ans, dict):
+                        continue
+                    if not str(ans.get("answer") or "").strip():
+                        continue
+                    cat = str(ans.get("category") or "").strip().lower()
+                    section_name = category_to_section.get(cat)
+                    if section_name:
+                        user_provided_sections.add(section_name)
+
         for instruction in instructions:
             target = canonical_section(instruction.target_section)
-            if target == "esperienze" and not source_sections.get("esperienze"):
+            if target == "esperienze" and not source_sections.get("esperienze") and "esperienze" not in user_provided_sections:
                 continue
-            if target == "certificazioni" and not source_sections.get("certificazioni"):
+            if target == "certificazioni" and not source_sections.get("certificazioni") and "certificazioni" not in user_provided_sections:
                 explicit_certification = normalize_text(
                     " ".join([instruction.new_text, *self._user_note_texts(user_additional_data)])
                 )
                 if not any(term in explicit_certification for term in [
-                    "certificazione", "certificato", "attestato", "licenza",
+                    "certificazione", "certificato", "attestato", "licenza", "corso", "master",
                 ]):
                     continue
 
