@@ -567,7 +567,7 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         self.assertEqual(updated.paragraphs[0].runs[0].font.name, "Arial")
         self.assertEqual(updated.paragraphs[1].runs[0].font.name, "Montserrat")
 
-    def test_structured_pipeline_removes_orphan_section_heading(self):
+    def test_structured_pipeline_preserves_empty_input_section_heading(self):
         document = Document()
         document.add_paragraph("COMPETENZE TECNICHE")
         document.add_paragraph("")
@@ -582,7 +582,7 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         updated = Document(io.BytesIO(result.file_bytes))
         texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text.strip()]
 
-        self.assertNotIn("COMPETENZE TECNICHE", texts)
+        self.assertIn("COMPETENZE TECNICHE", texts)
         self.assertIn("PROGETTI", texts)
 
     def test_structured_pipeline_minimizes_trailing_paragraph_after_table(self):
@@ -774,6 +774,58 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         texts = [paragraph.text for paragraph in updated.paragraphs]
         self.assertEqual(applied, 1)
         self.assertEqual(texts, ["PROGETTI", "Progetto esistente", "Nuovo progetto confermato"])
+
+    def test_structured_pipeline_appends_without_deleting_existing_section(self):
+        document = Document()
+        document.add_paragraph("ESPERIENZE PROFESSIONALI")
+        document.add_paragraph("Esperienza originale presso Azienda Uno.")
+        document.add_paragraph("Attivita originale da conservare.")
+        document.add_paragraph("FORMAZIONE")
+        document.add_paragraph("Laurea originale.")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        instructions = pipeline.generate_structured_instructions(
+            cv_text=(
+                "ESPERIENZE PROFESSIONALI\n"
+                "Esperienza originale presso Azienda Uno.\n"
+                "Attivita originale da conservare.\n"
+                "FORMAZIONE\nLaurea originale."
+            ),
+            role="Data Engineer",
+            company="",
+            goal="",
+            accepted_suggestions=[{
+                "suggestion_id": "user-box-experience",
+                "target_section": "ESPERIENZE PROFESSIONALI",
+                "old_text_hint": "",
+                "new_text": "Data Engineer presso Poste Italiane, 2020-2024.",
+            }],
+            user_additional_data={
+                "experiences": "Ho lavorato dal 2020 al 2024 presso Poste Italiane come Data Engineer."
+            },
+            use_llm=False,
+        )
+
+        self.assertEqual(instructions[0].action, "append")
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            instructions,
+        )
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+
+        self.assertEqual(result.validation_report["status"], "applied")
+        self.assertEqual(
+            texts,
+            [
+                "ESPERIENZE PROFESSIONALI",
+                "Esperienza originale presso Azienda Uno.",
+                "Attivita originale da conservare.",
+                "Data Engineer presso Poste Italiane, 2020-2024.",
+                "FORMAZIONE",
+                "Laurea originale.",
+            ],
+        )
 
     def test_appends_inside_existing_table_section(self):
         document = Document()

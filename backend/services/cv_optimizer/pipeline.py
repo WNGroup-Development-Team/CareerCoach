@@ -722,6 +722,10 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
             normalized_suggestions.append({
                 "suggestion_id": suggestion_id,
                 "target_section": target_section,
+                "action": str(
+                    suggestion.get("action")
+                    or ("append" if not old_text_hint else "replace")
+                ).strip().lower(),
                 "old_text_hint": old_text_hint,
                 "new_text": new_text,
                 "items": [str(item) for item in items if str(item).strip()],
@@ -772,7 +776,7 @@ Dati aggiuntivi utente:
                 instructions.append(StructuredRewriteInstruction(
                     suggestion_id=suggestion["suggestion_id"],
                     target_section=suggestion["target_section"],
-                    action="replace",
+                    action=suggestion["action"],
                     old_text_hint=suggestion["old_text_hint"],
                     new_text=suggestion["new_text"],
                     items=suggestion["items"],
@@ -898,7 +902,7 @@ Dati aggiuntivi utente:
             cleaned.append(StructuredRewriteInstruction(
                 suggestion_id=instruction.suggestion_id,
                 target_section=instruction.target_section,
-                action=instruction.action,
+                action="append" if str(instruction.action).strip().lower() == "append" else "replace",
                 old_text_hint=instruction.old_text_hint,
                 new_text=text,
                 items=list(instruction.items),
@@ -1068,7 +1072,6 @@ Dati aggiuntivi utente:
             else:
                 failed_ids.append(instruction.suggestion_id)
 
-        self._remove_empty_section_headings(document)
         self._polish_document_typography(document)
         self._remove_oversized_table_row_minimums(document)
         self._collapse_trailing_blank_paragraphs(document)
@@ -1383,6 +1386,9 @@ Dati aggiuntivi utente:
         replacement_lines = [line.strip() for line in instruction.new_text.splitlines() if line.strip()]
         if not replacement_lines:
             return "failed"
+        if instruction.action == "append":
+            self._append_to_existing_section(matching, replacement_lines)
+            return "applied"
         if self._is_high_confidence_section_instruction(instruction):
             self._rewrite_section_block(document, matching, replacement_lines, instruction)
         else:
@@ -1429,6 +1435,20 @@ Dati aggiuntivi utente:
         ):
             return False
         return True
+
+    def _append_to_existing_section(
+        self,
+        matching_contexts: List[ParagraphContext],
+        replacement_lines: List[str],
+    ) -> None:
+        anchor = matching_contexts[-1]
+        section_name = anchor.section
+        previous = anchor.paragraph
+        for line_index, line in enumerate(replacement_lines):
+            new_paragraph = self._insert_paragraph_after(previous, line)
+            self._copy_paragraph_format(previous, new_paragraph)
+            self._style_section_line(new_paragraph, section_name, line_index)
+            previous = new_paragraph
 
     def _rewrite_section_block(
         self,

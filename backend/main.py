@@ -5388,7 +5388,10 @@ def build_additional_rewrite_instructions(
             fragment_plain = normalize_plain_text(cleaned_fragment)
             if any(term in fragment_plain for term in ["progetto", "project", "tesi"]):
                 section, category = "PROGETTI", "project"
-            elif any(term in fragment_plain for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]):
+            elif any(term in fragment_plain for term in [
+                "azienda", "cliente", "lavoro", "lavorato", "ho lavorato",
+                "tirocinio", "stage", "impiego", "presso", "ruolo",
+            ]):
                 section, category = "ESPERIENZE PROFESSIONALI", "experience"
             else:
                 section, category = "ATTIVITA RILEVANTI", "extra_page"
@@ -5418,11 +5421,21 @@ def build_additional_rewrite_instructions(
             professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
             if not professional_text:
                 return
-        elif category == "experience" and not any(
-            term in normalize_plain_text(cleaned_fragment)
-            for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]
-        ):
-            return
+        elif category == "experience":
+            fragment_plain = normalize_plain_text(cleaned_fragment)
+            if not any(
+                term in fragment_plain
+                for term in ["azienda", "cliente", "lavoro", "lavorato", "presso", "tirocinio", "stage", "impiego", "ruolo"]
+            ):
+                # Se l'utente ha descritto un'esperienza in forma sintetica,
+                # la manteniamo comunque ma la teniamo nella sezione corretta.
+                section = "ESPERIENZE PROFESSIONALI"
+            professional_text = build_professional_extra_text(
+                {"additional_notes": cleaned_fragment},
+                role,
+            )
+            if not professional_text:
+                return
         else:
             professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
             if not professional_text:
@@ -6489,7 +6502,11 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
             key in {"certifications", "languages"}
             and bool(re.fullmatch(r"(?i)(?:inglese\s+)?[abc][12]", cleaned))
         )
-        if not is_language_level and is_low_quality_text(cleaned, min_chars=8, min_words=2):
+        if (
+            not is_language_level
+            and not is_meaningful_cv_detail(cleaned)
+            and is_low_quality_text(cleaned, min_chars=8, min_words=2)
+        ):
             rejected_candidates.append(key.replace("_", " "))
             continue
         sanitized[key] = cleaned
@@ -6502,7 +6519,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
         answer = clean_answer(item.get("answer", ""), question)
         if not answer:
             continue
-        if is_low_quality_text(answer, min_chars=8, min_words=2):
+        if not is_meaningful_cv_detail(answer) and is_low_quality_text(answer, min_chars=8, min_words=2):
             rejected_candidates.append(f"risposta domanda {index + 1}")
             continue
         answers.append({
@@ -6534,7 +6551,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
             continue
         if not name:
             continue
-        if detail and is_low_quality_text(detail, min_chars=6, min_words=2):
+        if detail and not is_meaningful_cv_detail(detail) and is_low_quality_text(detail, min_chars=6, min_words=2):
             rejected_candidates.append(f"conferma skill {name}")
             continue
         item_id = str(item.get("id") or name).strip() if isinstance(item, dict) else name
@@ -7724,7 +7741,10 @@ def is_low_quality_text(value: Optional[str], min_chars: int = 3, min_words: int
     if re.fullmatch(r"(.)\1{3,}", compact or ""):
         return True
 
-    if re.search(r"([a-z0-9]{1,3})\1{3,}", compact):
+    # Reject inputs made almost entirely from a repeated short token (for
+    # example "abcabcabcabc"), without flagging valid dates or words that
+    # happen to contain a repeated sequence.
+    if re.fullmatch(r"([a-z0-9]{1,3})\1{3,}", compact or ""):
         return True
 
     vowels = len(re.findall(r"[aeiou]", compact))
@@ -7733,10 +7753,30 @@ def is_low_quality_text(value: Optional[str], min_chars: int = 3, min_words: int
         return True
 
     unique_ratio = len(set(compact)) / max(len(compact), 1)
-    if len(compact) >= 8 and unique_ratio < 0.28:
+    # Character diversity is meaningful only for short inputs. In normal
+    # sentences the ratio naturally decreases as the text gets longer.
+    if 8 <= len(compact) <= 24 and unique_ratio < 0.28:
         return True
 
     return False
+
+
+def is_meaningful_cv_detail(value: Optional[str]) -> bool:
+    """Return True when a short CV note still contains concrete evidence."""
+    cleaned = normalize_plain_text(value)
+    if not cleaned:
+        return False
+
+    concrete_patterns = (
+        r"\b(?:19|20)\d{2}\b",
+        r"\b[abc][12]\b",
+        r"\b(?:presso|azienda|cliente|tirocinio|stage|impiego|lavorato)\b",
+        r"\b(?:certificazione|certificato|attestato|corso|laurea|diploma)\b",
+        r"\b(?:progetto|dashboard|dataset|portfolio|tesi)\b",
+        r"\b(?:sql|python|java|javascript|typescript|excel|power bi|tableau|kpi|docker|git|github|aws|azure)\b",
+        r"\b(?:problem solving|team working|leadership|comunicazione|organizzazione|precisione|collaborazione)\b",
+    )
+    return any(re.search(pattern, cleaned) for pattern in concrete_patterns)
 
 
 def validate_role_plausibility(role: Optional[str]) -> Dict:
@@ -10671,6 +10711,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 {
                     "suggestion_id": instruction.source_id or f"rewrite-instruction-{index + 1}",
                     "target_section": instruction.section,
+                    "action": "append" if not (instruction.original or "").strip() else "replace",
                     "old_text_hint": instruction.original,
                     "new_text": instruction.replacement,
                     "reason": instruction.reason,

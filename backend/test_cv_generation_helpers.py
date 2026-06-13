@@ -6,6 +6,7 @@ from main import (
     build_confirmed_skill_rewrite_instructions,
     call_rewrite_llm,
     fallback_skill_detail_instruction,
+    sanitize_cv_additional_data,
     rewrite_preserves_instruction_content,
 )
 from services.cv_optimizer import RewriteInstruction
@@ -37,6 +38,55 @@ class CvGenerationHelperTests(unittest.TestCase):
         self.assertEqual(len(instructions), 1)
         self.assertEqual(instructions[0].section, "LINGUE")
         self.assertIn("Inglese B2", instructions[0].replacement)
+
+    def test_concrete_short_cv_details_are_not_rejected(self):
+        sanitized, rejected = sanitize_cv_additional_data({
+            "experiences": "ho lavorato dal 2020 al 2024 in Poste Italiane",
+            "certifications": "ho ottenuto una certificazione di livello B2 per la lingua inglese",
+            "technical_skills": "SQL",
+            "soft_skills": "Problem solving",
+            "confirmed_skills": [{
+                "id": "kpi",
+                "name": "KPI",
+                "category": "hard_skill",
+                "user_example": (
+                    "Usati in progetti universitari di analisi dati per valutare risultati, "
+                    "confrontare performance e monitorare indicatori utili al raggiungimento "
+                    "degli obiettivi."
+                ),
+                "target_section": "HARD SKILLS",
+            }],
+        })
+
+        self.assertEqual(rejected, [])
+        self.assertIn("experiences", sanitized)
+        self.assertIn("certifications", sanitized)
+        self.assertEqual(sanitized["technical_skills"], "SQL")
+        self.assertEqual(sanitized["soft_skills"], "Problem solving")
+        self.assertEqual(sanitized["confirmed_skills"][0]["name"], "KPI")
+
+    @patch("main.build_professional_extra_text")
+    def test_experience_box_builds_rewrite_instruction(self, build_text):
+        build_text.return_value = "Data Engineer presso Poste Italiane, 2020-2024."
+
+        instructions = build_additional_rewrite_instructions(
+            {"experiences": "ho lavorato dal 2020 al 2024 in Poste Italiane come Data Engineer"},
+            "Data Engineer",
+        )
+
+        self.assertEqual(len(instructions), 1)
+        self.assertEqual(instructions[0].section, "ESPERIENZE PROFESSIONALI")
+        self.assertIn("Poste Italiane", instructions[0].replacement)
+
+    def test_generic_or_spam_cv_details_are_still_rejected(self):
+        sanitized, rejected = sanitize_cv_additional_data({
+            "experiences": "boh",
+            "certifications": "abcabcabcabc",
+        })
+
+        self.assertEqual(sanitized, {})
+        self.assertIn("experiences", rejected)
+        self.assertIn("certifications", rejected)
 
     def test_all_confirmed_hard_skills_are_kept_without_truncation(self):
         names = [
