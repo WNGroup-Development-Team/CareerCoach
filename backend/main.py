@@ -10142,7 +10142,34 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             confirmed_skill_payload.extend(payload)
     if confirmed_skill_payload:
         raw_additional_data["confirmed_skills"] = confirmed_skill_payload
+    # === DEBUG cv-optimize: dati extra ricevuti ===
+    try:
+        print("=" * 80)
+        print("[CV-OPT DEBUG] raw_additional_data keys:", sorted(list(raw_additional_data.keys())))
+        for _k, _v in raw_additional_data.items():
+            _preview = str(_v)
+            if len(_preview) > 300:
+                _preview = _preview[:300] + "..."
+            print(f"[CV-OPT DEBUG] raw_additional_data[{_k!r}] = {_preview}")
+        print("=" * 80)
+    except Exception as _dbg_exc:
+        print(f"[CV-OPT DEBUG] errore nel logging raw_additional_data: {_dbg_exc}")
+
     user_additional_data, rejected_additional_fields = sanitize_cv_additional_data(raw_additional_data)
+
+    # === DEBUG cv-optimize: risultati sanitize ===
+    try:
+        print("[CV-OPT DEBUG] user_additional_data keys (post-sanitize):", sorted(list((user_additional_data or {}).keys())))
+        for _k, _v in (user_additional_data or {}).items():
+            _preview = str(_v)
+            if len(_preview) > 300:
+                _preview = _preview[:300] + "..."
+            print(f"[CV-OPT DEBUG] user_additional_data[{_k!r}] = {_preview}")
+        print(f"[CV-OPT DEBUG] rejected_additional_fields = {rejected_additional_fields}")
+        print("=" * 80)
+    except Exception as _dbg_exc:
+        print(f"[CV-OPT DEBUG] errore nel logging user_additional_data: {_dbg_exc}")
+
     accepted_suggestions = normalize_accepted_coach_suggestions(data.accepted_suggestions)
     rejected_suggestions = data.rejected_suggestions if isinstance(data.rejected_suggestions, list) else []
     rejected_suggestion_ids = [
@@ -10279,12 +10306,37 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             extension = "docx"
             applied_changes_count = len(apply_result.applied_ids)
             final_docx_text = apply_result.validation_report.get("final_text", "")
+            # === DEBUG cv-optimize: stato applicazione DOCX ===
+            try:
+                print("[CV-OPT DEBUG] structured_instructions count =", len(structured_instructions))
+                _section_counts: Dict[str, int] = {}
+                for _inst in structured_instructions:
+                    _section_counts[_inst.target_section] = _section_counts.get(_inst.target_section, 0) + 1
+                print(f"[CV-OPT DEBUG] structured_instructions per sezione = {_section_counts}")
+                print(f"[CV-OPT DEBUG] apply_result.applied_ids count = {len(apply_result.applied_ids)}")
+                print(f"[CV-OPT DEBUG] apply_result.validation_report.status = {apply_result.validation_report.get('status')}")
+                _changed = normalize_plain_text(final_docx_text) != normalize_plain_text(cv_text)
+                print(f"[CV-OPT DEBUG] final_docx_text diverso da cv_text? {_changed}")
+                _vr = apply_result.validation_report or {}
+                for _vk, _vv in _vr.items():
+                    if _vk == "final_text":
+                        continue
+                    _vp = str(_vv)
+                    if len(_vp) > 400:
+                        _vp = _vp[:400] + "..."
+                    print(f"[CV-OPT DEBUG] validation_report[{_vk!r}] = {_vp}")
+                print("=" * 80)
+            except Exception as _dbg_exc:
+                print(f"[CV-OPT DEBUG] errore nel logging DOCX apply: {_dbg_exc}")
+
             if normalize_plain_text(final_docx_text) == normalize_plain_text(cv_text):
+                print("[CV-OPT DEBUG] 422 -> testo finale identico al CV originale")
                 raise HTTPException(
                     status_code=422,
                     detail="Il motore non è riuscito ad applicare modifiche reali al DOCX. Il file originale non è stato salvato come ottimizzato.",
                 )
             if apply_result.validation_report.get("status") == "failed":
+                print("[CV-OPT DEBUG] 422 -> validation_report.status = failed")
                 raise HTTPException(
                     status_code=422,
                     detail={
@@ -10300,6 +10352,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
 
     final_cv_text = apply_result.validation_report.get("final_text", "") if original_filename.endswith(".docx") and original_file_bytes else optimized_text
     if not final_cv_text.strip():
+        print("[CV-OPT DEBUG] 422 -> final_cv_text vuoto")
         raise HTTPException(status_code=422, detail="Il CV finale non contiene testo valido.")
 
     quality_review = review_generated_cv_quality(
@@ -10310,6 +10363,13 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         accepted_instructions=rewrite_result.get("instructions") or [],
     )
     if not quality_review.get("ready_to_send", False):
+        try:
+            print("[CV-OPT DEBUG] 422 -> quality_review NON ready_to_send")
+            print(f"[CV-OPT DEBUG] quality_review.score = {quality_review.get('score')}")
+            print(f"[CV-OPT DEBUG] quality_review.issues = {quality_review.get('issues')}")
+            print(f"[CV-OPT DEBUG] quality_review.revisions count = {len(quality_review.get('revisions') or [])}")
+        except Exception as _dbg_exc:
+            print(f"[CV-OPT DEBUG] errore nel logging quality_review: {_dbg_exc}")
         raise HTTPException(
             status_code=422,
             detail={
