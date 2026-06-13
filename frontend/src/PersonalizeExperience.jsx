@@ -1,5 +1,28 @@
 import "./App.css";
 
+function isPlausibleRole(value) {
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  const words = normalized.match(/[a-zà-ÿ0-9+#.-]+/gi) || [];
+  const genericValues = new Set([
+    "lavoro",
+    "ruolo",
+    "impiego",
+    "posto",
+    "qualsiasi lavoro",
+    "lavoro qualunque",
+    "da definire",
+  ]);
+  const sentenceTerms = /\b(voglio|vorrei|prepararmi|colloquio|intervista|candidarmi|cerco|azienda|presso)\b/i;
+
+  return (
+    normalized.length >= 4
+    && words.length >= 1
+    && words.length <= 6
+    && !genericValues.has(normalized)
+    && !sentenceTerms.test(normalized)
+  );
+}
+
 function BuildingIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -41,19 +64,24 @@ export default function PersonalizeExperience({
   sector = "",
   validation = { status: "idle", errors: {}, warnings: [], message: "" },
   isValidating = false,
+  requireRole = false,
   submitLabel = "Continua",
 }) {
   const normalizedGoal = goal.trim();
   const normalizedCompany = company.trim();
   const normalizedRole = role.trim();
-  const hasRole = normalizedRole && normalizedRole.toLowerCase() !== "da definire";
   const hasQuickMethod = normalizedGoal.length > 19;
-  const hasSpecificDetails = normalizedCompany.length > 2 && hasRole && normalizedRole.length > 3;
+  const hasPlausibleRole = isPlausibleRole(normalizedRole);
+  const hasSpecificDetails = normalizedCompany.length > 2 && hasPlausibleRole;
 
   const localErrors = {
-    description: hasQuickMethod || hasSpecificDetails ? "" : "Compila il metodo rapido o i dettagli dell'azienda.",
+    description: hasQuickMethod || hasSpecificDetails ? "" : "Descrivi la candidatura o compila i dettagli specifici.",
     company: hasQuickMethod || (!normalizedCompany || normalizedCompany.length > 2) ? "" : "Inserisci un nome azienda valido.",
-    role: hasQuickMethod || (!normalizedRole || (hasRole && normalizedRole.length > 3)) ? "" : "Inserisci un ruolo lavorativo reale.",
+    role: requireRole && !hasPlausibleRole
+      ? "Inserisci un ruolo professionale specifico, ad esempio Data Analyst o Software Engineer."
+      : (!normalizedRole || hasPlausibleRole)
+        ? ""
+        : "Inserisci solo il titolo del ruolo, non una frase sul colloquio.",
   };
 
   const fieldErrors = {
@@ -61,7 +89,10 @@ export default function PersonalizeExperience({
     ...(validation.errors || {}),
   };
 
-  const hasLocalValidFields = (hasQuickMethod || hasSpecificDetails) && !localErrors.company && !localErrors.role;
+  const hasRequiredContext = requireRole
+    ? hasPlausibleRole && (hasQuickMethod || normalizedCompany.length > 2)
+    : hasQuickMethod || hasSpecificDetails;
+  const hasLocalValidFields = hasRequiredContext && !localErrors.company && !localErrors.role;
   const canSubmit = hasLocalValidFields && !isValidating;
 
   const handleSubmit = (event) => {

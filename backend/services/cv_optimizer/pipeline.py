@@ -811,6 +811,14 @@ Dati aggiuntivi utente:
             target = canonical_section(instruction.target_section)
             if target == "esperienze" and not source_sections.get("esperienze"):
                 continue
+            if target == "certificazioni" and not source_sections.get("certificazioni"):
+                explicit_certification = normalize_text(
+                    " ".join([instruction.new_text, *self._user_note_texts(user_additional_data)])
+                )
+                if not any(term in explicit_certification for term in [
+                    "certificazione", "certificato", "attestato", "licenza",
+                ]):
+                    continue
 
             text = self._clean_instruction_text(instruction.new_text, note_texts)
             if target in {"hard_skills", "soft_skills", "competenze"}:
@@ -949,13 +957,32 @@ Dati aggiuntivi utente:
         return "\n".join(rows)
 
     def _fix_common_grammar(self, text: str) -> str:
+        text = self._repair_mojibake(text)
         cleaned = re.sub(
             r"\brischiare\s+(attivit[aÃ ]|progetti?)\b",
             r"gestire i rischi delle \1",
             text or "",
             flags=re.IGNORECASE,
         )
+        cleaned = re.sub(r"\bcon applicand[oa]?\b", "applicando", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\battraverso di esam(?:e|es|i)\b", "attraverso esami", cleaned, flags=re.IGNORECASE)
         return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+    def _repair_mojibake(self, text: str) -> str:
+        repaired = text or ""
+        for broken, replacement in {
+            "\u00c2\u00b7": "|",
+            "\u00c3\u201a\u00c2\u00b7": "|",
+            "\u00e2\u20ac\u00a2": "|",
+            "\u00c3\u00a0": "a",
+            "\u00c3\u00a8": "e",
+            "\u00c3\u00a9": "e",
+            "\u00c3\u00ac": "i",
+            "\u00c3\u00b2": "o",
+            "\u00c3\u00b9": "u",
+        }.items():
+            repaired = repaired.replace(broken, replacement)
+        return repaired
 
     def apply_instructions_to_docx(
         self,
@@ -1170,8 +1197,8 @@ Dati aggiuntivi utente:
                     }
                 ],
             ]))
-        if content_warnings:
-            status = "failed"
+        if content_warnings and status == "applied":
+            status = "partially_applied"
 
         return {
             "status": status,
@@ -1190,9 +1217,6 @@ Dati aggiuntivi utente:
         final_plain = normalize_text(final_text)
         original_sections = self.parser.section_text_map(original_text)
         final_sections = self.parser.section_text_map(final_text)
-
-        if final_sections.get("esperienze") and not original_sections.get("esperienze"):
-            warnings.append("Sezione ESPERIENZE PROFESSIONALI non presente nel CV originale.")
 
         for marker in INFORMAL_CV_MARKERS:
             if marker in final_plain:

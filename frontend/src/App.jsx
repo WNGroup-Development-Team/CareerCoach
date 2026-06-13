@@ -1845,7 +1845,7 @@ function App() {
         response = await fetchWithTimeout(`${API_URL}/cv/analyze-for-job`, {
           method: "POST",
           body: formData,
-        }, 70000);
+        }, 180000);
       } else {
         response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv/analyze-for-job`, {
           method: "POST",
@@ -1853,7 +1853,7 @@ function App() {
             "Content-Type": "application/json"
           },
           body: JSON.stringify(requestPayload)
-        }, 70000);
+        }, 180000);
       }
 
       const data = await response.json();
@@ -1892,7 +1892,11 @@ function App() {
       transitionToStep("cv-strategy");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      setError(
+        err?.name === "AbortError"
+          ? "L'analisi con Ollama sta richiedendo più tempo del previsto. Il backend potrebbe essere ancora attivo: riprova tra poco."
+          : "Impossibile raggiungere il backend. Avvia FastAPI usando il virtual environment del progetto."
+      );
     } finally {
       setLoading(false);
     }
@@ -2470,35 +2474,6 @@ function App() {
   };
 
   useEffect(() => {
-    if (cvOptimizationStage === 2 && cvOptimizationAnalysis?.suggested_skills) {
-      setCvAdditionalData((current) => {
-        // Only pre-fill if the user hasn't already modified the fields
-        if (current.technical_skills || current.soft_skills || current.tools) {
-          return current;
-        }
-
-        const suggested = cvOptimizationAnalysis.suggested_skills;
-        
-        // Extract names from suggested arrays, which might be objects {name: "Skill", status: "to_confirm"} or strings
-        const extractNames = (items) => {
-          if (!Array.isArray(items)) return "";
-          return items
-            .map(item => typeof item === "string" ? item : item.name)
-            .filter(Boolean)
-            .join(", ");
-        };
-
-        return {
-          ...current,
-          technical_skills: extractNames(suggested.hard_skills),
-          soft_skills: extractNames(suggested.soft_skills),
-          tools: extractNames(suggested.tools),
-        };
-      });
-    }
-  }, [cvOptimizationStage, cvOptimizationAnalysis]);
-
-  useEffect(() => {
     if (step !== "gym" || !userId || history.length > 0) {
       return;
     }
@@ -2813,6 +2788,18 @@ function App() {
     const nextCompany = personalizeForm.company.trim() || "Generica";
     const nextRole = personalizeForm.role.trim();
 
+    if (personalizeIntent === "cv" && !nextRole) {
+      setJobValidation({
+        status: "invalid",
+        errors: {
+          role: "Inserisci un ruolo professionale specifico prima di analizzare il CV.",
+        },
+        warnings: [],
+        message: "Il ruolo è necessario per produrre un'ottimizzazione coerente.",
+      });
+      return;
+    }
+
     setCompany(nextCompany);
 
     if (nextRole) {
@@ -2938,7 +2925,24 @@ function App() {
     .filter((item, index, list) =>
       list.findIndex((candidate) => candidate.name.toLowerCase() === item.name.toLowerCase()) === index
     );
-  const proposedSkillConfirmationItems = skillConfirmationItems.filter((item) => !item.already_present);
+  const proposedSkillConfirmationItems = skillConfirmationItems.filter((item) => {
+    const name = item.name.trim();
+    const normalized = name.toLowerCase();
+    const placeholders = [
+      "competenza specializzata",
+      "competenza tecnica primaria",
+      "competenza tecnica secondaria",
+      "strumento principale",
+      "strumento ausiliario",
+    ];
+    return (
+      !item.already_present
+      && name.length >= 3
+      && !placeholders.includes(normalized)
+      && !normalized.endsWith(" analu")
+      && normalized !== "analu"
+    );
+  });
   const acceptedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "confirmed" || item.status === "accepted");
   const rejectedSkillConfirmations = proposedSkillConfirmationItems.filter((item) => item.status === "rejected");
   const latestOptimizedCv = optimizedCvsList[0] || null;
@@ -3324,6 +3328,7 @@ const screenshotUploadBoxes = [];
           onSubmit={continuePersonalizedPath}
           validation={jobValidation}
           isValidating={jobValidation.status === "validating"}
+          requireRole={personalizeIntent === "cv"}
           submitLabel={personalizeIntent === "cv" ? "Continua" : "Continua alla simulazione"}
         />
       )}
@@ -4189,24 +4194,20 @@ const screenshotUploadBoxes = [];
           <div className="cv-strategy-heading">
             <h2>
               {[
-                "Suggerimenti del coach",
                 "Valuta skill e keyword",
-                "Informazioni extra",
                 "Modifiche accettate",
                 "Genera CV ottimizzato",
               ][cvOptimizationStage]}
             </h2>
             <p>
               {[
-                "Esamina ogni suggerimento e decidi cosa applicare al tuo CV.",
                 "Conferma solo le competenze che possiedi davvero. Puoi aggiungere un esempio per renderle più credibili.",
-                "Aggiungi solo informazioni reali e verificabili, pertinenti al CV e alla candidatura corrente.",
                 "Controlla tutte le modifiche che saranno applicate al nuovo CV.",
                 "Genera il nuovo documento mantenendo stile e struttura del CV originale, ampliandolo solo quando necessario.",
               ][cvOptimizationStage]}
             </p>
           <div className="cv-stage-progress" aria-label="Avanzamento ottimizzazione CV">
-              {["Suggerimenti", "Skill", "Informazioni", "Riepilogo", "Generazione"].map((label, index) => (
+              {["Skill", "Riepilogo", "Generazione"].map((label, index) => (
                 <span
                   className={index <= cvOptimizationStage ? "active" : ""}
                   key={label}
@@ -4218,16 +4219,12 @@ const screenshotUploadBoxes = [];
                   ) : index === 1 ? (
                     <span className="cv-stage-progress-pentagon" aria-hidden="true" />
                   ) : index === 2 ? (
-                    <span className="cv-stage-progress-plus" aria-hidden="true">
-                      +
-                    </span>
-                  ) : index === 3 ? (
                     <span className="cv-stage-progress-summary-icon" aria-hidden="true">
                       <span />
                       <span />
                       <span />
                     </span>
-                  ) : index === 4 ? (
+                  ) : index === 3 ? (
                     <span className="cv-stage-progress-sparkle" aria-hidden="true">
                       <SparkleIcon size={12} />
                     </span>
@@ -4244,7 +4241,7 @@ const screenshotUploadBoxes = [];
             </div>
           </div>
 
-          {cvOptimizationStage === 0 && (
+          {cvOptimizationStage === -2 && (
             <>
               <div className="cv-strategy-section cv-optimize-details-page__suggestions">
                 <div className="cv-strategy-section-title">
@@ -4361,7 +4358,7 @@ const screenshotUploadBoxes = [];
             </>
           )}
 
-          {cvOptimizationStage === 1 && (
+          {cvOptimizationStage === 0 && (
             <>
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
@@ -4462,15 +4459,15 @@ const screenshotUploadBoxes = [];
           <button
             className="cv-next-button"
             type="button"
-            onClick={() => setCvOptimizationStage(2)}
+            onClick={() => setCvOptimizationStage(1)}
             disabled={!allSkillConfirmationsReviewed}
           >
-            {allSkillConfirmationsReviewed ? "Continua con le informazioni extra" : "Valuta tutte le skill e keyword per continuare"}
+            {allSkillConfirmationsReviewed ? "Continua al riepilogo" : "Valuta tutte le skill e keyword per continuare"}
           </button>
             </>
           )}
 
-          {cvOptimizationStage === 2 && (
+          {cvOptimizationStage === -1 && (
             <>
               <div className="cv-strategy-section cv-additional-data-form">
                 <div className="cv-strategy-section-title">
@@ -4559,7 +4556,7 @@ const screenshotUploadBoxes = [];
             </>
           )}
 
-          {cvOptimizationStage === 3 && (
+          {cvOptimizationStage === 1 && (
             <>
           <div className="cv-review-summary">
             <section className="cv-review-card">
@@ -4584,7 +4581,7 @@ const screenshotUploadBoxes = [];
               </div>
             </section>
 
-            <section className="cv-review-card">
+            {false && <section className="cv-review-card">
               <header className="cv-review-card-header">
                 <div className="cv-review-card-title">
                   <span className="cv-review-icon idea">✧</span>
@@ -4605,7 +4602,7 @@ const screenshotUploadBoxes = [];
                   ))}
                 </div>
               )}
-            </section>
+            </section>}
 
             <section className="cv-review-card">
               <header className="cv-review-card-header">
@@ -4613,7 +4610,7 @@ const screenshotUploadBoxes = [];
                   <span className="cv-review-icon star">☆</span>
                   <h3>Skill accettate</h3>
                 </div>
-                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(1)}>
+                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(0)}>
                   Modifica
                 </button>
               </header>
@@ -4645,10 +4642,21 @@ const screenshotUploadBoxes = [];
                   <span className="cv-review-icon plus">+</span>
                   <h3>Informazioni extra</h3>
                 </div>
-                <button className="cv-review-edit-button" type="button" onClick={() => setCvOptimizationStage(2)}>
-                  Modifica
-                </button>
               </header>
+              <div className="cv-review-extra-editor">
+                <label className="cv-additional-field">
+                  <span>Vuoi aggiungere altre note generali?</span>
+                  <textarea
+                    value={cvAdditionalData.additional_notes}
+                    onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
+                    placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
+                    rows={4}
+                  />
+                  <small>
+                    Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
+                  </small>
+                </label>
+              </div>
               {cvSummaryExtraItems.length > 0 ? (
                 <div className="cv-review-extra-list">
                   {cvSummaryExtraItems.map((item, index) => (
@@ -4665,17 +4673,17 @@ const screenshotUploadBoxes = [];
           </div>
 
           <div className="cv-stage-actions">
-            <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(4)}>
+            <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(2)}>
               Continua alla generazione
             </button>
-            <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(2)}>
-              Modifica informazioni extra
+            <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(0)}>
+              Torna a skill e keyword
             </button>
           </div>
             </>
           )}
 
-          {cvOptimizationStage === 4 && (
+          {cvOptimizationStage === 2 && (
           <div className="cv-generation-card">
             <div className="cv-generation-copy">
               <h3>Cosa verrà generato</h3>
@@ -4687,11 +4695,11 @@ const screenshotUploadBoxes = [];
             <div className="cv-generation-summary">
               <div>
                 <span aria-hidden="true">✓</span>
-                <p><strong>{selectedCoachSuggestionItems.length}</strong> suggerimenti del coach applicati</p>
+                <p><strong>{acceptedSkillConfirmations.length}</strong> competenze confermate per il CV</p>
               </div>
               <div>
                 <span aria-hidden="true">✓</span>
-                <p><strong>{acceptedSkillConfirmations.length}</strong> skill accettate, <strong>{rejectedSkillConfirmations.length}</strong> rifiutate</p>
+                <p><strong>{rejectedSkillConfirmations.length}</strong> competenze escluse</p>
               </div>
               <div>
                 <span aria-hidden="true">✓</span>
@@ -4810,6 +4818,9 @@ const screenshotUploadBoxes = [];
             )}
             <button className="secondary-button" type="button" onClick={() => transitionToStep("home")}>
               Crea un altro CV ottimizzato
+            </button>
+            <button className="cv-next-button" type="button" onClick={() => transitionToStep("gym")}>
+              Vai al colloquio
             </button>
             <button className="secondary-button" type="button" onClick={() => transitionToStep("profile")}>
               Vai al profilo

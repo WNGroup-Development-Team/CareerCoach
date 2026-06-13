@@ -24,6 +24,7 @@ from main import (
 )
 from services.cv_optimizer import RewriteInstruction
 from services.cv_optimizer.skill_suggestions import build_skill_mini_shot_suggestions
+from services.cv_optimizer.suggestions import refine_cv_job_suggestions
 
 
 class TestSuggestionGeneration(unittest.TestCase):
@@ -48,6 +49,38 @@ class TestSuggestionGeneration(unittest.TestCase):
             call_ollama("test", timeout=25, json_mode=True)
 
         self.assertEqual(captured["timeout"], 25)
+
+    def test_ollama_refines_each_static_coach_suggestion(self):
+        suggestion = {
+            "id": "profile-1",
+            "type": "actionableEdit",
+            "category": "profile",
+            "section": "CHI SONO",
+            "title": "Rendi il profilo piu mirato",
+            "description": "Bozza locale.",
+            "reason": "Bozza locale.",
+            "original_text": "Studentessa magistrale con interesse per analisi dei dati.",
+            "proposed_text": "Studentessa magistrale con interesse per analisi dei dati e ruolo target.",
+        }
+        evaluation = {
+            "cv_text": "CHI SONO\nStudentessa magistrale con interesse per analisi dei dati.",
+            "target": {"role": "Data Analyst", "company": ""},
+        }
+        llm_result = {
+            "title": "Rafforza il profilo analitico",
+            "reason": "Presenta con maggiore precisione il percorso.",
+            "proposed_text": "Studentessa magistrale con interesse per l'analisi dei dati.",
+        }
+
+        with patch("main.call_lightweight_analysis_llm", return_value=llm_result):
+            refined = refine_cv_job_suggestions([suggestion], evaluation)
+
+        self.assertEqual(refined[0]["generated_by"], "ollama")
+        self.assertEqual(refined[0]["title"], "Rafforza il profilo analitico")
+        self.assertEqual(
+            refined[0]["proposed_text"],
+            "Studentessa magistrale con interesse per l'analisi dei dati.",
+        )
 
     def test_section_marker_detection_ignores_normal_sentences(self):
         self.assertEqual(count_section_markers("Esperienza valorizzata per il ruolo"), 0)
@@ -371,15 +404,14 @@ class TestSuggestionGeneration(unittest.TestCase):
         print(f"  Names: {names}")
 
     def test_generic_role_fallback(self):
-        """Test that generic role gets fallback suggestions."""
+        """Generic roles must not produce invented placeholder skills."""
         cv_text = "I have work experience in technology sector."
         role = "Specialist"
         result = build_role_skill_suggestions(cv_text, role)
         
         print(f"\n[Specialist] confirmation_items: {len(result['confirmation_items'])}")
         # Should still generate something via fallback
-        self.assertGreater(len(result['confirmation_items']), 0, 
-                          "Generic role should generate fallback suggestions")
+        self.assertEqual(result["confirmation_items"], [])
 
     def test_infer_skill_library_project_manager(self):
         """Test that infer_skill_library_from_role works for Project Manager."""

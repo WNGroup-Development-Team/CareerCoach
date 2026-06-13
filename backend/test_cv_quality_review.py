@@ -40,7 +40,7 @@ class CvQualityReviewTests(unittest.TestCase):
 
         self.assertIn("coach_suggestions", normalized)
         self.assertIsInstance(normalized["coach_suggestions"], list)
-        self.assertGreater(len(normalized["coach_suggestions"]), 0)
+        self.assertEqual(normalized["coach_suggestions"], [])
         self.assertIn("questions_for_user", normalized)
         self.assertIsInstance(normalized["questions_for_user"], list)
 

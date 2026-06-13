@@ -1682,7 +1682,7 @@ textarea {
 
 .cv-stage-progress {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   margin-top: 18px;
 }
@@ -2408,6 +2408,11 @@ textarea {
   padding: 18px 20px;
 }
 
+.cv-review-extra-editor {
+  padding: 18px 20px;
+  border-top: 1px solid #e4ebf2;
+}
+
 .inline-link-button {
   justify-self: start;
   border: 0;
@@ -2555,22 +2560,24 @@ textarea {
 }
 
 .cv-generation-button {
-  min-height: 40px;
+  width: 100%;
+  min-height: 13px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 9px;
-  padding: 0 18px;
+  padding: 0 22px;
   border: 1px solid #9fd4fb;
-  border-radius: 8px;
+  border-radius: 999px;
   background: #ffffff;
   color: #0f76a8;
   cursor: pointer;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 900;
-  box-shadow: 0 10px 22px rgba(20, 137, 202, 0.10);
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.16);
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
+
 
 .cv-generation-button:hover:not(:disabled) {
   border-color: #149eea;
@@ -2587,6 +2594,22 @@ textarea {
 .cv-stage-actions {
   display: grid;
   gap: 12px;
+}
+
+.cv-optimize-details-page .cv-next-button,
+.cv-optimize-details-page .cv-stage-actions .secondary-button,
+.cv-optimize-details-page .cv-generation-button {
+  width: 100%;
+  min-height: 54px;
+  padding: 0 22px;
+  border-radius: 999px;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.cv-optimize-details-page .suggestion-choice-button {
+  min-height: 48px;
+  padding: 0 16px;
 }
 
 .optimized-cv-actions .secondary-button,

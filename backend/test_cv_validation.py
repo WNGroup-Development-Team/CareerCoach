@@ -137,6 +137,27 @@ def create_docx_with_textbox(name, email):
 
 
 class CvValidationTests(unittest.TestCase):
+    def test_known_company_and_clearly_unrelated_role_are_rejected(self):
+        result = main.validate_company_role_coherence("Google", "Estetista")
+
+        self.assertFalse(result["is_valid"])
+        self.assertIn("non sembra coerente", result["message"])
+
+    def test_cross_functional_role_is_not_rejected_for_known_company(self):
+        result = main.validate_company_role_coherence("Google", "HR Specialist")
+
+        self.assertTrue(result["is_valid"])
+
+    def test_role_compatible_with_company_sector_is_accepted(self):
+        result = main.validate_company_role_coherence("Ferrari", "Meccanico")
+
+        self.assertTrue(result["is_valid"])
+
+    def test_unknown_company_is_not_rejected_without_enough_evidence(self):
+        result = main.validate_company_role_coherence("Studio Aurora", "Estetista")
+
+        self.assertTrue(result["is_valid"])
+
     def test_valid_docx_cv_with_images_is_accepted_when_visual_service_unavailable(self):
         docx_bytes = create_docx_with_image(
             [

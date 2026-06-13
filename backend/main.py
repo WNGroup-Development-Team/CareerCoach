@@ -7160,6 +7160,57 @@ KNOWN_COMPANIES = {
     "lamborghini", "barilla", "luxottica", "gucci", "prada"
 }
 
+COMPANY_SECTOR_HINTS = {
+    "technology": {
+        "google", "amazon", "microsoft", "apple", "meta", "facebook",
+        "netflix", "ibm", "oracle", "linkedin", "spotify", "salesforce",
+        "adobe", "sap",
+    },
+    "consulting": {"accenture", "deloitte", "pwc", "kpmg", "ey"},
+    "finance": {"intesa sanpaolo", "unicredit"},
+    "automotive": {"tesla", "ferrari", "lamborghini"},
+    "energy": {"enel", "eni"},
+    "telecommunications": {"telecom", "tim"},
+    "food": {"barilla"},
+    "fashion": {"luxottica", "gucci", "prada"},
+    "industrial": {"siemens"},
+    "logistics": {"poste italiane"},
+}
+
+ROLE_SECTOR_HINTS = {
+    "beauty": {
+        "estetista", "parrucchiere", "parrucchiera", "barbiere",
+        "onicotecnica", "make up artist", "truccatore", "truccatrice",
+    },
+    "healthcare": {
+        "infermiere", "infermiera", "medico", "fisioterapista",
+        "odontoiatra", "farmacista", "ostetrica",
+    },
+    "hospitality": {
+        "cameriere", "cameriera", "cuoco", "cuoca", "chef",
+        "barista", "pizzaiolo", "receptionist albergo",
+    },
+    "construction": {
+        "muratore", "imbianchino", "idraulico", "elettricista",
+        "carpentiere", "piastrellista",
+    },
+    "automotive_service": {
+        "meccanico", "meccanica", "gommista", "carrozziere",
+    },
+    "education": {
+        "maestra", "maestro", "insegnante scuola", "educatrice asilo",
+    },
+}
+
+SECTOR_COMPATIBILITY = {
+    "beauty": {"fashion"},
+    "healthcare": set(),
+    "hospitality": {"food"},
+    "construction": {"industrial"},
+    "automotive_service": {"automotive", "industrial"},
+    "education": set(),
+}
+
 
 def strip_accents(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
@@ -7220,6 +7271,16 @@ def validate_role_plausibility(role: Optional[str]) -> Dict:
         }
 
     words = cleaned.split()
+    sentence_terms = {
+        "voglio", "vorrei", "prepararmi", "colloquio", "intervista",
+        "candidarmi", "cerco", "azienda", "presso",
+    }
+    if len(words) > 6 or sentence_terms.intersection(words):
+        return {
+            "is_valid": False,
+            "message": "Inserisci solo il titolo del ruolo, ad esempio Data Analyst o Software Engineer, non una frase sul colloquio.",
+        }
+
     has_role_keyword = any(keyword in cleaned for keyword in ROLE_KEYWORDS)
     looks_like_title = 1 <= len(words) <= 6 and any(len(word) >= 3 for word in words)
 
@@ -7229,6 +7290,60 @@ def validate_role_plausibility(role: Optional[str]) -> Dict:
     return {
         "is_valid": False,
         "message": "Il ruolo inserito non sembra coerente. Inserisci un ruolo reale, ad esempio Data Analyst, Software Engineer o Marketing Specialist.",
+    }
+
+
+def classify_company_sector(company: Optional[str], sector: Optional[str] = "") -> Optional[str]:
+    cleaned_company = normalize_plain_text(company)
+    cleaned_sector = normalize_plain_text(sector)
+    sector_aliases = {
+        "tech": "technology",
+        "tecnologia": "technology",
+        "informatica": "technology",
+        "consulenza": "consulting",
+        "finanza": "finance",
+        "banca": "finance",
+        "automotive": "automotive",
+        "energia": "energy",
+        "telecomunicazioni": "telecommunications",
+        "alimentare": "food",
+        "moda": "fashion",
+        "industria": "industrial",
+        "logistica": "logistics",
+    }
+    for hint, family in sector_aliases.items():
+        if hint in cleaned_sector:
+            return family
+    for family, companies in COMPANY_SECTOR_HINTS.items():
+        if cleaned_company in companies:
+            return family
+    return None
+
+
+def classify_role_sector(role: Optional[str]) -> Optional[str]:
+    cleaned = normalize_plain_text(role)
+    for family, hints in ROLE_SECTOR_HINTS.items():
+        if any(hint in cleaned for hint in hints):
+            return family
+    return None
+
+
+def validate_company_role_coherence(company: str, role: str, sector: str = "") -> Dict:
+    company_family = classify_company_sector(company, sector)
+    role_family = classify_role_sector(role)
+    if not company_family or not role_family:
+        return {"is_valid": True, "message": "Coerenza non determinabile con certezza."}
+
+    compatible_sectors = SECTOR_COMPATIBILITY.get(role_family, set())
+    if company_family in compatible_sectors:
+        return {"is_valid": True, "message": "Azienda e ruolo risultano compatibili."}
+
+    return {
+        "is_valid": False,
+        "message": (
+            f"Il ruolo '{role.strip()}' non sembra coerente con l'attivita di {company.strip()}. "
+            "Controlla azienda e ruolo oppure aggiungi una descrizione dell'offerta che chiarisca il collegamento."
+        ),
     }
 
 
@@ -7428,6 +7543,15 @@ def validate_job_input(
     role_validation = validate_role_plausibility(role)
     if role and not role_validation["is_valid"]:
         errors["role"] = role_validation["message"]
+    elif role and not infer_role_family(role, description, required_skills) and not classify_role_sector(role):
+        errors["role"] = (
+            "Il ruolo non è stato riconosciuto. Inserisci un titolo professionale specifico e completo, "
+            "ad esempio Data Analyst, Software Engineer, Project Manager, Estetista o Infermiere."
+        )
+
+    company_role_validation = validate_company_role_coherence(company, role, sector)
+    if company and role and not company_role_validation["is_valid"]:
+        errors["coherence"] = company_role_validation["message"]
 
     if not link_validation["is_valid"]:
         errors["link"] = link_validation["message"]
@@ -7440,7 +7564,7 @@ def validate_job_input(
         errors["required_skills"] = skills_message
 
     coherent, coherence_warnings = fields_are_coherent(description, company, role)
-    if company and role and description and not coherent:
+    if company and role and description and not coherent and "coherence" not in errors:
         errors["coherence"] = "La descrizione non sembra coerente con azienda e ruolo indicati."
     else:
         warnings.extend(coherence_warnings)
@@ -7714,13 +7838,7 @@ def infer_skill_library_from_role(role: str, description: str = "") -> Dict[str,
             "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
         }
     
-    # Fallback generico
-    return {
-        "hard_skills": ["Competenza tecnica primaria", "Competenza tecnica secondaria", "Competenza specializzata"],
-        "soft_skills": ["Problem solving", "Comunicazione", "Collaborazione", "Organizzazione", "Pensiero critico"],
-        "programming_languages": [],
-        "tools": ["Strumento principale", "Strumento ausiliario"],
-    }
+    return {}
 
 
 def build_role_skill_suggestions(cv_text: str, role: str, description: str = "", required_skills: str = "") -> Dict[str, Any]:
@@ -7743,10 +7861,12 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
     # Log iniziale
     print(f"[build_role_skill_suggestions] family='{family}', role='{role}', library_found={bool(library)}")
     
-    # Se libreria vuota, usa fallback basato sul ruolo inserito
+    # Use only concrete libraries. Generic placeholder skills are never useful.
     if not library:
         library = infer_skill_library_from_role(role, description)
-        print(f"[build_role_skill_suggestions] fallback_library_generated, skills_count={sum(len(library.get(k, [])) for k in ['hard_skills', 'soft_skills', 'programming_languages', 'tools'])}")
+    if not library:
+        print("[build_role_skill_suggestions] ruolo non riconosciuto: nessuna skill generica generata")
+        return result
 
     def _score_skill_for_role(skill: str, group_name: str) -> int:
         skill_plain = normalize_plain_text(skill)
@@ -8546,7 +8666,7 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
     # Reject suggestions that are almost identical (too small change)
     try:
         similarity = SequenceMatcher(None, original_plain, proposed_plain).ratio() if original_plain and proposed_plain else 0
-        if similarity >= 0.92:
+        if similarity >= 0.92 and suggestion.get("generated_by") != "ollama":
             return False
     except Exception:
         pass
@@ -9188,7 +9308,7 @@ def build_generic_rewrite_fallbacks(section_map: Dict[str, str], role: str) -> L
 
 
 
-def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = True) -> List[Dict]:
+def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = False) -> List[Dict]:
     """Genera sempre suggerimenti locali applicabili, senza dipendere dall'LLM.
 
     Prima prova il guard locale; se non trova nulla, usa fallback più permissivi
@@ -9207,7 +9327,10 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
         ]
         if suggestions:
             return suggestions[:8]
-        print("Safe CV guard: nessun suggerimento affidabile generato, uso fallback locale applicabile.")
+        print(
+            "Analisi CV: il guard locale non ha prodotto suggerimenti da mostrare; "
+            "provo il generatore locale deterministico."
+        )
     except Exception as exc:
         print(f"Safe CV guard non disponibile: {exc}. Uso fallback locale applicabile.")
 
@@ -9434,7 +9557,7 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
     return []
 
 
-def build_cv_job_suggestions(evaluation: Dict, allow_llm: bool = True) -> List[Dict]:
+def build_cv_job_suggestions(evaluation: Dict, allow_llm: bool = False) -> List[Dict]:
     from services.cv_optimizer.suggestions import build_cv_job_suggestions as build_suggestions
 
     return build_suggestions(evaluation, allow_llm=allow_llm)
@@ -9580,7 +9703,7 @@ def build_fallback_cv_job_evaluation(
         "summary": "Il CV è valido ma va personalizzato su ruolo, azienda e parole chiave per essere competitivo.",
     }
     evaluation["score_explanation"] = build_cv_score_explanation(evaluation)
-    evaluation["coach_suggestions"] = build_cv_job_suggestions(evaluation, allow_llm=False)
+    evaluation["coach_suggestions"] = []
     return evaluation
 
 
@@ -9678,51 +9801,7 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
         "sections_to_improve",
         normalized["ats_analysis"].get("missing_sections", normalized["sections_to_improve"])
     )
-    actionable_from_model = []
-    raw_coach_suggestions = result.get("coach_suggestions")
-    if not isinstance(raw_coach_suggestions, list):
-        raw_coach_suggestions = []
-    for item in raw_coach_suggestions:
-        if not isinstance(item, dict) or item.get("type") != "actionableEdit":
-            continue
-        section = str(item.get("section") or "").strip()
-        original_text = str(item.get("original_text") or "").strip()
-        proposed_text = str(item.get("proposed_text") or "").strip()
-        if is_valid_actionable_suggestion({
-            **item,
-            "type": "actionableEdit",
-            "section": section,
-            "original_text": original_text,
-            "proposed_text": proposed_text,
-        }) and suggestion_targets_current_cv(item, fallback.get("cv_text", "")):
-            actionable_from_model.append(item)
-        else:
-            print(f"coach_suggestion AI ignorato perche non applicabile: {item.get('id') or item.get('title')}")
-    fallback_actionable = fallback.get("coach_suggestions")
-    safe_fallback_actionable = [
-        item
-        for item in (fallback_actionable if isinstance(fallback_actionable, list) else [])
-        if isinstance(item, dict)
-        and is_valid_actionable_suggestion(item)
-        and suggestion_targets_current_cv(item, fallback.get("cv_text", ""))
-    ]
-    generated_actionable = safe_fallback_actionable or build_cv_job_suggestions(normalized, allow_llm=False)
     normalized["coach_suggestions"] = []
-    seen_suggestion_ids = set()
-    for item in actionable_from_model + generated_actionable:
-        suggestion_id = str(item.get("id") or "")
-        if suggestion_id in seen_suggestion_ids:
-            continue
-        seen_suggestion_ids.add(suggestion_id)
-        normalized["coach_suggestions"].append(item)
-        if len(normalized["coach_suggestions"]) >= 8:
-            break
-    if not normalized["coach_suggestions"]:
-        normalized["coach_suggestions"] = build_cv_job_suggestions({
-            **fallback,
-            **normalized,
-            "cv_text": fallback.get("cv_text", ""),
-        }, allow_llm=False)[:8]
     normalized["strong_points"] = normalized["strengths"]
     normalized["weak_points"] = normalized["weaknesses"]
     return normalized
@@ -9995,28 +10074,14 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 detail="Nessuna modifica selezionata e applicabile: controlla i suggerimenti o riprova.",
             )
 
-    # Se il frontend non invia suggerimenti applicabili, genera comunque una piccola serie
-    # di modifiche locali sicure. Serve a evitare CV ottimizzati identici all'originale.
-    if not accepted_suggestions and not selected_ids:
-        evaluation_for_suggestions = data.cv_evaluation if isinstance(data.cv_evaluation, dict) else {}
-        if not isinstance(evaluation_for_suggestions.get("target"), dict):
-            evaluation_for_suggestions["target"] = {"company": company, "role": role, "role_level": role_level}
-        else:
-            evaluation_for_suggestions["target"].setdefault("company", company)
-            evaluation_for_suggestions["target"].setdefault("role", role)
-            evaluation_for_suggestions["target"].setdefault("role_level", role_level)
-        evaluation_for_suggestions["cv_text"] = cv_text
-        evaluation_for_suggestions["user_additional_data"] = user_additional_data
-        auto_suggestions = build_coach_suggestions_from_evaluation(evaluation_for_suggestions)
-        accepted_suggestions = normalize_accepted_coach_suggestions(auto_suggestions[:4])
-        if accepted_suggestions:
-            print(f"Ottimizzazione CV: applico {len(accepted_suggestions)} suggerimenti locali automatici.")
-
     if not accepted_suggestions and not flatten_cv_support_data(user_additional_data):
         conn.close()
         raise HTTPException(
             status_code=400,
-            detail="Non sono state generate modifiche applicabili. Avvia una nuova analisi oppure aggiungi almeno una informazione reale da integrare nel CV.",
+            detail=(
+                "Non ci sono modifiche accettate da applicare. "
+                "Accetta almeno un suggerimento oppure aggiungi informazioni reali nella schermata Skill/Informazioni."
+            ),
         )
 
     if rejected_additional_fields:
@@ -10129,7 +10194,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 raise HTTPException(
                     status_code=422,
                     detail={
-                        "message": "Il DOCX generato non ? coerente o ? incompleto.",
+                        "message": "Il DOCX non contiene modifiche applicabili o non conserva correttamente la struttura originale.",
                         "validation_report": apply_result.validation_report,
                     },
                 )
