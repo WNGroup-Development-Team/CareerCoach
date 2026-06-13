@@ -5020,12 +5020,24 @@ def infer_extra_content_section(value: str) -> tuple[str, str]:
         "feature engineering", "cross-validation", "deploy", "deployment",
     )
 
+    # Priorita' di routing per il testo "info extra" dell'utente:
+    # 1. CERTIFICAZIONI se ne parla esplicitamente
+    # 2. PROGETTI se l'utente menziona un progetto / dataset / dashboard
+    #    (anche se cita strumenti tecnici - l'intento e' descrivere un progetto reale)
+    # 3. ESPERIENZE se cita azienda/tirocinio/stage
+    # 4. CERTIFICAZIONI/FORMAZIONE specifiche
+    # 5. solo come ultima risorsa: COMPETENZE TECNICHE
     if score_terms(certification_terms):
         return "CERTIFICAZIONI", "certification"
     if score_terms(project_terms):
         return "PROGETTI", "project"
-    if any(term in plain for term in ["database", "sql", "python", "data visualization", "dashboard", "analisi dati", "machine learning"]):
-        return "COMPETENZE TECNICHE", "skill"
+    if score_terms(experience_terms):
+        return "ESPERIENZE PROFESSIONALI", "experience"
+    # se l'utente cita laurea/università/esame senza altro contesto
+    # ma menziona uno strumento tecnico, e' tipicamente un'attivita di studio
+    # -> meglio PROGETTI o ATTIVITA RILEVANTI di una nuova competenza generica
+    if any(term in plain for term in ["universita", "università", "esame", "corso"]):
+        return "ATTIVITA RILEVANTI", "extra_page"
 
     scores = {
         "education": score_terms(education_terms),
@@ -5145,6 +5157,10 @@ def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], 
         if not cleaned_fragment:
             return
         section, category = infer_extra_content_section(cleaned_fragment)
+        print(
+            f"[EXTRA-INFO] fragment='{cleaned_fragment[:120]}' "
+            f"-> inferita section={section!r}, category={category!r}, hint={category_hint!r}"
+        )
         normalized_hint = normalize_plain_text(category_hint)
         if normalized_hint in {"technical skills", "technical_skills", "tools"}:
             section, category = "COMPETENZE TECNICHE", "skill"

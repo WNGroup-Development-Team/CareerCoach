@@ -79,6 +79,14 @@ def build_resume_rewrite_result(
     instructions.extend(confirmed_instructions)
     instructions.extend(additional_instructions)
     if instructions:
+        # === DEBUG: tracciamento sezioni prima del consolidamento ===
+        print("[REWRITE DEBUG] istruzioni prima del consolidamento:")
+        for _i, _inst in enumerate(instructions):
+            _rep_preview = (_inst.replacement or "")[:120].replace("\n", " / ")
+            print(
+                f"  #{_i} section={_inst.section!r} source_id={_inst.source_id!r} "
+                f"replacement_preview={_rep_preview!r}"
+            )
         instructions = consolidate_rewrite_instructions(
             cv_text,
             instructions,
@@ -87,6 +95,13 @@ def build_resume_rewrite_result(
             goal,
             use_llm=CV_REWRITE_LLM_ENABLED,
         )
+        print("[REWRITE DEBUG] istruzioni DOPO il consolidamento:")
+        for _i, _inst in enumerate(instructions):
+            _rep_preview = (_inst.replacement or "")[:120].replace("\n", " / ")
+            print(
+                f"  #{_i} section={_inst.section!r} source_id={_inst.source_id!r} "
+                f"replacement_preview={_rep_preview!r}"
+            )
 
     structured_suggestions = list(accepted)
     existing_keys = {
