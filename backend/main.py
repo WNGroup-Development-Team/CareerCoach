@@ -10402,6 +10402,22 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             f"[CV-OPT] 422 quality_review bloccante: score={_qr_score}, "
             f"critical_issues={_has_critical}, total_issues={len(_qr_issues)}"
         )
+        try:
+            for _idx, _iss in enumerate(_qr_issues):
+                if isinstance(_iss, dict):
+                    print(
+                        f"[CV-OPT] issue #{_idx} severity={_iss.get('severity')!r} "
+                        f"section={_iss.get('section')!r} description={str(_iss.get('description'))[:300]!r}"
+                    )
+            _revs = quality_review.get("revisions") or []
+            for _idx, _rev in enumerate(_revs):
+                if isinstance(_rev, dict):
+                    print(
+                        f"[CV-OPT] revision #{_idx} section={_rev.get('section')!r} "
+                        f"new_text_preview={str(_rev.get('new_text') or _rev.get('text') or '')[:200]!r}"
+                    )
+        except Exception as _dbg_exc:
+            print(f"[CV-OPT] errore dump quality_review: {_dbg_exc}")
         raise HTTPException(
             status_code=422,
             detail={
