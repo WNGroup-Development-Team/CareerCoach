@@ -21,6 +21,7 @@ from main import (
     infer_skill_library_from_role,
     infer_role_family,
     sanitize_cv_additional_data,
+    clean_job_role_title,
 )
 from services.cv_optimizer import RewriteInstruction
 from services.cv_optimizer.skill_suggestions import build_skill_mini_shot_suggestions
@@ -337,6 +338,55 @@ class TestSuggestionGeneration(unittest.TestCase):
 
         self.assertEqual(len(sanitized["confirmed_skills"]), 1)
         self.assertEqual(rejected, [])
+
+    def test_adaptation_answer_removes_repeated_markdown_question(self):
+        question = "Hai usato Python, SQL o strumenti simili?"
+        sanitized, rejected = sanitize_cv_additional_data({
+            "adaptation_answers": [{
+                "question": question,
+                "answer": (
+                    f"**{question}**\n\n"
+                    "Sì, ho utilizzato Python e SQL in progetti universitari."
+                ),
+            }],
+        })
+
+        self.assertEqual(rejected, [])
+        self.assertEqual(
+            sanitized["adaptation_answers"][0]["answer"],
+            "Sì, ho utilizzato Python e SQL in progetti universitari.",
+        )
+
+    def test_short_language_level_is_not_discarded(self):
+        sanitized, rejected = sanitize_cv_additional_data({
+            "certifications": "B2",
+            "confirmed_skills": [{
+                "id": "kpi",
+                "name": "KPI",
+                "category": "hard_skill",
+                "target_section": "HARD SKILLS",
+            }],
+        })
+
+        self.assertEqual(sanitized["certifications"], "B2")
+        self.assertEqual(rejected, [])
+
+    def test_invalid_field_is_not_silently_ignored_when_other_data_is_valid(self):
+        sanitized, rejected = sanitize_cv_additional_data({
+            "projects": "x",
+            "confirmed_skills": [{
+                "id": "kpi",
+                "name": "KPI",
+                "category": "hard_skill",
+                "target_section": "HARD SKILLS",
+            }],
+        })
+
+        self.assertIn("confirmed_skills", sanitized)
+        self.assertEqual(rejected, ["projects"])
+
+    def test_job_role_title_removes_accidental_trailing_accent(self):
+        self.assertEqual(clean_job_role_title("data analystà"), "data analyst")
 
     def test_skill_identity_merges_common_synonyms(self):
         self.assertEqual(

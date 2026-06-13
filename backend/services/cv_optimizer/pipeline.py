@@ -850,6 +850,24 @@ Dati aggiuntivi utente:
                     section_name = category_to_section.get(cat)
                     if section_name:
                         user_provided_sections.add(section_name)
+            confirmed_skills = user_additional_data.get("confirmed_skills") or []
+            if isinstance(confirmed_skills, list):
+                for item in confirmed_skills:
+                    if not isinstance(item, dict):
+                        continue
+                    detail = normalize_text(
+                        str(item.get("user_example") or item.get("detail") or "")
+                    )
+                    if not detail:
+                        continue
+                    if any(term in detail for term in ["azienda", "cliente", "lavoro", "tirocinio", "stage", "impiego"]):
+                        user_provided_sections.add("esperienze")
+                    if any(term in detail for term in ["progetto", "dashboard", "prototipo", "dataset", "portfolio"]):
+                        user_provided_sections.add("progetti")
+                    if any(term in detail for term in ["certificazione", "certificato", "attestato", "licenza"]):
+                        user_provided_sections.add("certificazioni")
+                    if any(term in detail for term in ["laurea", "universita", "corso", "esame", "formazione"]):
+                        user_provided_sections.add("formazione")
 
         for instruction in instructions:
             target = canonical_section(instruction.target_section)

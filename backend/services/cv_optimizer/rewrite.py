@@ -36,7 +36,11 @@ def build_resume_rewrite_result(
     confirmed_instructions = build_confirmed_skill_rewrite_instructions(
         cv_text, user_additional_data or {}, role
     )
-    additional_instructions = build_additional_rewrite_instructions(user_additional_data or {}, role)
+    additional_instructions = build_additional_rewrite_instructions(
+        user_additional_data or {},
+        role,
+        cv_text,
+    )
     clean_additional_data = {
         key: str(value).strip()[:300] if isinstance(value, str) else value
         for key, value in (user_additional_data or {}).items()

@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 from main import (
     build_fallback_cv_job_evaluation,
     normalize_cv_job_evaluation,
+    review_generated_cv_quality,
     review_generated_cv_quality_locally,
 )
 from services.cv_optimizer import RewriteInstruction
@@ -59,6 +61,44 @@ class CvQualityReviewTests(unittest.TestCase):
 
         self.assertFalse(review["ready_to_send"])
         self.assertTrue(review["issues"])
+
+    def test_llm_false_critical_does_not_override_passing_local_review(self):
+        instruction = RewriteInstruction(
+            section="CERTIFICAZIONI",
+            original="",
+            replacement="Competenza linguistica in inglese certificata a livello B2.",
+            source_id="user_box_certifications_0",
+        )
+        llm_review = {
+            "ready_to_send": False,
+            "score": 27,
+            "issues": [{
+                "severity": "critical",
+                "section": "CERTIFICAZIONI",
+                "description": "La certificazione non è stata accettata dall'azienda.",
+            }],
+            "revisions": [],
+        }
+
+        with patch("main.CV_QUALITY_LLM_ENABLED", True), patch(
+            "main.call_analysis_llm",
+            return_value=llm_review,
+        ):
+            review = review_generated_cv_quality(
+                final_text=(
+                    "PROFILO\nCandidata orientata all'analisi dei dati.\n"
+                    "CERTIFICAZIONI\n"
+                    "Competenza linguistica in inglese certificata a livello B2."
+                ),
+                original_cv_text="PROFILO\nCandidata orientata all'analisi dei dati.",
+                role="Data Analyst",
+                company="Google",
+                accepted_instructions=[instruction],
+            )
+
+        self.assertTrue(review["ready_to_send"])
+        self.assertTrue(review["llm_review_suspect"])
+        self.assertTrue(all(item["severity"] == "minor" for item in review["issues"]))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from functools import lru_cache
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib3.exceptions import MaxRetryError, NewConnectionError
 
@@ -52,12 +53,20 @@ from services.cv_image_safety import validate_cv_images
 # CONFIGURAZIONE AMBIENTE
 # =========================
 
-load_dotenv()
-ENV_FILE_VALUES = dotenv_values()
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
+load_dotenv(ENV_FILE_PATH, override=True)
+ENV_FILE_VALUES = dotenv_values(ENV_FILE_PATH)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 #GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+GEMINI_API_URL = os.getenv(
+    "GEMINI_API_URL",
+    "https://generativelanguage.googleapis.com/v1beta",
+).rstrip("/")
 LLM_PROVIDER = ENV_FILE_VALUES.get("LLM_PROVIDER", "groq").strip().lower()
 OLLAMA_TEXT_MODEL = ENV_FILE_VALUES.get("OLLAMA_TEXT_MODEL", "gemma3:4b")
 OLLAMA_TEXT_TIMEOUT = int(ENV_FILE_VALUES.get("OLLAMA_TEXT_TIMEOUT", "120"))
@@ -94,7 +103,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 CV_LLM_ENABLED = _env_bool("CV_LLM_ENABLED", default=True)
 CV_EVALUATION_LLM_ENABLED = _env_bool("CV_EVALUATION_LLM_ENABLED", default=False)
 CV_REWRITE_LLM_ENABLED = _env_bool("CV_REWRITE_LLM_ENABLED", default=True)
-CV_QUALITY_LLM_ENABLED = _env_bool("CV_QUALITY_LLM_ENABLED", default=True)
+CV_QUALITY_LLM_ENABLED = _env_bool("CV_QUALITY_LLM_ENABLED", default=False)
 OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL", "http://localhost:8000")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -167,7 +176,7 @@ app.add_middleware(
 # DATABASE SQLITE
 # =========================
 
-DB_NAME = "careercoach.db"
+DB_NAME = str(Path(__file__).resolve().parent / "careercoach.db")
 
 
 def get_connection():
@@ -1043,6 +1052,76 @@ def call_ollama(
         raise RuntimeError(str(exc))
 
 
+def call_gemini(
+    prompt: str,
+    temperature: float = 0.1,
+    max_tokens: int = 1100,
+    timeout: int = 60,
+    json_mode: bool = True,
+) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY non configurata.")
+
+    generation_config: Dict[str, Any] = {
+        "temperature": temperature,
+        "maxOutputTokens": max_tokens,
+    }
+    if json_mode:
+        generation_config["responseMimeType"] = "application/json"
+
+    payload = {
+        "systemInstruction": {
+            "parts": [{
+                "text": (
+                    "Sei un resume editor senior. Riscrivi in italiano naturale e professionale, "
+                    "usando esclusivamente i fatti forniti. Non inventare competenze, risultati, "
+                    "aziende, ruoli, date o responsabilita."
+                ),
+            }],
+        },
+        "contents": [{
+            "role": "user",
+            "parts": [{"text": prompt}],
+        }],
+        "generationConfig": generation_config,
+    }
+    url = f"{GEMINI_API_URL}/models/{urllib.parse.quote(GEMINI_MODEL, safe='')}:generateContent"
+    try:
+        print(f"Gemini richiesta avviata: model={GEMINI_MODEL}, timeout={timeout}s")
+        response = requests.post(
+            url,
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=max(1, min(timeout, 120)),
+        )
+        if not response.ok:
+            try:
+                error_payload = response.json()
+                error_message = error_payload.get("error", {}).get("message") or response.text
+            except ValueError:
+                error_message = response.text
+            raise RuntimeError(f"Gemini HTTP {response.status_code}: {error_message}")
+
+        data = response.json()
+        candidates = data.get("candidates") if isinstance(data, dict) else []
+        if not isinstance(candidates, list) or not candidates:
+            raise RuntimeError("Gemini non ha restituito candidati.")
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "".join(
+            str(part.get("text") or "")
+            for part in parts
+            if isinstance(part, dict)
+        ).strip()
+        if not text:
+            raise RuntimeError("Gemini ha restituito una risposta vuota.")
+        print(f"Gemini risposta ricevuta: {len(text)} char")
+        return text
+    except requests.exceptions.Timeout as exc:
+        raise RuntimeError(f"Gemini timeout dopo {timeout} secondi") from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise RuntimeError("Gemini non raggiungibile.") from exc
+
+
 def _call_groq_impl(
     prompt: str,
     temperature: float = 0.7,
@@ -1155,10 +1234,25 @@ def call_structured_llm(
     and always routes the result through extract_json for normalization.
     """
     last_error: Optional[Exception] = None
-    order = [item for item in (preferred_order or ["groq", "ollama"]) if item in {"groq", "ollama"}]
+    order = [
+        item
+        for item in (preferred_order or ["groq", "ollama"])
+        if item in {"gemini", "groq", "ollama"}
+    ]
     attempts = []
     for source in order:
-        if source == "groq":
+        if source == "gemini":
+            attempts.append((
+                "gemini",
+                lambda: call_gemini(
+                    prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                    json_mode=True,
+                ),
+            ))
+        elif source == "groq":
             attempts.append(("groq-json", lambda: call_groq(prompt, temperature=temperature, max_tokens=max_tokens, timeout=timeout, json_mode=True)))
             attempts.append(("groq-plain", lambda: call_groq(prompt, temperature=temperature, max_tokens=max_tokens, timeout=timeout, json_mode=False)))
         elif source == "ollama":
@@ -1374,7 +1468,7 @@ def call_rewrite_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        preferred_order=["ollama", "groq"],
+        preferred_order=["gemini", "ollama"],
     )
 
 
@@ -4772,7 +4866,7 @@ Schema:
   "score": 0,
   "issues": [
     {{
-      "severity": "critical | major | minor",
+      "severity": "critical",
       "section": "nome sezione",
       "description": "problema concreto"
     }}
@@ -4795,6 +4889,7 @@ Criteri obbligatori:
 - Non proporre fatti, skill, risultati, strumenti, ruoli, date o aziende non supportati.
 - Le revisioni devono correggere solo problemi reali e conservare tutti i fatti validi.
 - original_text deve essere copiato esattamente dal CV finale.
+- severity deve essere sempre uno tra: critical, major, minor.
 - Se non ci sono problemi critical o major, ready_to_send deve essere true.
 - score deve essere un intero da 0 a 100.
 """
@@ -4816,11 +4911,72 @@ Criteri obbligatori:
 
     issues = result.get("issues") if isinstance(result.get("issues"), list) else []
     revisions = result.get("revisions") if isinstance(result.get("revisions"), list) else []
+
+    local_review = review_generated_cv_quality_locally(
+        final_text=final_text,
+        accepted_instructions=accepted_instructions,
+        llm_error="Controllo locale eseguito come validazione del review LLM.",
+    )
+
+    normalized_issues = []
+    malformed_issue_payload = False
+    for item in issues:
+        if not isinstance(item, dict):
+            continue
+        severity_raw = str(item.get("severity") or "").strip().lower()
+        if severity_raw in {"critical", "major", "minor"}:
+            severity = severity_raw
+        else:
+            malformed_issue_payload = True
+            severity = "minor"
+        normalized_issues.append({
+            **item,
+            "severity": severity,
+            "section": str(item.get("section") or "").strip(),
+            "description": str(item.get("description") or "").strip(),
+        })
+
+    normalized_revisions = [item for item in revisions if isinstance(item, dict)][:8]
+    llm_score = clamp_score(result.get("score", 0))
+    local_blocking = any(
+        isinstance(item, dict) and str(item.get("severity") or "").lower() in {"critical", "major"}
+        for item in (local_review.get("issues") or [])
+    )
+    llm_blocking = any(item["severity"] in {"critical", "major"} for item in normalized_issues)
+
+    if malformed_issue_payload or (llm_score < 50 and not llm_blocking and not local_blocking):
+        return {
+            **local_review,
+            "issues": normalized_issues or local_review.get("issues", []),
+            "revisions": normalized_revisions,
+            "review_provider": "llm+local",
+            "llm_review_suspect": True,
+        }
+
+    if llm_blocking and not local_blocking:
+        return {
+            **local_review,
+            "issues": [
+                {
+                    **item,
+                    "severity": "minor",
+                    "description": (
+                        f"Avviso del revisore AI non bloccante: {item['description']}"
+                    ),
+                }
+                for item in normalized_issues
+            ],
+            "revisions": [],
+            "review_provider": "llm+local",
+            "llm_review_suspect": True,
+            "llm_score": llm_score,
+        }
+
     return {
         "ready_to_send": bool(result.get("ready_to_send")),
-        "score": clamp_score(result.get("score", 0)),
-        "issues": [item for item in issues if isinstance(item, dict)][:12],
-        "revisions": [item for item in revisions if isinstance(item, dict)][:8],
+        "score": llm_score,
+        "issues": normalized_issues[:12],
+        "revisions": normalized_revisions,
         "review_unavailable": False,
         "review_provider": "llm",
         "local_checks_completed": True,
@@ -4860,7 +5016,10 @@ def review_generated_cv_quality_locally(
         instruction.source_id or instruction.section or "modifica"
         for instruction in accepted_instructions
         if instruction.replacement
-        and not _instruction_present(instruction.replacement)
+        and (
+            not _instruction_present(instruction.replacement)
+            or not rewrite_preserves_instruction_content(final_text, instruction)
+        )
     ]
     if missing_changes:
         issues.append({
@@ -5086,7 +5245,11 @@ def is_role_like_confirmation(name: str, role: str) -> bool:
     return False
 
 
-def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], role: str) -> List[RewriteInstruction]:
+def build_additional_rewrite_instructions(
+    user_additional_data: Dict[str, Any],
+    role: str,
+    cv_text: str = "",
+) -> List[RewriteInstruction]:
     instructions: List[RewriteInstruction] = []
     seen_fragments: set[tuple[str, str]] = set()
 
@@ -5111,7 +5274,18 @@ def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], 
             title = "Progetto universitario"
         else:
             title = "Progetto personale"
+
+        short_project_phrases = [
+            (("provenienza", "dati"), "Analisi della provenienza dei dati utilizzati nel progetto"),
+            (("qualita", "dati"), "Verifica della qualita dei dati utilizzati nel progetto"),
+            (("raccolta", "dati"), "Raccolta e organizzazione dei dati utilizzati nel progetto"),
+            (("pulizia", "dati"), "Pulizia e preparazione dei dati utilizzati nel progetto"),
+            (("dashboard",), "Sviluppo di dashboard per la lettura e la sintesi dei dati"),
+            (("visualizzazione", "dati"), "Realizzazione di visualizzazioni per l'analisi dei dati"),
+        ]
         description = build_professional_extra_text({"additional_notes": fragment}, role).rstrip(".")
+        description = re.sub(r"^(progetto di [^\n]+[:\-]\s*)", "", description, flags=re.IGNORECASE)
+        description = re.sub(r"^(data analyst|data scientist|project manager|software engineer)\s*:\s*", "", description, flags=re.IGNORECASE)
         replacements = [
             (r"^ho coordinato\b", "Coordinamento di"),
             (r"^ho sviluppato\b", "Sviluppo di"),
@@ -5125,6 +5299,17 @@ def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], 
         description = re.sub(r"^(usata?|utilizzata?)\s+", "Applicazione della competenza ", description, flags=re.IGNORECASE)
         if "allineare requisiti e aspettative" in plain:
             description = "Collaborazione con il team per l'analisi dei requisiti e l'allineamento delle attivita progettuali"
+        description = re.sub(r"\s{2,}", " ", description).strip(" ,;:-")
+        if not description:
+            return ""
+        if len(description.split()) <= 5:
+            for markers, rewritten in short_project_phrases:
+                if all(marker in plain for marker in markers):
+                    description = rewritten
+                    break
+        if len(description.split()) <= 4:
+            description = f"Attivita progettuale incentrata su {description.lower()}"
+        description = description[:1].upper() + description[1:]
         return f"{title}\n{description.rstrip('.')}."
 
     def skill_text(fragment: str, category: str) -> str:
@@ -5156,12 +5341,41 @@ def build_additional_rewrite_instructions(user_additional_data: Dict[str, Any], 
         cleaned_fragment = clean_extracted_text(fragment).strip()
         if not cleaned_fragment:
             return
+        normalized_hint = normalize_plain_text(category_hint)
+        if (
+            normalized_hint in {"certifications", "certificazioni"}
+            and re.fullmatch(r"(?i)(?:inglese\s+)?[abc][12]", cleaned_fragment)
+        ):
+            sections = extract_resume_sections(cv_text)
+            original_languages = sections.get("languages", "").strip()
+            level = re.search(r"(?i)[abc][12]", cleaned_fragment).group(0).upper()
+            if original_languages:
+                if re.search(r"(?i)\binglese\b", original_languages):
+                    replacement = re.sub(
+                        r"(?i)\binglese\b(?:\s+[abc][12])?",
+                        f"Inglese {level}",
+                        original_languages,
+                        count=1,
+                    )
+                else:
+                    replacement = f"{original_languages}\nInglese {level}"
+            else:
+                replacement = f"Inglese {level}"
+            instructions.append(RewriteInstruction(
+                section="LINGUE",
+                original=original_languages,
+                replacement=replacement,
+                reason="Livello linguistico confermato dall'utente integrato nella sezione lingue.",
+                category="languages",
+                source_id=source_id,
+            ))
+            seen_fragments.add(("LINGUE", normalize_plain_text(cleaned_fragment)))
+            return
         section, category = infer_extra_content_section(cleaned_fragment)
         print(
             f"[EXTRA-INFO] fragment='{cleaned_fragment[:120]}' "
             f"-> inferita section={section!r}, category={category!r}, hint={category_hint!r}"
         )
-        normalized_hint = normalize_plain_text(category_hint)
         if normalized_hint in {"technical skills", "technical_skills", "tools"}:
             section, category = "COMPETENZE TECNICHE", "skill"
         elif normalized_hint in {"soft skills", "soft_skills"}:
@@ -5375,6 +5589,10 @@ Regole obbligatorie:
             not replacement
             or set(applied_ids) != set(source_ids)
             or not ResumeRewriter().is_safe_replacement(section, replacement)
+            or not all(
+                rewrite_preserves_instruction_content(replacement, instruction)
+                for instruction in section_instructions
+            )
         ):
             replacement = deterministic_section_consolidation(
                 original_section,
@@ -5450,6 +5668,31 @@ def deterministic_section_consolidation(
     return "\n".join(unique_parts).strip()
 
 
+def rewrite_preserves_instruction_content(
+    consolidated_text: str,
+    instruction: RewriteInstruction,
+) -> bool:
+    consolidated_tokens = set(re.findall(
+        r"[a-z0-9+#.]{2,}",
+        normalize_plain_text(consolidated_text),
+    ))
+    replacement_tokens = set(re.findall(
+        r"[a-z0-9+#.]{2,}",
+        normalize_plain_text(instruction.replacement),
+    ))
+    original_tokens = set(re.findall(
+        r"[a-z0-9+#.]{2,}",
+        normalize_plain_text(instruction.original),
+    ))
+    required_tokens = replacement_tokens - original_tokens
+    if not required_tokens:
+        required_tokens = replacement_tokens
+    if not required_tokens:
+        return True
+    overlap = len(required_tokens & consolidated_tokens) / len(required_tokens)
+    return overlap >= 0.6
+
+
 def build_confirmed_skill_rewrite_instructions(
     cv_text: str,
     user_additional_data: Dict[str, Any],
@@ -5498,9 +5741,7 @@ def build_confirmed_skill_rewrite_instructions(
         raw_original = sections.get("soft_skills" if is_soft else "hard_skills", "")
         original = clean_skill_section_source(raw_original)
         existing_parts = extract_clean_skill_items(original, is_soft=is_soft)
-        existing_limit = 4 if is_soft else 5
-        merged = list(dict.fromkeys([*existing_parts[:existing_limit], *skill_names]))
-        merged = merged[:6 if is_soft else 14]
+        merged = list(dict.fromkeys([*existing_parts, *skill_names]))
         instructions.append(RewriteInstruction(
             section=section if original else ("SOFT SKILLS" if is_soft else "COMPETENZE TECNICHE"),
             original=original,
@@ -5509,10 +5750,10 @@ def build_confirmed_skill_rewrite_instructions(
             category="soft_skills" if is_soft else "skills",
             source_id=f"confirmed_{normalize_plain_text(section).replace(' ', '_')}",
         ))
-    instructions.extend(
-        fallback_skill_detail_instruction(item, index, cv_text)
-        for index, item in enumerate(detailed_skills[:6])
-    )
+    for index, item in enumerate(detailed_skills[:6]):
+        detail_instruction = fallback_skill_detail_instruction(item, index, cv_text)
+        if detail_instruction is not None:
+            instructions.append(detail_instruction)
     return instructions
 
 
@@ -5673,6 +5914,10 @@ Regole:
 - Usa esclusivamente i fatti scritti dall'utente; non inventare aziende, ruoli, date, risultati, strumenti o responsabilita.
 - Scegli per ogni dettaglio la sezione semanticamente piu utile. Non mettere tutto automaticamente in PROGETTI.
 - Se il dettaglio riguarda lavoro o tirocinio usa ESPERIENZE PROFESSIONALI; studi o corsi usa FORMAZIONE; progetti usa PROGETTI; attestati usa CERTIFICAZIONI.
+- Mantieni nel testo un riferimento naturale alla skill indicata, soprattutto per le soft skill.
+- Scrivi una frase discorsiva: non usare il formato "Nome skill: descrizione".
+- Integra la skill nel periodo, ad esempio "Approccio analitico applicato alla..." o "Collaborazione con il team durante...".
+- Se il dettaglio non contiene un contesto sufficiente, usa ATTIVITA RILEVANTI invece delle sezioni HARD SKILLS o SOFT SKILLS.
 - Mantieni lingua, tono, lunghezza, forma dei bullet e livello di sintesi osservati nel CV originale.
 - Puoi migliorare grammatica e chiarezza senza cambiare il significato.
 - Ogni testo deve essere breve e direttamente utilizzabile nel CV, senza note, spiegazioni o titoli interni.
@@ -5699,6 +5944,9 @@ Regole:
         replacement = clean_extracted_text(str(item.get("text") or ""))
         if section not in allowed_sections or not replacement:
             continue
+        skill_name = str(item.get("skill") or "").strip()
+        if skill_name and normalize_plain_text(skill_name) not in normalize_plain_text(replacement):
+            replacement = build_discursive_skill_evidence(skill_name, replacement)
         instructions.append(RewriteInstruction(
             section=section,
             original="",
@@ -5721,25 +5969,58 @@ def fallback_skill_detail_instruction(
     item: Dict[str, str],
     index: int,
     cv_text: str = "",
-) -> RewriteInstruction:
+) -> Optional[RewriteInstruction]:
     skill_name = str(item.get("name") or "").strip()
     detail = str(item.get("detail") or "").strip()
     plain = normalize_plain_text(detail)
-    professional = build_professional_extra_text({"additional_notes": detail}, "")
+    professional = build_deterministic_skill_evidence(skill_name, detail)
     original_sections = extract_resume_sections(cv_text)
+    category_name = normalize_plain_text(str(item.get("category") or "hard_skill"))
+    soft_skill_names = {
+        normalize_plain_text(value)
+        for value in [
+            "Pensiero analitico", "Attenzione ai dettagli", "Comunicazione dei risultati",
+            "Problem solving", "Team working", "Collaborazione", "Comunicazione",
+            "Organizzazione", "Precisione", "Creativita", "Flessibilita",
+            "Capacita di adattamento", "Apprendimento continuo", "Leadership",
+            "Negoziazione", "Gestione requisiti",
+        ]
+    }
+    is_soft_skill = category_name == "soft_skill" or normalize_plain_text(skill_name) in soft_skill_names
 
-    if any(term in plain for term in ["lavoro", "azienda", "tirocinio", "stage", "cliente"]) and original_sections.get("experience"):
+    if is_soft_skill:
+        evidence = build_discursive_skill_evidence(skill_name, detail)
+        original_profile = (original_sections.get("profile") or "").strip()
+        if original_profile:
+            normalized_profile = normalize_plain_text(original_profile)
+            replacement = (
+                original_profile
+                if normalize_plain_text(evidence) in normalized_profile
+                else f"{original_profile.rstrip('.')}.\n{evidence}"
+            )
+        else:
+            replacement = evidence
+        return RewriteInstruction(
+            section="PROFILO",
+            original=original_profile,
+            replacement=replacement,
+            reason="Esempio reale di soft skill integrato nel profilo professionale.",
+            category="profile",
+            source_id=f"confirmed_skill_detail_profile_{index}",
+        )
+
+    if any(term in plain for term in ["lavoro", "azienda", "tirocinio", "stage", "cliente"]):
         section, category = "ESPERIENZE PROFESSIONALI", "experience"
-    elif any(term in plain for term in ["laurea", "universita", "corso", "esame", "formazione"]):
-        section, category = "FORMAZIONE", "education"
     elif any(term in plain for term in ["certificazione", "attestato", "certificato"]):
         section, category = "CERTIFICAZIONI", "certification"
-    elif any(term in plain for term in ["progetto", "dashboard", "prototipo", "dataset", "portfolio"]):
+    elif any(term in plain for term in ["progetto", "progetti", "dashboard", "prototipo", "dataset", "portfolio"]):
         section, category = "PROGETTI", "project"
+    elif any(term in plain for term in ["laurea", "universita", "corso", "esame", "formazione"]):
+        section, category = "FORMAZIONE", "education"
     else:
-        category_name = normalize_plain_text(str(item.get("category") or "hard_skill"))
-        section = "SOFT SKILLS" if category_name == "soft_skill" else "COMPETENZE TECNICHE"
-        category = "soft_skills" if category_name == "soft_skill" else "skills"
+        # Senza un contesto reale la hard skill resta nell'elenco competenze:
+        # non creiamo una sezione narrativa generica.
+        return None
 
     if section == "PROGETTI":
         if "sviluppo software" in plain:
@@ -5766,7 +6047,11 @@ def fallback_skill_detail_instruction(
         ).strip(" :-")
         replacement = f"{skill_name}: {context}" if context else skill_name
     else:
-        replacement = professional.rstrip(".") + "."
+        context = professional.rstrip(".")
+        if skill_name and normalize_plain_text(skill_name) not in normalize_plain_text(context):
+            replacement = build_discursive_skill_evidence(skill_name, context)
+        else:
+            replacement = context + "."
 
     return RewriteInstruction(
         section=section,
@@ -5776,6 +6061,60 @@ def fallback_skill_detail_instruction(
         category=category,
         source_id=f"confirmed_skill_detail_fallback_{index}",
     )
+
+
+def build_discursive_skill_evidence(skill_name: str, detail: str) -> str:
+    skill_plain = normalize_plain_text(skill_name)
+    clean_detail = re.sub(r"\s+", " ", detail or "").strip(" .,:;-")
+    if not clean_detail:
+        return skill_name
+    clean_detail = re.sub(
+        r"^(applicazione|utilizzo)\s+(in|durante)\s+|^usat[oaie]\s+in\s+",
+        "",
+        clean_detail,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    starters = {
+        "pensiero analitico": "Approccio analitico applicato",
+        "problem solving": "Capacita di problem solving applicata",
+        "collaborazione": "Collaborazione con il team dimostrata",
+        "team working": "Lavoro in team svolto",
+        "comunicazione": "Comunicazione efficace utilizzata",
+        "comunicazione dei risultati": "Comunicazione dei risultati curata",
+        "attenzione ai dettagli": "Attenzione ai dettagli mantenuta",
+        "organizzazione": "Capacita organizzativa applicata",
+        "precisione": "Precisione applicata",
+        "leadership": "Leadership esercitata",
+        "gestione requisiti": "Gestione dei requisiti svolta",
+    }
+    starter = starters.get(skill_plain, f"Competenza di {skill_name.lower()} applicata")
+    detail_plain = normalize_plain_text(clean_detail)
+    if detail_plain.startswith("progetto "):
+        clean_detail = f"un {clean_detail}"
+        detail_plain = normalize_plain_text(clean_detail)
+    if detail_plain.startswith(("a ", "al ", "alla ", "alle ", "ai ", "allo ", "per ", "durante ", "nella ", "nel ")):
+        sentence = f"{starter} {clean_detail}"
+    else:
+        sentence = f"{starter} durante {clean_detail[:1].lower() + clean_detail[1:]}"
+    return sentence.rstrip(".") + "."
+
+
+def build_deterministic_skill_evidence(skill_name: str, detail: str) -> str:
+    clean_detail = re.sub(r"\s+", " ", detail or "").strip(" .,:;-")
+    if not clean_detail:
+        return skill_name
+    if normalize_plain_text(skill_name) in normalize_plain_text(clean_detail):
+        return clean_detail[:1].upper() + clean_detail[1:]
+    without_lead = re.sub(
+        r"^usat[oaie]\s+(?:in|durante)\s+",
+        "",
+        clean_detail,
+        flags=re.IGNORECASE,
+    ).strip()
+    if without_lead != clean_detail:
+        return f"Utilizzo di {skill_name} in {without_lead}"
+    return f"Utilizzo di {skill_name}: {clean_detail[:1].lower() + clean_detail[1:]}"
 
 
 def format_confirmed_skill_example(skill_name: str, detail: str) -> str:
@@ -6128,13 +6467,29 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     sanitized: Dict[str, Any] = {}
     rejected_candidates = []
 
+    def clean_answer(value: Any, question: Any) -> str:
+        answer = str(value or "").strip()
+        prompt = str(question or "").strip()
+        if prompt:
+            answer = re.sub(
+                rf"^\s*(?:\*\*)?\s*{re.escape(prompt)}\s*(?:\*\*)?\s*[:-]?\s*",
+                "",
+                answer,
+                flags=re.IGNORECASE,
+            )
+        return answer.strip().strip("*").strip()
+
     for key, value in (data or {}).items():
         if key in {"adaptation_answers", "confirmed_skills"}:
             continue
         if not isinstance(value, str) or not value.strip():
             continue
         cleaned = value.strip()
-        if is_low_quality_text(cleaned, min_chars=8, min_words=2):
+        is_language_level = (
+            key in {"certifications", "languages"}
+            and bool(re.fullmatch(r"(?i)(?:inglese\s+)?[abc][12]", cleaned))
+        )
+        if not is_language_level and is_low_quality_text(cleaned, min_chars=8, min_words=2):
             rejected_candidates.append(key.replace("_", " "))
             continue
         sanitized[key] = cleaned
@@ -6143,14 +6498,15 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     for index, item in enumerate((data or {}).get("adaptation_answers", [])):
         if not isinstance(item, dict):
             continue
-        answer = str(item.get("answer", "")).strip()
+        question = str(item.get("question", "")).strip()
+        answer = clean_answer(item.get("answer", ""), question)
         if not answer:
             continue
         if is_low_quality_text(answer, min_chars=8, min_words=2):
             rejected_candidates.append(f"risposta domanda {index + 1}")
             continue
         answers.append({
-            "question": str(item.get("question", "")).strip(),
+            "question": question,
             "reason": str(item.get("reason", "")).strip(),
             "category": str(item.get("category", "")).strip(),
             "answer": answer,
@@ -6203,7 +6559,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     if confirmed_skills:
         sanitized["confirmed_skills"] = confirmed_skills
 
-    rejected = rejected_candidates if rejected_candidates and not sanitized else []
+    rejected = rejected_candidates
     return sanitized, rejected
 
 
@@ -6488,8 +6844,8 @@ def save_sources_for_question(cursor, question_id: int, sources: List[Dict[str, 
 @app.get("/")
 def home():
     return {
-        "message": "CareerCoach backend attivo con GroqCloud + Tavily Web Search",
-        "groq_model": GROQ_MODEL
+        "message": "CareerCoach backend attivo",
+        "rewrite_model": GEMINI_MODEL if GEMINI_API_KEY else OLLAMA_TEXT_MODEL,
     }
 
 
@@ -6500,6 +6856,9 @@ def debug():
         "message": "Backend FastAPI attivo",
         "groq_model": GROQ_MODEL,
         "has_groq_key": bool(GROQ_API_KEY),
+        "gemini_model": GEMINI_MODEL,
+        "has_gemini_key": bool(GEMINI_API_KEY),
+        "rewrite_fallback_model": OLLAMA_TEXT_MODEL,
         "has_tavily_key": bool(TAVILY_API_KEY)
     }
 
@@ -7332,6 +7691,21 @@ def normalize_plain_text(value: Optional[str]) -> str:
     value = re.sub(r"https?://\S+", " ", value)
     value = re.sub(r"[^a-z0-9\s&.+#/-]", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def clean_job_role_title(value: Optional[str]) -> str:
+    cleaned = str(value or "").strip()
+    if any(marker in cleaned for marker in ("Ã", "Â")):
+        try:
+            cleaned = cleaned.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    cleaned = re.sub(
+        r"(?i)\b(analyst|developer|engineer|manager|specialist|designer|scientist)[àáèéìíòóùú]\b",
+        r"\1",
+        cleaned,
+    )
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def is_low_quality_text(value: Optional[str], min_chars: int = 3, min_words: int = 1) -> bool:
@@ -8199,12 +8573,12 @@ def compute_cv_completeness_score(cv_text: str, role: str = "", description: str
 
 def compute_role_match_score(cv_text: str, role: str, description: str = "", required_skills: str = "") -> int:
     snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
-    keyword_score = min(len(snapshot["present"]) * 7, 45)
+    keyword_score = min(len(snapshot["present"]) * 6, 36)
     sections = extract_resume_sections(cv_text)
-    education_score = 15 if sections.get("education") else 0
-    experience_score = 18 if sections.get("experience") else 0
-    profile_score = 12 if sections.get("profile") else 0
-    baseline = 28 if role.strip() else 18
+    education_score = 12 if sections.get("education") else 0
+    experience_score = 14 if sections.get("experience") else 0
+    profile_score = 8 if sections.get("profile") else 0
+    baseline = 18 if role.strip() else 10
     return clamp_score(baseline + keyword_score + education_score + experience_score + profile_score)
 
 
@@ -8248,8 +8622,8 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
     if role_snapshot["present"]:
         role_group_score = round((len(role_snapshot["present"]) / max(len(ROLE_KEYWORD_GROUPS.get(family, [])), 1)) * 100)
         keyword_score = max(keyword_score, clamp_score(role_group_score))
-    format_score = clamp_score(round((section_score * 70) + (text_length_score * 30)))
-    ats_score = clamp_score(round((keyword_coverage * 42) + (section_score * 32) + (text_length_score * 16) + 10))
+    format_score = clamp_score(round((section_score * 65) + (text_length_score * 25)))
+    ats_score = clamp_score(round((keyword_coverage * 38) + (section_score * 28) + (text_length_score * 14) + 6))
     if keyword_score > ats_score:
         ats_score = clamp_score(round((ats_score * 0.65) + (keyword_score * 0.35)))
     missing_hard_skills = filter_cv_keyword_list([
@@ -9472,7 +9846,11 @@ def build_coach_suggestions_from_evaluation(evaluation: Dict, allow_llm: bool = 
     try:
         user_additional_data = evaluation.get("user_additional_data")
         if isinstance(user_additional_data, dict) and flatten_cv_support_data(user_additional_data):
-            extra_instructions = build_additional_rewrite_instructions(user_additional_data, role)
+            extra_instructions = build_additional_rewrite_instructions(
+                user_additional_data,
+                role,
+                cv_text,
+            )
             extra_suggestions = []
             for index, instruction in enumerate(extra_instructions):
                 suggestion = make_coach_suggestion(
@@ -9739,11 +10117,11 @@ def build_fallback_cv_job_evaluation(
     role_match = compute_role_match_score(cv_text, role, description, required_skills)
     sector_hits = len(cv_tokens.intersection(description_tokens))
     if company.strip() or description.strip():
-        company_fit = clamp_score(28 + min(company_hits * 12, 24) + min(sector_hits * 4, 32) + (8 if sources else 0))
+        company_fit = clamp_score(18 + min(company_hits * 10, 20) + min(sector_hits * 3, 24) + (6 if sources else 0))
     else:
-        company_fit = 35
-    clarity = clamp_score(55 + min(len(cv_text) // 600, 18))
-    professionalism = clamp_score(58 + (10 if "contatti" in heuristic["detected_sections"] else 0))
+        company_fit = 24
+    clarity = clamp_score(42 + min(len(cv_text) // 700, 14))
+    professionalism = clamp_score(46 + (8 if "contatti" in heuristic["detected_sections"] else 0))
 
     required_skill_tokens = tokenize_meaningful(required_skills)
     relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens).union(required_skill_tokens))))[:8]
@@ -9967,7 +10345,7 @@ def validate_job_endpoint(data: JobValidationRequest):
     return validate_job_input(
         description=(data.description or "").strip(),
         company=(data.company or "").strip(),
-        role=(data.role or "").strip(),
+        role=clean_job_role_title(data.role),
         link=(data.link or "").strip(),
         sector=(data.sector or "").strip(),
         required_skills=(data.required_skills or "").strip(),
@@ -10066,7 +10444,7 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
 
     description = (data.description or "").strip()
     company = (data.company or "").strip()
-    role = (data.role or "").strip()
+    role = clean_job_role_title(data.role)
     role_level = (data.role_level or "").strip()
     link = (data.link or "").strip()
     sector = (data.sector or "").strip()
@@ -10132,7 +10510,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
 
     job_data = data.job_data or {}
     company = (job_data.get("company") or data.company or "Generica").strip() or "Generica"
-    role = (job_data.get("role") or data.role or public_user.get("target_role") or "").strip()
+    role = clean_job_role_title(job_data.get("role") or data.role or public_user.get("target_role"))
     role_level = (job_data.get("role_level") or data.role_level or "").strip()
     role_context = f"{role} ({role_level})" if role_level else role
     goal = (job_data.get("description") or data.goal or "").strip()
@@ -10456,7 +10834,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         elif alt_name.endswith(".docx"):
             docx_file = alternative
     analysis_score = int((analysis or {}).get("overall_score") or (data.cv_evaluation or {}).get("overall_score") or 0) if isinstance(data.cv_evaluation, dict) or isinstance(analysis, dict) else 0
-    confirmed_score_bonus = min((applied_changes_count * 3) + (len(confirmed_skills) * 2), 14)
+    confirmed_score_bonus = min((applied_changes_count * 2) + len(confirmed_skills), 8)
     analysis_score = clamp_score(analysis_score + confirmed_score_bonus) if applied_changes_count else analysis_score
     grouped_changes = rewrite_result.get("grouped_changes", {})
     skipped_change_details = []

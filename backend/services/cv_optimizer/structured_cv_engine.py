@@ -1182,35 +1182,13 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
             sections["profile"] = after_profile
 
     if "experience" in section_buckets:
-        # ESPERIENZE: stessa protezione di FORMAZIONE - mai sintesi distruttive.
-        # L'utente puo' AGGIUNGERE nuove esperienze (tramite info extra) ma le
-        # esperienze gia' presenti nel CV originale non devono essere riassunte
-        # da un LLM che potrebbe perdere dati reali (azienda, date, mansioni).
-        original_experience = sections.get("experience", "") or ""
-        base = experience_rewrite(original_experience, target)
-        original_normalized = normalize(original_experience)
-        base_normalized = normalize(base)
+        base = experience_rewrite(sections.get("experience", ""), target)
         proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["experience"]]
-        additive_proposals: List[str] = []
-        for prop in proposed_texts:
-            prop_clean = (prop or "").strip()
-            if not prop_clean:
-                continue
-            prop_normalized = normalize(prop_clean)
-            # scarta se la proposta e' molto piu' corta dell'originale (sintesi sospetta)
-            if original_normalized and len(prop_normalized) < int(len(original_normalized) * 0.6):
-                continue
-            if prop_normalized in original_normalized or prop_normalized in base_normalized:
-                continue
-            additive_proposals.append(prop_clean)
-        if additive_proposals:
-            merged_experience = _merge_unique_lines(base, *additive_proposals)
-            if merged_experience and normalize(merged_experience) != base_normalized:
-                sections["experience"] = strip_section_titles(merged_experience)
-            else:
-                sections["experience"] = base
-        else:
-            sections["experience"] = base
+        merged_experience = _apply_forced_section_change("experience", base, proposed_texts)
+        if merged_experience:
+            sections["experience"] = merged_experience
+        elif proposed_texts:
+            sections["experience"] = _fallback_section_merge(base, proposed_texts)
 
     if "projects" in section_buckets:
         base = projects_rewrite(sections.get("projects", ""), target)
@@ -1226,36 +1204,13 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
                 sections["projects"] = cleaned_projects
 
     if "education" in section_buckets:
-        # FORMAZIONE: non sostituire mai il contenuto originale.
-        # L'LLM tende ad allucinare sintesi tipo "Certificato di laurea in informatica"
-        # che cancellano titoli reali (laurea triennale, magistrale, diploma).
-        # Possiamo solo AGGIUNGERE righe nuove (es. corsi extra dichiarati dall'utente),
-        # mai sostituire o riassumere quelle esistenti.
         base = sections.get("education", "") or education_rewrite(sections.get("education", ""), parsed, target)
-        original_normalized = normalize(base)
         proposed_texts = [str(item.get("new_text") or "") for item in section_buckets["education"]]
-        # tieni solo proposte che AGGIUNGONO contenuto rispetto all'originale
-        additive_proposals: List[str] = []
-        for prop in proposed_texts:
-            prop_clean = (prop or "").strip()
-            if not prop_clean:
-                continue
-            prop_normalized = normalize(prop_clean)
-            # scarta se la proposta e' piu' corta dell'originale (rischio sintesi distruttiva)
-            if len(prop_normalized) < max(40, int(len(original_normalized) * 0.6)):
-                continue
-            # scarta se la proposta e' gia' contenuta nell'originale
-            if prop_normalized in original_normalized:
-                continue
-            additive_proposals.append(prop_clean)
-        if additive_proposals:
-            merged_education = _merge_unique_lines(base, *additive_proposals)
-            if merged_education and normalize(merged_education) != original_normalized:
-                sections["education"] = strip_section_titles(merged_education)
-            else:
-                sections["education"] = base
-        else:
-            sections["education"] = base
+        merged_education = _apply_forced_section_change("education", base, proposed_texts)
+        if merged_education:
+            sections["education"] = merged_education
+        elif proposed_texts:
+            sections["education"] = _fallback_section_merge(base, proposed_texts)
 
     if "certifications" in section_buckets:
         base = sections.get("certifications", "")

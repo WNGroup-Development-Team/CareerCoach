@@ -54,6 +54,21 @@ const getEmptyCvAdditionalData = () =>
     [item.key]: "",
   }), {});
 
+const stripRepeatedQuestionFromAnswer = (answer = "", question = "") => {
+  let cleaned = String(answer || "").trim();
+  const prompt = String(question || "").trim();
+  if (!cleaned || !prompt) {
+    return cleaned;
+  }
+
+  const escapedPrompt = prompt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  cleaned = cleaned.replace(
+    new RegExp(`^\\s*(?:\\*\\*)?\\s*${escapedPrompt}\\s*(?:\\*\\*)?\\s*[:\\-]?\\s*`, "i"),
+    ""
+  );
+  return cleaned.replace(/^\*{1,2}|\*{1,2}$/g, "").trim();
+};
+
 const getSuggestionText = (item) => {
   if (typeof item === "string") {
     return item;
@@ -2014,12 +2029,24 @@ function App() {
     const userAdditionalData = skipAdditional
       ? {}
       : {
-        additional_notes: cvAdditionalData.additional_notes || "",
+        ...CV_ADDITIONAL_DATA_FIELDS.reduce((payload, item) => {
+          const value = String(cvAdditionalData[item.key] || "").trim();
+          if (!value) {
+            return payload;
+          }
+          return {
+            ...payload,
+            [item.key]: value,
+          };
+        }, {}),
         adaptation_answers: cvOptimizationQuestions.map((question, index) => ({
           question: question.question,
           reason: question.reason,
           category: question.category,
-          answer: cvAdaptationAnswers[index] || "",
+          answer: stripRepeatedQuestionFromAnswer(
+            cvAdaptationAnswers[index] || "",
+            question.question
+          ),
         })).filter((item) => item.answer.trim()),
       };
     const confirmedSkillPayload = acceptedSkillConfirmations.map((item) => ({
@@ -2043,7 +2070,14 @@ function App() {
       status: "rejected",
       target_section: item.target_section,
     }));
-    const hasAdditionalInfo = Boolean(userAdditionalData.additional_notes?.trim()) || (userAdditionalData.adaptation_answers || []).length > 0 || confirmedSkillPayload.length > 0;
+    const hasAdditionalInfo = (
+      Object.entries(userAdditionalData).some(([key, value]) =>
+        key === "adaptation_answers"
+          ? Array.isArray(value) && value.length > 0
+          : Boolean(String(value || "").trim())
+      )
+      || confirmedSkillPayload.length > 0
+    );
     if (selectedCoachSuggestionItems.filter(isActionableCoachSuggestion).length === 0 && !hasAdditionalInfo) {
       setError("Non hai accettato modifiche da applicare.");
       return;
@@ -2125,6 +2159,7 @@ function App() {
           });
           setCvFieldErrors(nextFieldErrors);
           setCvAdditionalDataError("Controlla i campi evidenziati: alcuni dettagli sono troppo brevi o generici per creare un CV affidabile.");
+          setCvOptimizationStage(1);
         } else {
           setError(detail);
         }
@@ -3251,14 +3286,12 @@ function App() {
     hard: [
       ...acceptedSkillConfirmations.filter((item) => !["soft_skill", "tool"].includes(item.category)).map((item) => item.name),
       ...splitTagList(cvAdditionalData.technical_skills),
+      ...acceptedSkillConfirmations.filter((item) => item.category === "tool").map((item) => item.name),
+      ...splitTagList(cvAdditionalData.tools),
     ],
     soft: [
       ...acceptedSkillConfirmations.filter((item) => item.category === "soft_skill").map((item) => item.name),
       ...splitTagList(cvAdditionalData.soft_skills),
-    ],
-    tool: [
-      ...acceptedSkillConfirmations.filter((item) => item.category === "tool").map((item) => item.name),
-      ...splitTagList(cvAdditionalData.tools),
     ],
   };
   Object.keys(cvSummaryAcceptedSkillGroups).forEach((key) => {
@@ -3266,7 +3299,20 @@ function App() {
       item && list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
     );
   });
-  const cvSummaryExtraItems = [
+  const cvSummarySkillExampleItems = acceptedSkillConfirmations
+    .filter((item) => String(item.user_example || "").trim())
+    .map((item) => ({
+      title: item.name,
+      detail: String(item.user_example).trim(),
+    }));
+  const cvSummaryAdditionalItems = [
+    ...CV_ADDITIONAL_DATA_FIELDS
+      .filter((field) => !["additional_notes", "technical_skills", "soft_skills", "tools"].includes(field.key))
+      .map((field) => ({
+        title: field.label,
+        detail: String(cvAdditionalData[field.key] || "").trim(),
+      }))
+      .filter((item) => item.detail),
     ...(cvAdditionalData.additional_notes?.trim() ? [{
       title: "Note generali",
       detail: cvAdditionalData.additional_notes.trim(),
@@ -3275,8 +3321,15 @@ function App() {
       .filter(([, answer]) => String(answer || "").trim())
       .map(([index, answer]) => ({
         title: cvOptimizationQuestions[Number(index)]?.question || "Risposta extra",
-        detail: String(answer).trim(),
+        detail: stripRepeatedQuestionFromAnswer(
+          answer,
+          cvOptimizationQuestions[Number(index)]?.question || ""
+        ),
       })),
+  ];
+  const cvSummaryExtraItems = [
+    ...cvSummarySkillExampleItems,
+    ...cvSummaryAdditionalItems,
   ];
   const cvSummaryAcceptedSuggestionCount = selectedCoachSuggestionItems.length;
   const cvSummaryReviewedSuggestionCount = decidedCoachSuggestions.length || coachSuggestions.length;
@@ -4284,7 +4337,7 @@ const screenshotUploadBoxes = [];
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
               <span>i</span>
-              <h3>Fonti candidatura</h3>
+              <h3>Fonti Utili</h3>
             </div>
             {(cvOptimizationAnalysis?.sources || []).length > 0 ? (
               <div className="source-list">
@@ -4325,7 +4378,7 @@ const screenshotUploadBoxes = [];
             <p>
               {[
                 "Conferma solo le competenze che possiedi davvero. Puoi aggiungere un esempio per renderle più credibili.",
-                "Controlla tutte le modifiche che saranno applicate al nuovo CV.",
+                "Controlla le modifiche e completa qui le informazioni che saranno integrate nel nuovo CV.",
                 "Genera il nuovo documento mantenendo stile e struttura del CV originale, ampliandolo solo quando necessario.",
               ][cvOptimizationStage]}
             </p>
@@ -4590,95 +4643,6 @@ const screenshotUploadBoxes = [];
             </>
           )}
 
-          {cvOptimizationStage === -1 && (
-            <>
-              <div className="cv-strategy-section cv-additional-data-form">
-                <div className="cv-strategy-section-title">
-                  <span>+</span>
-                  <h3>Informazioni extra</h3>
-                </div>
-
-                <TagInput
-                  label="Hard Skills"
-                  placeholder="Es. Python, Data Analysis, SQL..."
-                  value={cvAdditionalData.technical_skills || ""}
-                  onChange={(value) => updateCvAdditionalData("technical_skills", value)}
-                />
-
-                <TagInput
-                  label="Soft Skills"
-                  placeholder="Es. Problem Solving, Teamwork..."
-                  value={cvAdditionalData.soft_skills || ""}
-                  onChange={(value) => updateCvAdditionalData("soft_skills", value)}
-                />
-
-                <TagInput
-                  label="Parole Chiave / Tool"
-                  placeholder="Es. Jira, SCRUM, B2B..."
-                  value={cvAdditionalData.tools || ""}
-                  onChange={(value) => updateCvAdditionalData("tools", value)}
-                />
-              </div>
-
-              <div className="cv-strategy-section cv-additional-data-form">
-                <label
-                  className={[
-                    "cv-additional-field",
-                    cvFieldErrors.additional.additional_notes ? "has-error" : "",
-                  ].filter(Boolean).join(" ")}
-                >
-                  <span>Vuoi aggiungere altre note generali?</span>
-                  <textarea
-                    value={cvAdditionalData.additional_notes}
-                    onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
-                    placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
-                    rows={4}
-                  />
-                  <small>
-                    Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
-                  </small>
-                  {cvFieldErrors.additional.additional_notes && (
-                    <small className="cv-field-error">{cvFieldErrors.additional.additional_notes}</small>
-                  )}
-                </label>
-
-                {cvOptimizationQuestions.length > 0 && (
-                  <div className="coach-suggestion-group">
-                    <strong>Domande facoltative</strong>
-                    {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
-                      <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
-                        <span>{question.question}</span>
-                        <textarea
-                          value={cvAdaptationAnswers[index] || ""}
-                          onChange={(event) => updateCvAdaptationAnswer(index, event.target.value)}
-                          placeholder="Risposta facoltativa: aggiungi solo dettagli reali e verificabili."
-                          rows={3}
-                        />
-                        {question.reason && <small>{question.reason}</small>}
-                        {cvFieldErrors.adaptation[index] && (
-                          <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
-                        )}
-                      </label>
-                    ))}
-                  </div>
-                )}
-
-                {cvAdditionalDataError && (
-                  <p className="cv-additional-error">{cvAdditionalDataError}</p>
-                )}
-
-                <div className="cv-stage-actions">
-                  <button className="cv-next-button" type="button" onClick={() => setCvOptimizationStage(3)}>
-                    Continua al riepilogo
-                  </button>
-                  <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(1)}>
-                    Torna a skill e keyword
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-
           {cvOptimizationStage === 1 && (
             <>
           <div className="cv-review-summary">
@@ -4740,7 +4704,6 @@ const screenshotUploadBoxes = [];
               {[
                 ["HARD", cvSummaryAcceptedSkillGroups.hard],
                 ["SOFT", cvSummaryAcceptedSkillGroups.soft],
-                ["TOOL", cvSummaryAcceptedSkillGroups.tool],
               ].map(([label, items]) => (
                 <div className="cv-review-skill-row" key={`review-skill-${label}`}>
                   <div className="cv-review-divider">
@@ -4767,29 +4730,111 @@ const screenshotUploadBoxes = [];
                 </div>
               </header>
               <div className="cv-review-extra-editor">
-                <label className="cv-additional-field">
-                  <span>Vuoi aggiungere altre note generali?</span>
-                  <textarea
-                    value={cvAdditionalData.additional_notes}
-                    onChange={(event) => updateCvAdditionalData("additional_notes", event.target.value)}
-                    placeholder="Esempio: ho usato Excel per analisi dati, ho creato dashboard, ho lavorato con dataset, ho usato Power BI, ho svolto un tirocinio, ho realizzato un progetto universitario, ho ottenuto risultati misurabili..."
-                    rows={4}
-                  />
-                  <small>
-                    Scrivi solo informazioni vere e verificabili. Il sistema userà queste informazioni solo se coerenti con il CV e con la candidatura.
-                  </small>
-                </label>
+                <p className="cv-strategy-note">
+                  Aggiungi solo informazioni vere: verranno riscritte e inserite nelle sezioni più adatte del CV, senza creare doppioni.
+                </p>
+
+                <TagInput
+                  label="Hard Skills"
+                  placeholder="Es. Python, Data Analysis, SQL..."
+                  value={cvAdditionalData.technical_skills || ""}
+                  onChange={(value) => updateCvAdditionalData("technical_skills", value)}
+                />
+
+                <TagInput
+                  label="Soft Skills"
+                  placeholder="Es. Problem Solving, Teamwork..."
+                  value={cvAdditionalData.soft_skills || ""}
+                  onChange={(value) => updateCvAdditionalData("soft_skills", value)}
+                />
+
+                <TagInput
+                  label="Parole chiave e strumenti"
+                  placeholder="Es. Jira, SCRUM, Power BI..."
+                  value={cvAdditionalData.tools || ""}
+                  onChange={(value) => updateCvAdditionalData("tools", value)}
+                />
+
+                {CV_ADDITIONAL_DATA_FIELDS
+                  .filter((field) => !["technical_skills", "soft_skills", "tools"].includes(field.key))
+                  .map((field) => (
+                    <label
+                      className={[
+                        "cv-additional-field",
+                        cvFieldErrors.additional[field.key] ? "has-error" : "",
+                      ].filter(Boolean).join(" ")}
+                      key={field.key}
+                    >
+                      <span>{field.label}</span>
+                      <textarea
+                        value={cvAdditionalData[field.key] || ""}
+                        onChange={(event) => updateCvAdditionalData(field.key, event.target.value)}
+                        placeholder="Descrivi fatti, contesto, strumenti utilizzati e risultati reali."
+                        rows={field.key === "additional_notes" ? 4 : 3}
+                      />
+                      {cvFieldErrors.additional[field.key] && (
+                        <small className="cv-field-error">{cvFieldErrors.additional[field.key]}</small>
+                      )}
+                    </label>
+                  ))}
+
+                {cvOptimizationQuestions.length > 0 && (
+                  <div className="coach-suggestion-group">
+                    <strong>Domande facoltative</strong>
+                    {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
+                      <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
+                        <span>{question.question}</span>
+                        <textarea
+                          value={stripRepeatedQuestionFromAnswer(
+                            cvAdaptationAnswers[index] || "",
+                            question.question
+                          )}
+                          onChange={(event) => updateCvAdaptationAnswer(
+                            index,
+                            stripRepeatedQuestionFromAnswer(event.target.value, question.question)
+                          )}
+                          placeholder="Aggiungi una risposta reale e verificabile."
+                          rows={3}
+                        />
+                        {question.reason && <small>{question.reason}</small>}
+                        {cvFieldErrors.adaptation[index] && (
+                          <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {cvAdditionalDataError && (
+                  <p className="cv-additional-error">{cvAdditionalDataError}</p>
+                )}
               </div>
-              {cvSummaryExtraItems.length > 0 ? (
+
+              {cvSummarySkillExampleItems.length > 0 && (
                 <div className="cv-review-extra-list">
-                  {cvSummaryExtraItems.map((item, index) => (
+                  <strong>Esempi scritti nelle skill accettate</strong>
+                  {cvSummarySkillExampleItems.map((item, index) => (
+                    <div key={`review-skill-example-${index}`}>
+                      <strong>{item.title}</strong>
+                      <p>{item.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {cvSummaryAdditionalItems.length > 0 && (
+                <div className="cv-review-extra-list">
+                  <strong>Informazioni aggiuntive compilate</strong>
+                  {cvSummaryAdditionalItems.map((item, index) => (
                     <div key={`review-extra-${index}`}>
                       <strong>{item.title}</strong>
                       <p>{item.detail}</p>
                     </div>
                   ))}
                 </div>
-              ) : (
+              )}
+
+              {cvSummaryExtraItems.length === 0 && (
                 <p className="cv-review-empty">Nessuna informazione extra aggiunta.</p>
               )}
             </section>
