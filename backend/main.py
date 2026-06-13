@@ -10362,14 +10362,30 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         company=company,
         accepted_instructions=rewrite_result.get("instructions") or [],
     )
-    if not quality_review.get("ready_to_send", False):
-        try:
-            print("[CV-OPT DEBUG] 422 -> quality_review NON ready_to_send")
-            print(f"[CV-OPT DEBUG] quality_review.score = {quality_review.get('score')}")
-            print(f"[CV-OPT DEBUG] quality_review.issues = {quality_review.get('issues')}")
-            print(f"[CV-OPT DEBUG] quality_review.revisions count = {len(quality_review.get('revisions') or [])}")
-        except Exception as _dbg_exc:
-            print(f"[CV-OPT DEBUG] errore nel logging quality_review: {_dbg_exc}")
+    # === Quality review: blocchiamo SOLO se c'e' un problema reale ===
+    # Il revisore LLM (qwen2.5:1.5b locale) tende a segnalare problemi minori
+    # o inesistenti anche su CV ottimizzati correttamente. Per non bloccare
+    # l'utente senza motivo, applichiamo la politica:
+    #  - score < 50  -> blocco 422 (CV davvero scadente)
+    #  - issues 'critical' presenti -> blocco 422
+    #  - altrimenti il CV passa, le issues diventano warning informativi
+    _qr_issues = quality_review.get("issues") if isinstance(quality_review.get("issues"), list) else []
+    _qr_score_raw = quality_review.get("score") or 0
+    try:
+        _qr_score = int(_qr_score_raw)
+    except (TypeError, ValueError):
+        _qr_score = 0
+    _has_critical = any(
+        isinstance(_iss, dict) and str(_iss.get("severity", "")).lower() == "critical"
+        for _iss in _qr_issues
+    )
+    _quality_blocking = _has_critical or _qr_score < 50
+
+    if _quality_blocking:
+        print(
+            f"[CV-OPT] 422 quality_review bloccante: score={_qr_score}, "
+            f"critical_issues={_has_critical}, total_issues={len(_qr_issues)}"
+        )
         raise HTTPException(
             status_code=422,
             detail={
@@ -10377,6 +10393,17 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
                 "quality_review": quality_review,
             },
         )
+
+    # Se non blocchiamo ma il revisore aveva detto ready_to_send=False,
+    # registriamo lo skip e forziamo ready_to_send=True per il frontend,
+    # conservando le issues come warning consultabili.
+    if not quality_review.get("ready_to_send", False):
+        print(
+            f"[CV-OPT] quality_review non-bloccante: score={_qr_score}, "
+            f"issues={len(_qr_issues)} - CV consegnato con warning"
+        )
+        quality_review["ready_to_send"] = True
+        quality_review["warnings_only"] = True
 
     filename = get_target_optimized_cv_filename(public_user.get("name", "CV"), role_context, company, extension)
     file_base64 = base64.b64encode(file_bytes).decode("ascii") if file_bytes else ""
