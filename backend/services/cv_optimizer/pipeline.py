@@ -14,25 +14,20 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from docx.oxml import OxmlElement
 
+from .section_catalog import SECTION_ALIASES as SHARED_SECTION_ALIASES
+from .section_catalog import canonical_section_key, normalize_section_title
 
 SECTION_ALIASES = {
-    "profilo": {"profilo", "profilo professionale", "chi sono", "summary", "about"},
-    "esperienze": {
-        "esperienze",
-        "esperienza",
-        "esperienze professionali",
-        "esperienza professionale",
-        "work experience",
-        "professional experience",
-    },
-    "formazione": {"formazione", "istruzione", "education"},
-    "competenze": {"competenze", "skills", "competenze tecniche"},
-    "hard_skills": {"hard skills", "competenze tecniche hard", "tecniche"},
-    "soft_skills": {"soft skills", "competenze trasversali"},
-    "lingue": {"lingue", "languages"},
-    "certificazioni": {"certificazioni", "certificati", "certifications"},
-    "progetti": {"progetti", "projects", "pagina aggiuntiva", "esperienze aggiuntive", "attivita rilevanti"},
-    "contatti": {"contatti", "contact", "contacts"},
+    "profilo": SHARED_SECTION_ALIASES["profile"],
+    "esperienze": SHARED_SECTION_ALIASES["experience"],
+    "formazione": SHARED_SECTION_ALIASES["education"],
+    "competenze": SHARED_SECTION_ALIASES["hard_skills"],
+    "hard_skills": SHARED_SECTION_ALIASES["hard_skills"],
+    "soft_skills": SHARED_SECTION_ALIASES["soft_skills"],
+    "lingue": SHARED_SECTION_ALIASES["languages"],
+    "certificazioni": SHARED_SECTION_ALIASES["certifications"],
+    "progetti": SHARED_SECTION_ALIASES["projects"],
+    "contatti": SHARED_SECTION_ALIASES["contacts"],
 }
 
 
@@ -121,10 +116,21 @@ def is_section_heading(line: str) -> bool:
 
 
 def canonical_section(line: str) -> str:
-    clean = normalize_text(line).strip(":")
-    for canonical, aliases in SECTION_ALIASES.items():
-        if clean in aliases:
-            return canonical
+    shared_key = canonical_section_key(line)
+    if shared_key:
+        return {
+            "profile": "profilo",
+            "experience": "esperienze",
+            "education": "formazione",
+            "hard_skills": "hard_skills",
+            "soft_skills": "soft_skills",
+            "languages": "lingue",
+            "certifications": "certificazioni",
+            "projects": "progetti",
+            "contacts": "contatti",
+            "header": "intestazione",
+        }.get(shared_key, shared_key)
+    clean = normalize_section_title(line)
     return clean or "contenuto"
 
 
@@ -819,11 +825,13 @@ Dati aggiuntivi utente:
                 "projects": "progetti",
                 "certifications": "certificazioni",
                 "languages": "lingue",
+                "education": "formazione",
                 "technical_skills": "hard_skills",
                 "tools": "hard_skills",
                 "soft_skills": "soft_skills",
                 "measurable_results": "esperienze",
                 "company_role_notes": "profilo",
+                "additional_notes": "attivita rilevanti",
             }
             for field_name, section_name in field_to_section.items():
                 if str(user_additional_data.get(field_name) or "").strip():
@@ -839,11 +847,14 @@ Dati aggiuntivi utente:
                     "certificazioni": "certificazioni",
                     "languages": "lingue",
                     "lingue": "lingue",
+                    "education": "formazione",
+                    "formazione": "formazione",
                     "technical_skills": "hard_skills",
                     "tools": "hard_skills",
                     "soft_skills": "soft_skills",
                     "measurable_results": "esperienze",
                     "company_role_notes": "profilo",
+                    "additional_notes": "attivita rilevanti",
                 }
                 for ans in answers:
                     if not isinstance(ans, dict):
@@ -887,13 +898,7 @@ Dati aggiuntivi utente:
                     continue
 
             text = self._clean_instruction_text(instruction.new_text, note_texts)
-            if target in {"hard_skills", "soft_skills", "competenze"}:
-                text = self._filter_supported_skill_text(text, support_text)
-            elif target == "progetti":
-                text = self._format_project_entries(text)
-                if not text:
-                    continue
-
+            text = self._format_section_text(target, text, support_text)
             text = self._fix_common_grammar(text)
             key = (target, normalize_text(text))
             if not text or key in seen:
@@ -921,6 +926,14 @@ Dati aggiuntivi utente:
 
     def _user_note_texts(self, user_data: Dict[str, Any]) -> List[str]:
         notes: List[str] = []
+        for field_name in (
+            "experiences", "projects", "certifications", "languages", "education",
+            "technical_skills", "tools", "soft_skills", "measurable_results",
+            "company_role_notes", "additional_notes",
+        ):
+            value = str(user_data.get(field_name) or "").strip()
+            if value:
+                notes.append(value)
         for item in user_data.get("adaptation_answers", []) if isinstance(user_data.get("adaptation_answers"), list) else []:
             if isinstance(item, dict) and str(item.get("answer") or "").strip():
                 notes.append(str(item.get("answer")).strip())
@@ -934,21 +947,65 @@ Dati aggiuntivi utente:
                     notes.append(detail)
         return notes
 
+    def _format_section_text(self, target: str, text: str, support_text: str) -> str:
+        if not text:
+            return ""
+        if target in {"hard_skills", "soft_skills", "competenze"}:
+            return self._format_skill_lines(
+                self._filter_supported_skill_text(text, support_text)
+            )
+        if target == "progetti":
+            return self._format_project_entries(text)
+        if target in {"lingue", "certificazioni", "formazione"}:
+            return self._format_fact_lines(text)
+        if target in {"esperienze", "profilo", "attivita rilevanti"}:
+            return self._format_prose_lines(text)
+        return self._format_prose_lines(text)
+
+    def _format_skill_lines(self, text: str) -> str:
+        values: List[str] = []
+        seen = set()
+        for part in re.split(r"[,;|Ã‚Â·Ã¢â‚¬Â¢\n]+", text or ""):
+            value = re.sub(r"\s+", " ", part).strip(" -.")
+            key = normalize_text(value)
+            if value and key and key not in seen:
+                seen.add(key)
+                values.append(value)
+        return " | ".join(values)
+
+    def _format_fact_lines(self, text: str) -> str:
+        rows: List[str] = []
+        seen = set()
+        for raw_line in re.split(r"\n+|(?<=[.!?])\s+", text or ""):
+            line = re.sub(r"\s+", " ", raw_line).strip(" -")
+            key = normalize_text(line)
+            if not line or not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(line.rstrip("."))
+        return "\n".join(rows)
+
+    def _format_prose_lines(self, text: str) -> str:
+        rows: List[str] = []
+        seen = set()
+        for raw_line in (text or "").splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip(" -")
+            key = normalize_text(line)
+            if not line or not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(line if line.endswith((".", ":", ";")) else f"{line}.")
+        return "\n".join(rows)
+
     def _clean_instruction_text(self, text: str, note_texts: List[str]) -> str:
         lines: List[str] = []
         for raw_line in re.sub(r"\r\n?", "\n", text or "").splitlines():
             original_line = re.sub(r"[ \t]+", " ", raw_line).strip()
-            original_plain = normalize_text(original_line)
             line = self._professionalize_informal_line(original_line)
             plain = normalize_text(line)
             if not line:
                 continue
             if any(marker in plain for marker in INFORMAL_CV_MARKERS):
-                continue
-            if (
-                plain == original_plain
-                and any(note == plain or (len(note) >= 24 and note in plain) for note in note_texts)
-            ):
                 continue
             lines.append(line)
         return "\n".join(lines).strip()
@@ -1001,15 +1058,24 @@ Dati aggiuntivi utente:
 
     def _format_project_entries(self, text: str) -> str:
         lines = [line.strip(" -Â·â€¢") for line in (text or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        if len(lines) == 1:
+            single = lines[0].rstrip(".")
+            return f"Progetto personale\n{single[:1].upper() + single[1:]}."
+
         rows: List[str] = []
         index = 0
         while index < len(lines):
             title = lines[index]
             plain = normalize_text(title)
             if not plain.startswith(("progetto ", "project ", "tesi ")):
+                if len(plain.split()) <= 7 and len(title) <= 70:
+                    rows.append(f"Progetto personale\n{title[:1].upper() + title[1:].rstrip('.')}." )
                 index += 1
                 continue
             if index + 1 >= len(lines):
+                rows.append(f"{title[:1].upper() + title[1:].rstrip('.')}." )
                 break
             description = lines[index + 1].strip()
             if (
@@ -1020,7 +1086,7 @@ Dati aggiuntivi utente:
                 continue
             rows.extend([title, description.rstrip(".") + "."])
             index += 2
-        return "\n".join(rows)
+        return "\n".join(rows).strip()
 
     def _fix_common_grammar(self, text: str) -> str:
         text = self._repair_mojibake(text)
@@ -1215,9 +1281,22 @@ Dati aggiuntivi utente:
         failed = []
         for instruction in instructions:
             needle = normalize_text(instruction.new_text)
+            needle_lines = [
+                normalize_text(line)
+                for line in (instruction.new_text or "").splitlines()
+                if normalize_text(line)
+            ]
             hint = normalize_text(instruction.old_text_hint)
-            if needle and self._semantic_match(normalized_final, needle):
+            matched_lines = sum(
+                1 for line in needle_lines
+                if self._semantic_match(normalized_final, line)
+            )
+            if needle_lines and matched_lines == len(needle_lines):
                 applied.append(instruction.suggestion_id)
+            elif needle and self._semantic_match(normalized_final, needle):
+                applied.append(instruction.suggestion_id)
+            elif needle_lines and matched_lines:
+                partial.append(instruction.suggestion_id)
             elif hint and self._semantic_match(normalized_final, hint):
                 partial.append(instruction.suggestion_id)
             else:
@@ -1401,8 +1480,27 @@ Dati aggiuntivi utente:
         if not replacement:
             return "failed"
         if target in sections_detected:
-            print(f"DOCX APPLY - skipped unsafe fallback insertion: target={target} already exists")
-            return "failed"
+            section_contexts = [
+                context
+                for context in self._paragraph_contexts(document)
+                if context.section == target
+            ]
+            if section_contexts:
+                replacement_lines = [
+                    line.strip()
+                    for line in replacement.splitlines()
+                    if line.strip()
+                ]
+                self._append_to_existing_section(section_contexts, replacement_lines)
+                return "applied"
+            heading_anchor = self._find_section_heading_paragraph(document, target)
+            if heading_anchor is not None:
+                self._append_content_after_anchor(
+                    heading_anchor,
+                    target,
+                    replacement.splitlines(),
+                )
+                return "applied"
         heading = self._section_display_name(target)
         if not document.paragraphs:
             self._append_section_block(document, heading, replacement, None)
@@ -1410,10 +1508,34 @@ Dati aggiuntivi utente:
 
         anchor = self._find_best_section_anchor(document, target, sections_detected)
         if anchor is None:
-            print(f"DOCX APPLY - skipped unsafe fallback insertion: target={target} no safe anchor")
-            return "failed"
+            self._append_section_block(document, heading, replacement, None)
+            return "applied"
         self._append_section_block(document, heading, replacement, anchor)
         return "applied"
+
+    def _find_section_heading_paragraph(self, document, target: str):
+        for context in reversed(self._paragraph_contexts(document)):
+            text = (context.paragraph.text or "").strip()
+            if is_section_heading(text) and canonical_section(text) == target:
+                return context.paragraph
+        return None
+
+    def _append_content_after_anchor(
+        self,
+        anchor_paragraph,
+        section_name: str,
+        replacement_lines: List[str],
+    ) -> None:
+        previous = anchor_paragraph
+        lines = [line.strip() for line in replacement_lines if line.strip()]
+        for line_index, line in enumerate(lines):
+            new_paragraph = self._insert_paragraph_after(
+                previous,
+                line,
+                source_format=anchor_paragraph,
+            )
+            self._style_section_line(new_paragraph, section_name, line_index)
+            previous = new_paragraph
 
     def _is_safe_target_text(self, instruction: StructuredRewriteInstruction) -> bool:
         section = canonical_section(instruction.target_section)
@@ -1468,19 +1590,8 @@ Dati aggiuntivi utente:
             anchor = matching_contexts[0]
 
         section_name = anchor.section
-        section_contexts = [
-            context
-            for context in self._paragraph_contexts(document)
-            if context.section == section_name
-            and self._is_editable_paragraph(context.paragraph)
-        ]
-        if not section_contexts:
-            section_contexts = matching_contexts
-
-        # Clear the whole matched section so the new CV contains only the rewritten block.
-        for context in section_contexts:
-            self._replace_paragraph_preserving_style(context.paragraph, "")
-
+        # Replace only the matched anchor. Other existing entries in the section
+        # must remain untouched.
         self._replace_paragraph_preserving_style(anchor.paragraph, replacement_lines[0])
         self._style_section_line(anchor.paragraph, section_name, 0)
         previous = anchor.paragraph

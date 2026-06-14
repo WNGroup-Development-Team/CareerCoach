@@ -5,17 +5,8 @@ import unicodedata
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
 
+from .section_catalog import NORMALIZED_SECTION_ALIASES as SECTION_ALIASES
 
-SECTION_ALIASES = {
-    "profile": {"profilo", "profilo professionale", "chi sono", "obiettivo", "summary", "about me"},
-    "experience": {"esperienza", "esperienze", "esperienza professionale", "esperienze professionali", "work experience"},
-    "projects": {"progetti", "projects", "portfolio", "pagina aggiuntiva", "attivita rilevanti"},
-    "hard_skills": {"hard skills", "competenze tecniche", "technical skills"},
-    "soft_skills": {"soft skills", "competenze trasversali"},
-    "education": {"formazione", "istruzione", "education"},
-    "languages": {"lingue", "languages", "comunicazione"},
-    "contacts": {"contatti", "contact", "contacts"},
-}
 ALL_HEADINGS = {item for values in SECTION_ALIASES.values() for item in values}
 HEADING_TO_KEY = {alias: key for key, aliases in SECTION_ALIASES.items() for alias in aliases}
 

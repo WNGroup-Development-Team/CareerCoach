@@ -5,9 +5,19 @@ from unittest.mock import patch
 from docx import Document
 from docx.shared import Pt
 
-from main import build_confirmed_skill_rewrite_instructions
+from main import (
+    build_additional_rewrite_instructions,
+    build_confirmed_skill_rewrite_instructions,
+    call_rewrite_llm,
+    is_additive_user_rewrite_source,
+    canonical_edit_section_name,
+    extract_resume_sections,
+    fallback_skill_detail_instruction,
+    infer_extra_content_section,
+)
 from services.cv_optimizer.rewrite import build_resume_rewrite_result
 from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
+from services.cv_optimizer.structured_cv_engine import _call_copywriting_llm
 from services.cv_optimizer.pipeline import (
     DocxPreserver,
     ResumeDocxOptimizationPipeline,
@@ -17,6 +27,7 @@ from services.cv_optimizer.pipeline import (
     StructuredRewriteInstruction,
     canonical_section,
 )
+from services.cv_optimizer.section_catalog import canonical_section_key
 
 
 class ResumeParserLayoutTests(unittest.TestCase):
@@ -34,6 +45,346 @@ class ResumeParserLayoutTests(unittest.TestCase):
         self.assertIn("formazione", sections)
         self.assertIn("esperienze", sections)
         self.assertEqual(sections["hard_skills"], "Python SQL Power BI")
+
+    def test_common_heading_variants_share_the_same_section(self):
+        variants = {
+            "Esperienze lavorative": "experience",
+            "ESPERIENZE PROFESSIONALI:": "experience",
+            "Employment History": "experience",
+            "Percorso accademico": "education",
+            "Conoscenze tecniche": "hard_skills",
+            "Competenze personali": "soft_skills",
+            "Conoscenze linguistiche": "languages",
+            "Corsi e certificazioni": "certifications",
+            "Progetti accademici": "projects",
+            "Informazioni di contatto": "contacts",
+        }
+
+        for heading, expected in variants.items():
+            with self.subTest(heading=heading):
+                self.assertEqual(canonical_section_key(heading), expected)
+
+    def test_resume_parser_accepts_work_experience_synonym(self):
+        sections = {
+            section.name: section.text
+            for section in ResumeParser().parse_text(
+                "Mario Rossi\nESPERIENZE LAVORATIVE\nAnalista dati presso Acme"
+            )
+        }
+
+        self.assertEqual(
+            sections["esperienze"],
+            "Analista dati presso Acme",
+        )
+
+    def test_legacy_parser_uses_the_shared_heading_catalog(self):
+        self.assertEqual(
+            canonical_edit_section_name("Esperienze lavorative"),
+            "ESPERIENZE PROFESSIONALI",
+        )
+        sections = extract_resume_sections(
+            "Mario Rossi\nESPERIENZE LAVORATIVE\nAnalista dati presso Acme\n"
+            "PERCORSO ACCADEMICO\nLaurea in Informatica"
+        )
+
+        self.assertEqual(sections["experience"], "Analista dati presso Acme")
+        self.assertEqual(sections["education"], "Laurea in Informatica")
+
+
+class DynamicAdditionalContentTests(unittest.TestCase):
+    def test_language_level_is_routed_to_languages(self):
+        self.assertEqual(
+            infer_extra_content_section("Ho preso il B2 in Inglese"),
+            ("LINGUE", "languages"),
+        )
+
+    @patch("main.build_professional_extra_text")
+    def test_short_project_is_kept_as_title_and_description(self, rewrite_mock):
+        rewrite_mock.return_value = "Partecipazione a un progetto di imprenditorialita digitale."
+
+        instructions = build_additional_rewrite_instructions(
+            {"projects": "Ho lavorato in un progetto di imprenditorialita digitale"},
+            role="Data Analyst",
+            cv_text="PROFILO\nCandidato junior.",
+        )
+
+        project = next(item for item in instructions if item.section == "PROGETTI")
+        self.assertEqual(len(project.replacement.splitlines()), 2)
+        self.assertTrue(project.replacement.splitlines()[1].endswith("."))
+
+    def test_section_formatter_supports_all_dynamic_sections(self):
+        pipeline = ResumeDocxOptimizationPipeline()
+
+        self.assertEqual(
+            pipeline._format_section_text("lingue", "Inglese B2\nFrancese A2", ""),
+            "Inglese B2\nFrancese A2",
+        )
+        self.assertIn(
+            "Progetto personale",
+            pipeline._format_section_text(
+                "progetti",
+                "Partecipazione a un progetto di imprenditorialita digitale.",
+                "",
+            ),
+        )
+        self.assertEqual(
+            pipeline._format_section_text("certificazioni", "Certificazione AWS.", ""),
+            "Certificazione AWS",
+        )
+
+    def test_clean_user_fact_is_not_discarded_as_duplicate_note(self):
+        pipeline = ResumeDocxOptimizationPipeline()
+        instructions = pipeline._sanitize_structured_instructions(
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="language-b2",
+                    target_section="LINGUE",
+                    action="append",
+                    old_text_hint="",
+                    new_text="Inglese B2",
+                ),
+                StructuredRewriteInstruction(
+                    suggestion_id="cert-aws",
+                    target_section="CERTIFICAZIONI",
+                    action="append",
+                    old_text_hint="",
+                    new_text="Certificazione AWS",
+                ),
+            ],
+            cv_text="PROFILO\nCandidato junior.",
+            user_additional_data={
+                "languages": "Inglese B2",
+                "certifications": "Certificazione AWS",
+            },
+        )
+
+        self.assertEqual(
+            {item.suggestion_id for item in instructions},
+            {"language-b2", "cert-aws"},
+        )
+
+    def test_user_example_routes_each_fact_without_llm_reinterpretation(self):
+        instructions = build_additional_rewrite_instructions(
+            {
+                "experiences": (
+                    "Ho lavorato in Datewave dove ho realizzato un chatbot "
+                    "per la spedizione di pacchi"
+                ),
+                "projects": (
+                    "progetto di ML sulla predizione del possibile vincitore "
+                    "dei mondiali e progetto di Ingegneria dei Dati per un "
+                    "sistema di Information retrieval"
+                ),
+                "certifications": (
+                    "Ho preso la certificazione B2 di Inglese e C1 di francese."
+                ),
+            },
+            role="Data Analyst",
+            cv_text="ESPERIENZE LAVORATIVE\nEsperienza precedente.",
+        )
+
+        by_section = {}
+        for instruction in instructions:
+            by_section.setdefault(instruction.section, []).append(instruction)
+
+        self.assertIn("ESPERIENZE PROFESSIONALI", by_section)
+        self.assertIn("Datewave", by_section["ESPERIENZE PROFESSIONALI"][0].replacement)
+        self.assertIn("PROGETTI", by_section)
+        self.assertEqual(len(by_section["PROGETTI"]), 2)
+        self.assertIn("Machine Learning", by_section["PROGETTI"][0].replacement)
+        self.assertIn("Data Engineering", by_section["PROGETTI"][1].replacement)
+        self.assertEqual(
+            by_section["LINGUE"][0].replacement,
+            "Inglese B2\nFrancese C1",
+        )
+        self.assertEqual(by_section["LINGUE"][0].original, "")
+
+    @patch("main.call_rewrite_llm")
+    def test_project_paragraph_stays_coherent_and_language_level_is_exact(
+        self,
+        rewrite_mock,
+    ):
+        rewrite_mock.return_value = {
+            "replacement": (
+                "Realizzazione di progetti universitari di analisi dati. "
+                "Utilizzo di SQL e Python per interrogazione, analisi e reportistica."
+            )
+        }
+        instructions = build_additional_rewrite_instructions(
+            {
+                "projects": (
+                    "Ho realizzato progetti universitari legati all'analisi dei dati. "
+                    "In particolare, ho lavorato con SQL e Python per analisi e report."
+                ),
+                "certifications": "Ho preso il B2 in Inglese",
+            },
+            role="Data Analyst",
+            cv_text="PROGETTI\nProgetto esistente.",
+        )
+
+        projects = [item for item in instructions if item.section == "PROGETTI"]
+        languages = [item for item in instructions if item.section == "LINGUE"]
+
+        self.assertEqual(len(projects), 1)
+        self.assertIn("SQL", projects[0].replacement)
+        self.assertEqual(languages[0].replacement, "Inglese B2")
+
+    @patch("main.call_rewrite_llm")
+    def test_every_frontend_additional_box_produces_a_cv_instruction(
+        self,
+        rewrite_mock,
+    ):
+        rewrite_mock.return_value = {"replacement": "Testo professionale confermato."}
+        fields = {
+            "experiences": "Ho lavorato presso Acme occupandomi di assistenza clienti.",
+            "technical_skills": "Ho utilizzato Python per elaborare dataset.",
+            "soft_skills": "Ho coordinato il lavoro con un gruppo universitario.",
+            "projects": "Progetto di analisi dati con SQL e Python.",
+            "measurable_results": "Ho ridotto i tempi di elaborazione del 20%.",
+            "certifications": "Certificazione Google Data Analytics.",
+            "tools": "Ho utilizzato Power BI per creare dashboard.",
+            "company_role_notes": "Interesse per il ruolo Data Analyst in Google.",
+            "additional_notes": "Attivita di volontariato nella gestione di eventi.",
+        }
+
+        for field_name, value in fields.items():
+            with self.subTest(field=field_name):
+                instructions = build_additional_rewrite_instructions(
+                    {field_name: value},
+                    role="Data Analyst",
+                    cv_text="PROFILO\nProfilo esistente.",
+                )
+                self.assertTrue(
+                    instructions,
+                    f"La box {field_name} non ha prodotto istruzioni per il CV.",
+                )
+
+    @patch("main.call_structured_llm")
+    def test_rewrite_llm_does_not_fallback_to_ollama(self, structured_mock):
+        structured_mock.return_value = {"instructions": []}
+
+        call_rewrite_llm("prompt", context="test")
+
+        self.assertEqual(
+            structured_mock.call_args.kwargs["preferred_order"],
+            ["gemini"],
+        )
+
+    @patch("main.call_structured_llm")
+    def test_cv_analysis_helpers_are_gemini_only(self, structured_mock):
+        from main import call_analysis_llm, call_lightweight_analysis_llm
+
+        structured_mock.return_value = {}
+        call_analysis_llm("prompt")
+        call_lightweight_analysis_llm("prompt")
+
+        self.assertEqual(
+            [call.kwargs["preferred_order"] for call in structured_mock.call_args_list],
+            [["gemini"], ["gemini"]],
+        )
+
+    @patch("main.call_gemini")
+    @patch("main.call_ollama")
+    def test_structured_copywriting_uses_gemini_and_never_ollama(
+        self,
+        ollama_mock,
+        gemini_mock,
+    ):
+        gemini_mock.return_value = {"instructions": []}
+
+        result = _call_copywriting_llm("prompt")
+
+        self.assertEqual(result, {"instructions": []})
+        gemini_mock.assert_called_once()
+        ollama_mock.assert_not_called()
+
+    def test_confirmed_skill_examples_are_professionalized_locally(self):
+        kpi = fallback_skill_detail_instruction(
+            {
+                "name": "KPI",
+                "category": "hard_skill",
+                "detail": (
+                    "Usati in progetti universitari di analisi dati per "
+                    "valutare risultati e monitorare indicatori."
+                ),
+            },
+            0,
+            "",
+        )
+        analytics = fallback_skill_detail_instruction(
+            {
+                "name": "Google Analytics",
+                "category": "hard_skill",
+                "detail": "l'ho usato in un corso di Google",
+            },
+            1,
+            "",
+        )
+
+        self.assertEqual(kpi.section, "PROGETTI")
+        self.assertIn("KPI", kpi.replacement)
+        self.assertEqual(analytics.section, "FORMAZIONE")
+        self.assertNotIn("l'ho usato", analytics.replacement.lower())
+        self.assertIn("Google Analytics", analytics.replacement)
+
+    def test_accepted_skill_cards_are_all_converted_to_cv_instructions(self):
+        instructions = build_confirmed_skill_rewrite_instructions(
+            "HARD SKILLS\nPython\nSOFT SKILLS\nProblem solving",
+            {
+                "confirmed_skills": [
+                    {
+                        "id": "hard-card",
+                        "name": "SQL",
+                        "category": "hard_skill",
+                        "detail": "",
+                        "target_section": "HARD SKILLS",
+                    },
+                    {
+                        "id": "soft-card",
+                        "name": "Coordinamento team",
+                        "category": "soft_skill",
+                        "detail": (
+                            "Dimostrato durante un progetto universitario "
+                            "organizzando attivita e scadenze."
+                        ),
+                        "target_section": "SOFT SKILLS",
+                    },
+                    {
+                        "id": "keyword-card",
+                        "name": "KPI",
+                        "category": "keyword",
+                        "detail": (
+                            "Usati in progetti universitari di analisi dati "
+                            "per monitorare i risultati."
+                        ),
+                        "target_section": "COMPETENZE TECNICHE",
+                    },
+                ]
+            },
+            role="Data Analyst",
+        )
+
+        replacements = "\n".join(item.replacement for item in instructions)
+        self.assertIn("SQL", replacements)
+        self.assertIn("Coordinamento team", replacements)
+        self.assertIn("KPI", replacements)
+        self.assertTrue(
+            any(item.category == "soft_skills" for item in instructions)
+        )
+        self.assertTrue(
+            any(item.source_id.startswith("confirmed_skill_detail_") for item in instructions)
+        )
+
+    def test_only_box_and_confirmation_sources_are_additive(self):
+        self.assertTrue(is_additive_user_rewrite_source("user_box_projects_0"))
+        self.assertTrue(is_additive_user_rewrite_source("confirmed_hard_skills"))
+        self.assertTrue(
+            is_additive_user_rewrite_source(
+                "consolidated:coach-edit|user_additional_answer_0_0"
+            )
+        )
+        self.assertFalse(is_additive_user_rewrite_source("coach-suggestion-1"))
+        self.assertFalse(is_additive_user_rewrite_source("llm_instruction"))
 
 
 class ResumeRewriterTests(unittest.TestCase):
@@ -995,6 +1346,56 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
         self.assertEqual(applied, 1)
         self.assertEqual(texts[-2:], ["COMPETENZE", "Python"])
+
+    def test_inserts_confirmed_section_when_document_has_no_known_anchor(self):
+        document = Document()
+        document.add_paragraph("Curriculum vitae")
+        document.add_paragraph("Contenuto con struttura personalizzata")
+        pipeline = ResumeDocxOptimizationPipeline()
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="confirmed-language",
+            target_section="LINGUE",
+            action="append",
+            old_text_hint="",
+            new_text="Inglese B2",
+            items=["Inglese B2"],
+        )
+
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [instruction],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+        self.assertEqual(result.failed_ids, [])
+        self.assertIn("confirmed-language", result.applied_ids)
+        self.assertEqual(texts[-2:], ["LINGUE", "Inglese B2"])
+
+    def test_replacing_one_experience_does_not_delete_other_existing_entries(self):
+        document = Document()
+        document.add_paragraph("ESPERIENZE PROFESSIONALI")
+        document.add_paragraph("Esperienza A da aggiornare")
+        document.add_paragraph("Esperienza B da conservare")
+        pipeline = ResumeDocxOptimizationPipeline()
+        instruction = StructuredRewriteInstruction(
+            suggestion_id="rewrite-one-experience",
+            target_section="ESPERIENZE PROFESSIONALI",
+            action="replace",
+            old_text_hint="Esperienza A da aggiornare",
+            new_text="Esperienza A aggiornata",
+            items=[],
+        )
+
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [instruction],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+        self.assertIn("Esperienza A aggiornata", texts)
+        self.assertIn("Esperienza B da conservare", texts)
 
     def test_skips_role_like_confirmed_skill(self):
         instructions = build_confirmed_skill_rewrite_instructions(
