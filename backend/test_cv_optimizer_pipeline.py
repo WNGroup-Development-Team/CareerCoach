@@ -3,6 +3,8 @@ import unittest
 from unittest.mock import patch
 
 from docx import Document
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 from docx.shared import Pt
 
 from main import (
@@ -26,6 +28,7 @@ from services.cv_optimizer.pipeline import (
     RewriteInstruction,
     StructuredRewriteInstruction,
     canonical_section,
+    is_section_heading,
 )
 from services.cv_optimizer.section_catalog import canonical_section_key
 
@@ -52,11 +55,20 @@ class ResumeParserLayoutTests(unittest.TestCase):
             "ESPERIENZE PROFESSIONALI:": "experience",
             "Employment History": "experience",
             "Percorso accademico": "education",
+            "ISTRUZIONE E FORMAZIONE": "education",
             "Conoscenze tecniche": "hard_skills",
             "Competenze personali": "soft_skills",
+            "CAPACITÀ": "soft_skills",
             "Conoscenze linguistiche": "languages",
+            "LANGUAGE": "languages",
+            "IT SKILLS": "hard_skills",
             "Corsi e certificazioni": "certifications",
+            "PUBBLICAZIONI": "publications",
             "Progetti accademici": "projects",
+            "Additional Information": "projects",
+            "FORMAZIONE 2023–2025": "education",
+            "COMUNICAZIONE": "languages",
+            "Pagina Web personale": "contacts",
             "Informazioni di contatto": "contacts",
         }
 
@@ -76,6 +88,24 @@ class ResumeParserLayoutTests(unittest.TestCase):
             sections["esperienze"],
             "Analista dati presso Acme",
         )
+
+    def test_colon_terminated_subheading_stops_previous_section(self):
+        document = Document()
+        document.add_paragraph("Courses and Certifications:")
+        document.add_paragraph("Professional certification.")
+        document.add_paragraph("Voluntary activities:")
+        document.add_paragraph("Community volunteering.")
+
+        contexts = ResumeDocxOptimizationPipeline()._paragraph_contexts(document)
+
+        self.assertEqual(contexts[1].section, "certificazioni")
+        self.assertEqual(contexts[2].section, "voluntary activities")
+        self.assertEqual(contexts[3].section, "voluntary activities")
+
+    def test_uppercase_name_and_date_are_not_section_headings(self):
+        self.assertFalse(is_section_heading("ALESSIO MARINUCCI"))
+        self.assertFalse(is_section_heading("2025-IN CORSO"))
+        self.assertTrue(is_section_heading("FORMAZIONE 2023–2025"))
 
     def test_legacy_parser_uses_the_shared_heading_catalog(self):
         self.assertEqual(
@@ -326,6 +356,68 @@ class DynamicAdditionalContentTests(unittest.TestCase):
         self.assertEqual(analytics.section, "FORMAZIONE")
         self.assertNotIn("l'ho usato", analytics.replacement.lower())
         self.assertIn("Google Analytics", analytics.replacement)
+
+    @patch("main.CV_REWRITE_LLM_ENABLED", False)
+    def test_carol_confirmed_content_is_routed_without_losing_project_evidence(
+        self,
+    ):
+        user_data = {
+            "confirmed_skills": [
+                {
+                    "name": "KPI",
+                    "category": "hard_skill",
+                    "detail": (
+                        "Usata in progetti universitari di analisi dati per "
+                        "definire e monitorare indicatori utili alla valutazione "
+                        "dei risultati, confrontando metriche e performance."
+                    ),
+                }
+            ],
+            "experiences": (
+                "ho lavorato presso Poste Italiane dove ho realizzato una "
+                "chatbot che risponde a domande relative a documentazione aziendale"
+            ),
+            "projects": (
+                "Ho lavorato su progetti universitari di Data Analysis e Machine "
+                "Learning in cui ho analizzato dati, definito indicatori di "
+                "performance e interpretato metriche tramite report e tabelle."
+            ),
+            "measurable_results": (
+                "Ho contribuito alla produzione di analisi piu chiare e "
+                "confrontabili, metriche quantitative per valutare risultati, "
+                "individuare criticita e presentare conclusioni in modo strutturato."
+            ),
+        }
+
+        instructions = [
+            *build_confirmed_skill_rewrite_instructions(
+                "HARD SKILLS\nPython\nC++",
+                user_data,
+                "Data Analyst",
+            ),
+            *build_additional_rewrite_instructions(
+                user_data,
+                "Data Analyst",
+                "HARD SKILLS\nPython\nC++",
+            ),
+        ]
+        projects = [
+            item for item in instructions
+            if item.section == "PROGETTI"
+        ]
+        experiences = [
+            item for item in instructions
+            if item.section == "ESPERIENZE PROFESSIONALI"
+        ]
+
+        self.assertGreaterEqual(len(projects), 3)
+        project_text = "\n".join(item.replacement for item in projects)
+        self.assertIn("KPI", project_text)
+        self.assertIn("Machine Learning", project_text)
+        self.assertIn("analisi piu chiare", project_text.lower())
+        self.assertEqual(len(experiences), 1)
+        self.assertIn("Presso Poste Italiane", experiences[0].replacement)
+        self.assertNotIn("Esperienza presso", experiences[0].replacement)
 
     def test_accepted_skill_cards_are_all_converted_to_cv_instructions(self):
         instructions = build_confirmed_skill_rewrite_instructions(
@@ -598,6 +690,26 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         document.save(output)
         return output.getvalue()
 
+    def _add_textbox(self, document: Document, lines):
+        text_xml = "".join(
+            f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>"
+            for line in lines
+        )
+        shape = parse_xml(
+            f"""
+            <w:r {nsdecls('w')} xmlns:v="urn:schemas-microsoft-com:vml">
+              <w:pict>
+                <v:shape style="width:180pt;height:300pt">
+                  <v:textbox>
+                    <w:txbxContent>{text_xml}</w:txbxContent>
+                  </v:textbox>
+                </v:shape>
+              </w:pict>
+            </w:r>
+            """
+        )
+        document.add_paragraph()._p.append(shape)
+
     def test_profile_rewrite_can_mention_skills_in_a_normal_sentence(self):
         pipeline = ResumeDocxOptimizationPipeline()
         instruction = StructuredRewriteInstruction(
@@ -615,6 +727,95 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         )
 
         self.assertTrue(pipeline._is_safe_target_text(instruction))
+
+    def test_appends_skill_inside_existing_textbox_section(self):
+        document = Document()
+        document.add_paragraph("PROFILO")
+        document.add_paragraph("Profilo professionale.")
+        self._add_textbox(document, [
+            "CONTATTI",
+            "Email: user@example.com",
+            "HARD SKILLS",
+            "Python",
+            "SOFT SKILLS",
+            "Problem solving",
+        ])
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [StructuredRewriteInstruction(
+                suggestion_id="textbox-hard-skill",
+                target_section="HARD SKILLS",
+                action="append",
+                old_text_hint="",
+                new_text="SQL",
+                items=["SQL"],
+                reason="Skill confermata.",
+                confidence=1.0,
+            )],
+        )
+
+        final_document = Document(io.BytesIO(result.file_bytes))
+        contexts = ResumeDocxOptimizationPipeline()._paragraph_contexts(final_document)
+        hard_skill_text = [
+            context.paragraph.text
+            for context in contexts
+            if context.section == "hard_skills"
+            and context.paragraph.text.strip()
+            and context.paragraph.text.strip() != "HARD SKILLS"
+        ]
+        self.assertIn("Python", hard_skill_text)
+        self.assertIn("SQL", hard_skill_text)
+        self.assertEqual(
+            sum(1 for context in contexts if context.paragraph.text.strip() == "HARD SKILLS"),
+            1,
+        )
+
+    def test_inline_table_inherits_the_preceding_section(self):
+        document = Document()
+        document.add_paragraph("COMPETENZE TECNICHE")
+        table = document.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "Linguaggi"
+        table.cell(0, 1).text = "Python, Java"
+        table.cell(1, 0).text = "Framework"
+        table.cell(1, 1).text = "TensorFlow"
+        document.add_paragraph("LINGUE")
+        document.add_paragraph("Italiano, Inglese")
+
+        contexts = ResumeDocxOptimizationPipeline()._paragraph_contexts(document)
+        section_by_text = {
+            context.paragraph.text.strip(): context.section
+            for context in contexts
+            if context.paragraph.text.strip()
+        }
+
+        self.assertEqual(section_by_text["Python, Java"], "hard_skills")
+        self.assertEqual(section_by_text["TensorFlow"], "hard_skills")
+        self.assertEqual(section_by_text["Italiano, Inglese"], "lingue")
+
+    def test_contact_cells_do_not_inherit_hard_skills(self):
+        document = Document()
+        table = document.add_table(rows=4, cols=1)
+        table.cell(0, 0).text = "HARD SKILLS"
+        table.cell(0, 0).add_paragraph("Python")
+        table.cell(1, 0).text = "Via Roma 10, Milano"
+        table.cell(2, 0).text = "user@example.com"
+        table.cell(3, 0).text = "LinkedIn: linkedin.com/in/example"
+        table.cell(3, 0).add_paragraph("Pagina Web personale:")
+        table.cell(3, 0).add_paragraph("https://example.com")
+
+        contexts = ResumeDocxOptimizationPipeline()._paragraph_contexts(document)
+        section_by_text = {
+            context.paragraph.text.strip(): context.section
+            for context in contexts
+            if context.paragraph.text.strip()
+        }
+
+        self.assertEqual(section_by_text["Python"], "hard_skills")
+        self.assertEqual(section_by_text["Via Roma 10, Milano"], "contatti")
+        self.assertEqual(section_by_text["user@example.com"], "contatti")
+        self.assertEqual(section_by_text["LinkedIn: linkedin.com/in/example"], "contatti")
+        self.assertEqual(section_by_text["https://example.com"], "contatti")
 
     def test_profile_rewrite_rejects_an_injected_section_heading(self):
         pipeline = ResumeDocxOptimizationPipeline()

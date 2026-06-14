@@ -5324,9 +5324,23 @@ Schema:
                     return replacement.rstrip(".") + "."
             except Exception as exc:
                 print(f"Riscrittura Gemini del fatto utente non riuscita: {exc}")
+        company_experience = re.match(
+            r"^ho lavorato (?:in|presso)\s+(.+?)\s+dove ho "
+            r"(realizzato|sviluppato|creato)\s+(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if company_experience:
+            company, action, activity = company_experience.groups()
+            action_label = {
+                "realizzato": "realizzazione",
+                "sviluppato": "sviluppo",
+                "creato": "creazione",
+            }.get(action.lower(), "realizzazione")
+            text = f"Presso {company.strip()}, {action_label} di {activity.strip()}"
         replacements = [
-            (r"^ho lavorato in\s+", "Esperienza presso "),
-            (r"^ho lavorato presso\s+", "Esperienza presso "),
+            (r"^ho lavorato in\s+", "Attivita svolta presso "),
+            (r"^ho lavorato presso\s+", "Attivita svolta presso "),
             (r"^ho realizzato\s+", "Realizzazione di "),
             (r"^ho sviluppato\s+", "Sviluppo di "),
             (r"^ho creato\s+", "Creazione di "),
@@ -5487,11 +5501,24 @@ Schema:
             else:
                 section, category = "ATTIVITA RILEVANTI", "extra_page"
         elif normalized_hint in {"measurable results", "measurable_results"}:
-            section, category = "ATTIVITA RILEVANTI", "extra_page"
+            has_project_context = bool(str(
+                (user_additional_data or {}).get("projects") or ""
+            ).strip()) or any(term in fragment_plain for term in [
+                "progetto", "progetti", "analisi", "metriche", "kpi",
+                "indicatori", "dataset", "modello", "report",
+            ])
+            section, category = (
+                ("PROGETTI", "project")
+                if has_project_context
+                else ("ATTIVITA RILEVANTI", "extra_page")
+            )
         if category == "project" or normalized_hint in {"project", "projects", "progetto", "progetti"}:
             professional_text = project_block(
                 cleaned_fragment,
-                force_project=normalized_hint in {"project", "projects", "progetto", "progetti"},
+                force_project=(
+                    category == "project"
+                    or normalized_hint in {"project", "projects", "progetto", "progetti"}
+                ),
             )
             if professional_text:
                 project_lines = [line.strip() for line in professional_text.splitlines() if line.strip()]

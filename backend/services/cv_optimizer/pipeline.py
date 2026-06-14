@@ -26,6 +26,7 @@ SECTION_ALIASES = {
     "soft_skills": SHARED_SECTION_ALIASES["soft_skills"],
     "lingue": SHARED_SECTION_ALIASES["languages"],
     "certificazioni": SHARED_SECTION_ALIASES["certifications"],
+    "pubblicazioni": SHARED_SECTION_ALIASES["publications"],
     "progetti": SHARED_SECTION_ALIASES["projects"],
     "contatti": SHARED_SECTION_ALIASES["contacts"],
 }
@@ -42,7 +43,7 @@ SECTION_HEADINGS = {heading for values in SECTION_ALIASES.values() for heading i
 SECTION_LEAK_MARKERS = {
     "contatti", "lingue", "hard skills", "soft skills", "formazione",
     "istruzione", "esperienze professionali", "esperienza professionale",
-    "esperienze", "progetti", "certificazioni",
+    "esperienze", "progetti", "certificazioni", "pubblicazioni",
 }
 GENERIC_KEYWORDS = {
     "data", "analyst", "analysis", "business", "project", "manager", "team", "office",
@@ -107,12 +108,16 @@ def is_section_heading(line: str) -> bool:
     stripped = (line or "").strip().strip(":")
     if any(marker in stripped for marker in {"●", "○", "•", "◦"}):
         return False
-    return clean in SECTION_HEADINGS or (
-        bool(clean)
-        and len(clean) <= 42
-        and stripped.upper() == stripped
-        and any(char.isalpha() for char in clean)
-    )
+    if canonical_section_key(stripped):
+        return True
+    words = clean.split()
+    if (line or "").strip().endswith(":"):
+        return (
+            1 <= len(words) <= 7
+            and len(clean) <= 64
+            and not re.search(r"[.!?]", stripped)
+        )
+    return False
 
 
 def canonical_section(line: str) -> str:
@@ -126,6 +131,7 @@ def canonical_section(line: str) -> str:
             "soft_skills": "soft_skills",
             "languages": "lingue",
             "certifications": "certificazioni",
+            "publications": "pubblicazioni",
             "projects": "progetti",
             "contacts": "contatti",
             "header": "intestazione",
@@ -829,7 +835,11 @@ Dati aggiuntivi utente:
                 "technical_skills": "hard_skills",
                 "tools": "hard_skills",
                 "soft_skills": "soft_skills",
-                "measurable_results": "esperienze",
+                "measurable_results": (
+                    "progetti"
+                    if str(user_additional_data.get("projects") or "").strip()
+                    else "attivita rilevanti"
+                ),
                 "company_role_notes": "profilo",
                 "additional_notes": "attivita rilevanti",
             }
@@ -852,7 +862,11 @@ Dati aggiuntivi utente:
                     "technical_skills": "hard_skills",
                     "tools": "hard_skills",
                     "soft_skills": "soft_skills",
-                    "measurable_results": "esperienze",
+                    "measurable_results": (
+                        "progetti"
+                        if str(user_additional_data.get("projects") or "").strip()
+                        else "attivita rilevanti"
+                    ),
                     "company_role_notes": "profilo",
                     "additional_notes": "attivita rilevanti",
                 }
@@ -1124,6 +1138,7 @@ Dati aggiuntivi utente:
         from docx import Document
 
         document = Document(io.BytesIO(original_file_bytes))
+        textbox_mirror_groups = self._textbox_mirror_groups(document)
         sections_detected = self._detect_sections(document)
         applied_ids: List[str] = []
         partially_applied_ids: List[str] = []
@@ -1138,6 +1153,7 @@ Dati aggiuntivi utente:
             else:
                 failed_ids.append(instruction.suggestion_id)
 
+        self._synchronize_textbox_mirrors(textbox_mirror_groups)
         self._polish_document_typography(document)
         self._remove_oversized_table_row_minimums(document)
         self._collapse_trailing_blank_paragraphs(document)
@@ -1426,12 +1442,10 @@ Dati aggiuntivi utente:
 
     def _detect_sections(self, document) -> List[str]:
         sections: List[str] = []
-        for paragraph in document.paragraphs:
-            text = (paragraph.text or "").strip()
+        for context in self._paragraph_contexts(document):
+            text = (context.paragraph.text or "").strip()
             if is_section_heading(text):
                 sections.append(canonical_section(text))
-        for table in document.tables:
-            sections.extend(self._detect_sections_from_table(table))
         seen: List[str] = []
         for section in sections:
             if section and section not in seen:
@@ -1713,6 +1727,7 @@ Dati aggiuntivi utente:
             "soft_skills": "Soft Skills",
             "lingue": "Lingue",
             "certificazioni": "Certificazioni",
+            "pubblicazioni": "Pubblicazioni",
             "progetti": "Progetti",
             "contatti": "Contatti",
         }.get(section, section.capitalize())
@@ -1810,7 +1825,15 @@ Dati aggiuntivi utente:
             from docx import Document
 
             document = Document(io.BytesIO(file_bytes))
-            parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+            parts = []
+            seen_paragraphs = set()
+            for context in self._paragraph_contexts(document):
+                paragraph = context.paragraph
+                paragraph_id = id(paragraph._p)
+                if paragraph_id in seen_paragraphs or not paragraph.text:
+                    continue
+                seen_paragraphs.add(paragraph_id)
+                parts.append(paragraph.text)
             for section in getattr(document, "sections", []):
                 header = getattr(section, "header", None)
                 footer = getattr(section, "footer", None)
@@ -1866,7 +1889,7 @@ Dati aggiuntivi utente:
         lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
         captured: List[str] = []
         capture = False
-        stop_markers = {"obiettivo", "profilo", "profilo professionale", "chi sono", "objective", "formazione", "istruzione", "education", "esperienze", "esperienze professionali", "progetti", "hard skills", "soft skills", "competenze", "contatti", "lingue", "certificazioni"}
+        stop_markers = {"obiettivo", "profilo", "profilo professionale", "chi sono", "objective", "formazione", "istruzione", "education", "esperienze", "esperienze professionali", "progetti", "hard skills", "soft skills", "competenze", "contatti", "lingue", "certificazioni", "pubblicazioni", "publications"}
         for line in lines:
             if line in section_names:
                 capture = True
@@ -1878,16 +1901,87 @@ Dati aggiuntivi utente:
         return " ".join(captured).strip()
 
     def _paragraph_contexts(self, document) -> List[ParagraphContext]:
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+
         contexts: List[ParagraphContext] = []
         current_section = "intestazione"
-        for paragraph in document.paragraphs:
-            text = (paragraph.text or "").strip()
-            if is_section_heading(text):
-                current_section = canonical_section(text)
-            contexts.append(ParagraphContext(paragraph=paragraph, section=current_section))
-        for table in document.tables:
-            contexts.extend(self._table_paragraph_contexts(table, current_section))
+        for child in document._element.body.iterchildren():
+            if child.tag.endswith("}p"):
+                paragraph = Paragraph(child, document._body)
+                text = (paragraph.text or "").strip()
+                if is_section_heading(text):
+                    current_section = canonical_section(text)
+                contexts.append(ParagraphContext(
+                    paragraph=paragraph,
+                    section=current_section,
+                ))
+            elif child.tag.endswith("}tbl"):
+                table = Table(child, document._body)
+                table_contexts = self._table_paragraph_contexts(
+                    table,
+                    current_section,
+                )
+                contexts.extend(table_contexts)
+                if table_contexts:
+                    current_section = table_contexts[-1].section
+        contexts.extend(self._textbox_paragraph_contexts(document))
         return contexts
+
+    def _textbox_paragraph_contexts(self, document) -> List[ParagraphContext]:
+        from docx.text.paragraph import Paragraph
+
+        contexts: List[ParagraphContext] = []
+        seen_signatures = set()
+        for textbox in document._element.xpath(".//w:txbxContent"):
+            paragraphs = [
+                child for child in textbox
+                if child.tag.endswith("}p")
+            ]
+            signature = tuple(
+                normalize_text("".join(paragraph.itertext()))
+                for paragraph in paragraphs
+                if normalize_text("".join(paragraph.itertext()))
+            )
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            current_section = "intestazione"
+            for paragraph_element in paragraphs:
+                paragraph = Paragraph(paragraph_element, document._body)
+                text = (paragraph.text or "").strip()
+                if is_section_heading(text):
+                    current_section = canonical_section(text)
+                contexts.append(ParagraphContext(
+                    paragraph=paragraph,
+                    section=current_section,
+                ))
+        return contexts
+
+    def _textbox_mirror_groups(self, document) -> List[List[Any]]:
+        grouped: Dict[tuple, List[Any]] = {}
+        for textbox in document._element.xpath(".//w:txbxContent"):
+            paragraphs = [
+                child for child in textbox
+                if child.tag.endswith("}p")
+            ]
+            signature = tuple(
+                normalize_text("".join(paragraph.itertext()))
+                for paragraph in paragraphs
+                if normalize_text("".join(paragraph.itertext()))
+            )
+            if signature:
+                grouped.setdefault(signature, []).append(textbox)
+        return [elements for elements in grouped.values() if len(elements) > 1]
+
+    def _synchronize_textbox_mirrors(self, mirror_groups: List[List[Any]]) -> None:
+        for group in mirror_groups:
+            source = group[0]
+            for mirror in group[1:]:
+                for child in list(mirror):
+                    mirror.remove(child)
+                for child in source:
+                    mirror.append(deepcopy(child))
 
     def _table_paragraph_contexts(self, table, inherited_section: str = "intestazione") -> List[ParagraphContext]:
         contexts: List[ParagraphContext] = []
@@ -1907,6 +2001,15 @@ Dati aggiuntivi utente:
                 # A cell with its own headings starts an independent column.
                 # Heading-only cells still pass their section to an adjacent body cell.
                 cell_section = inherited_section if cell_has_heading else row_section
+                cell_text = " ".join(
+                    paragraph.text or ""
+                    for paragraph in cell.paragraphs
+                    if (paragraph.text or "").strip()
+                )
+                if self._looks_like_contact_block(cell_text):
+                    cell_section = "contatti"
+                    row_section = cell_section
+                    current_section = cell_section
                 for paragraph in cell.paragraphs:
                     text = (paragraph.text or "").strip()
                     if is_section_heading(text):
@@ -1922,6 +2025,16 @@ Dati aggiuntivi utente:
                         row_section = cell_section
                         current_section = cell_section
         return contexts
+
+    def _looks_like_contact_block(self, text: str) -> bool:
+        value = text or ""
+        plain = normalize_text(value)
+        return bool(
+            re.search(r"[\w.+-]+@[\w.-]+\.\w+", value)
+            or re.search(r"\+?\d[\d\s().-]{7,}", value)
+            or re.search(r"https?://|www\.|linkedin\.com", value, flags=re.IGNORECASE)
+            or plain.startswith(("via ", "viale ", "piazza ", "address "))
+        )
 
     def _valid_instruction(self, instruction: RewriteInstruction) -> bool:
         replacement = (instruction.replacement or "").strip()
