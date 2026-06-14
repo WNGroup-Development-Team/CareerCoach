@@ -3745,9 +3745,9 @@ const screenshotUploadBoxes = [];
 
           <div className="cv-format-note">
             <strong>Formato consigliato</strong>
-            <p>
-              Per ottenere un CV ottimizzato identico nello stile, carica sempre il file Word originale.
-              Con un DOCX l'app modifica direttamente il documento mantenendo lo stile originale; con un PDF
+              <p>
+              Per ottenere un CV ottimizzato identico nello stile, carica il file Word originale.
+              Con un DOCX l'app prova a mantenere struttura, font e formattazione del documento; con un PDF
               puo analizzarlo, ma il layout potrebbe non essere preservato perfettamente.
             </p>
           </div>

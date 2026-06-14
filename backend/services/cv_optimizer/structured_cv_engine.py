@@ -8,19 +8,8 @@ from difflib import SequenceMatcher
 import json
 from typing import Any, Dict, Iterable, List, Optional
 
+from .section_catalog import SECTION_ALIASES, canonical_section_key
 
-SECTION_ALIASES: Dict[str, set[str]] = {
-    "header": {"header", "intestazione"},
-    "contacts": {"contatti", "contact", "contacts"},
-    "profile": {"profilo", "profilo professionale", "chi sono", "obiettivo", "summary", "about me", "personal profile"},
-    "experience": {"esperienza", "esperienze", "esperienza professionale", "esperienze professionali", "work experience", "professional experience"},
-    "education": {"formazione", "istruzione", "education"},
-    "hard_skills": {"hard skills", "competenze", "competenze tecniche", "technical skills", "skills"},
-    "soft_skills": {"soft skills", "competenze trasversali"},
-    "languages": {"lingue", "languages", "comunicazione"},
-    "projects": {"progetti", "projects", "portfolio", "pagina aggiuntiva", "attivita rilevanti"},
-    "certifications": {"certificazioni", "certificati", "certifications", "attestati"},
-}
 CANONICAL_TO_HEADING = {
     "profile": "PROFILO",
     "experience": "ESPERIENZE PROFESSIONALI",
@@ -142,18 +131,33 @@ def is_noise_keyword(value: Any) -> bool:
 
 
 def canonical_heading(line: str) -> Optional[str]:
-    clean = normalize(line).strip(":")
-    if not clean:
-        return None
-    for key, aliases in SECTION_ALIASES.items():
-        if clean in aliases:
-            return key
-    stripped = (line or "").strip().strip(":")
-    if len(stripped) <= 42 and stripped.upper() == stripped and any(ch.isalpha() for ch in stripped):
-        for key, aliases in SECTION_ALIASES.items():
-            if clean in aliases:
-                return key
-    return None
+    return canonical_section_key(line)
+
+
+def looks_like_generic_heading(line: str) -> bool:
+    stripped = clean_line(line)
+    plain = normalize(stripped).strip(":")
+    if not stripped or len(stripped) > 48:
+        return False
+    if plain in ALL_HEADINGS:
+        return True
+    if stripped.endswith(":"):
+        return True
+    words = stripped.split()
+    if len(words) > 6:
+        return False
+    alpha_words = [word for word in words if any(ch.isalpha() for ch in word)]
+    if not alpha_words:
+        return False
+    upper_score = sum(1 for word in alpha_words if word.upper() == word)
+    title_score = sum(1 for word in alpha_words if word[:1].upper() == word[:1] and word[1:].lower() == word[1:])
+    if upper_score >= max(1, len(alpha_words) - 1):
+        return True
+    if title_score >= max(1, len(alpha_words) - 1) and len(alpha_words) <= 5:
+        return True
+    if len(alpha_words) <= 3 and any(marker in plain for marker in ["profile", "summary", "skills", "experience", "education", "projects", "contacts", "languages", "certifications"]):
+        return True
+    return False
 
 
 def looks_like_contact(line: str) -> bool:
@@ -248,6 +252,8 @@ def parse_cv(cv_text: str) -> ParsedCV:
     current = "header"
     for line in prepare_lines(cv_text):
         heading = canonical_heading(line)
+        if not heading and looks_like_generic_heading(line):
+            heading = canonical_heading(line)
         if heading:
             current = heading
             sections.setdefault(current, [])
@@ -466,23 +472,16 @@ def _load_json_output(raw: Any) -> Optional[Dict[str, Any]]:
 
 
 def _call_copywriting_llm(prompt: str) -> Optional[Dict[str, Any]]:
-    """
-    Multi-model copywriting step:
-    - first try Ollama for the local rewrite plan
-    - fall back to Groq if the local model is unavailable or returns invalid JSON
-    """
+    """Use Gemini for CV copywriting without falling back to another provider."""
     try:
-        from main import call_ollama
-        raw = call_ollama(prompt, temperature=0.1, max_tokens=1100, timeout=OLLAMA_COPYWRITING_TIMEOUT, json_mode=True)
-        parsed = _load_json_output(raw)
-        if parsed is not None:
-            return parsed
-    except Exception:
-        pass
-
-    try:
-        from main import call_groq
-        raw = call_groq(prompt, temperature=0.1, max_tokens=1100, timeout=OLLAMA_COPYWRITING_TIMEOUT, json_mode=True)
+        from main import call_gemini
+        raw = call_gemini(
+            prompt,
+            temperature=0.1,
+            max_tokens=1100,
+            timeout=OLLAMA_COPYWRITING_TIMEOUT,
+            json_mode=True,
+        )
         return _load_json_output(raw)
     except Exception:
         return None
@@ -1064,7 +1063,7 @@ def build_optimized_cv_text(
             if "hard_skills" not in parsed.order:
                 parsed.order.append("hard_skills")
 
-    ollama_instructions: List[Dict[str, Any]] = []
+    copywriting_instructions: List[Dict[str, Any]] = []
     if use_llm and _rewrite_llm_enabled() and (role or company or accepted_payload or (user_additional_data or {})):
         prompt = f"""
 Restituisci SOLO JSON valido, senza markdown, con questa forma:
@@ -1102,12 +1101,12 @@ Dati aggiuntivi utente:
 
 Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
 """
-        raw_ollama = _call_copywriting_llm(prompt)
-        if raw_ollama and isinstance(raw_ollama.get("instructions"), list):
-            for item in raw_ollama.get("instructions", []):
+        copywriting_result = _call_copywriting_llm(prompt)
+        if copywriting_result and isinstance(copywriting_result.get("instructions"), list):
+            for item in copywriting_result.get("instructions", []):
                 sanitized = sanitize_rewrite_instruction(item)
                 if sanitized:
-                    ollama_instructions.append(sanitized)
+                    copywriting_instructions.append(sanitized)
                     section_buckets.setdefault(str(sanitized.get("section") or "profile"), []).append({
                         "target_section": str(sanitized.get("section") or "profile"),
                         "action": "replace",

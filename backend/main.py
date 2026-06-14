@@ -46,6 +46,11 @@ from services.cv_optimizer import (
     RewriteInstruction,
     StructuredRewriteInstruction,
 )
+from services.cv_optimizer.section_catalog import (
+    SECTION_ALIASES as SHARED_CV_SECTION_ALIASES,
+    canonical_section_key,
+    normalize_section_title,
+)
 from services.cv_image_safety import validate_cv_images
 
 
@@ -1279,7 +1284,7 @@ def call_analysis_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        preferred_order=["groq", "ollama"],
+        preferred_order=["gemini"],
     )
 
 
@@ -1296,7 +1301,7 @@ def call_lightweight_analysis_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        preferred_order=["ollama", "groq"],
+        preferred_order=["gemini"],
     )
 
 
@@ -1427,7 +1432,7 @@ def build_cv_rewrite_prompt(
     return f"""
 Sei un resume editor. Restituisci SOLO JSON valido.
 
-Obiettivo: riscrivi il CV per il ruolo indicato usando solo contenuti presenti.
+Obiettivo: proponi modifiche puntuali al CV per il ruolo indicato usando solo contenuti presenti.
 
 Contesto:
 - Azienda: {company or "Non specificata"}
@@ -1445,12 +1450,25 @@ CV:
 
 Schema:
 {{
-  "optimized_cv_text": "testo completo del CV ottimizzato"
+  "instructions": [
+    {{
+      "id": "identificativo breve",
+      "section": "nome della sezione esistente",
+      "original": "testo esatto da sostituire",
+      "replacement": "testo professionale riscritto",
+      "reason": "motivazione breve",
+      "category": "categoria"
+    }}
+  ]
 }}
 
 Regole:
 - Mantieni tono naturale e professionale.
 - Integra le modifiche senza perderle.
+- Genera al massimo 8 istruzioni brevi.
+- Usa original copiato esattamente dal CV; se devi aggiungere una voce usa original vuoto.
+- Non restituire il CV completo.
+- Non inventare fatti, competenze, risultati, aziende o date.
 - Non aggiungere spiegazioni.
 """
 
@@ -1468,7 +1486,7 @@ def call_rewrite_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        preferred_order=["gemini", "ollama"],
+        preferred_order=["gemini"],
     )
 
 
@@ -5156,6 +5174,10 @@ def infer_extra_content_section(value: str) -> tuple[str, str]:
         return sum(1 for term in terms if term in plain)
 
     certification_terms = ("certificazione", "certificato", "attestato", "licenza")
+    language_terms = (
+        "lingua", "lingue", "inglese", "italiano", "francese", "spagnolo",
+        "tedesco", "portoghese", "madrelingua",
+    )
     education_terms = (
         "laurea", "universita", "università", "corso", "formazione", "studio", "esame",
         "master", "diploma", "triennale", "magistrale",
@@ -5186,6 +5208,9 @@ def infer_extra_content_section(value: str) -> tuple[str, str]:
     # 3. ESPERIENZE se cita azienda/tirocinio/stage
     # 4. CERTIFICAZIONI/FORMAZIONE specifiche
     # 5. solo come ultima risorsa: COMPETENZE TECNICHE
+    has_language_level = bool(re.search(r"\b[abc][12]\b", plain))
+    if score_terms(language_terms) and (has_language_level or "madrelingua" in plain):
+        return "LINGUE", "languages"
     if score_terms(certification_terms):
         return "CERTIFICAZIONI", "certification"
     if score_terms(project_terms):
@@ -5253,6 +5278,72 @@ def build_additional_rewrite_instructions(
     instructions: List[RewriteInstruction] = []
     seen_fragments: set[tuple[str, str]] = set()
 
+    def is_grounded_rewrite(source: str, replacement: str) -> bool:
+        ignored = {
+            "che", "con", "dalla", "dalle", "dati", "degli", "dei", "del", "della",
+            "delle", "di", "e", "gli", "ha", "ho", "il", "in", "la", "le", "lo",
+            "nel", "nella", "nelle", "per", "su", "un", "una",
+        }
+        source_terms = {
+            term for term in re.findall(r"[a-z0-9]+", normalize_plain_text(source))
+            if len(term) >= 3 and term not in ignored
+        }
+        replacement_terms = {
+            term for term in re.findall(r"[a-z0-9]+", normalize_plain_text(replacement))
+            if len(term) >= 3 and term not in ignored
+        }
+        if not source_terms:
+            return False
+        preserved = len(source_terms & replacement_terms) / len(source_terms)
+        return preserved >= 0.55
+
+    def professionalize_user_fact(fragment: str) -> str:
+        text = re.sub(r"\s+", " ", fragment or "").strip(" .")
+        if CV_REWRITE_LLM_ENABLED and text:
+            prompt = f"""
+Sei un resume editor. Riscrivi il fatto seguente in italiano professionale e conciso.
+Non aggiungere informazioni, tecnologie, risultati, aziende, date o responsabilita.
+Mantieni tutti i fatti presenti e restituisci SOLO JSON valido.
+
+Fatto dell'utente:
+{text}
+
+Schema:
+{{"replacement": "frase professionale"}}
+"""
+            try:
+                result = call_rewrite_llm(
+                    prompt,
+                    context="professionalize_user_fact",
+                    temperature=0.05,
+                    max_tokens=220,
+                    timeout=25,
+                )
+                replacement = str(result.get("replacement") or "").strip()
+                if replacement and is_grounded_rewrite(text, replacement):
+                    return replacement.rstrip(".") + "."
+            except Exception as exc:
+                print(f"Riscrittura Gemini del fatto utente non riuscita: {exc}")
+        replacements = [
+            (r"^ho lavorato in\s+", "Esperienza presso "),
+            (r"^ho lavorato presso\s+", "Esperienza presso "),
+            (r"^ho realizzato\s+", "Realizzazione di "),
+            (r"^ho sviluppato\s+", "Sviluppo di "),
+            (r"^ho creato\s+", "Creazione di "),
+            (r"^ho coordinato\s+", "Coordinamento di "),
+            (r"^ho utilizzato\s+", "Utilizzo di "),
+            (r"^ho usato\s+", "Utilizzo di "),
+            (r"^l[' ]?ho utilizzato\s+", "Utilizzo di "),
+            (r"^l[' ]?ho usato\s+", "Utilizzo di "),
+            (r"^ho preso\s+", "Conseguimento di "),
+        ]
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        text = re.sub(r"\bdove ho realizzato\b", "con realizzazione di", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bdove ho sviluppato\b", "con sviluppo di", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bper la spedizione di pacchi\b", "per la gestione delle spedizioni di pacchi", text, flags=re.IGNORECASE)
+        return text[:1].upper() + text[1:] + "." if text else ""
+
     def project_block(fragment: str, force_project: bool = False) -> str:
         plain = normalize_plain_text(fragment)
         explicit_project = force_project or any(term in plain for term in [
@@ -5264,7 +5355,11 @@ def build_additional_rewrite_instructions(
         ])
         if not explicit_project:
             return ""
-        if "sviluppo software" in plain:
+        if "machine learning" in plain or re.search(r"\bml\b", plain):
+            title = "Progetto di Machine Learning"
+        elif "ingegneria dei dati" in plain or "data engineering" in plain:
+            title = "Progetto di Data Engineering"
+        elif "sviluppo software" in plain:
             title = "Progetto di sviluppo software"
         elif "analisi dati" in plain or "data visualization" in plain:
             title = "Progetto di analisi dati"
@@ -5283,7 +5378,7 @@ def build_additional_rewrite_instructions(
             (("dashboard",), "Sviluppo di dashboard per la lettura e la sintesi dei dati"),
             (("visualizzazione", "dati"), "Realizzazione di visualizzazioni per l'analisi dei dati"),
         ]
-        description = build_professional_extra_text({"additional_notes": fragment}, role).rstrip(".")
+        description = professionalize_user_fact(fragment).rstrip(".")
         description = re.sub(r"^(progetto di [^\n]+[:\-]\s*)", "", description, flags=re.IGNORECASE)
         description = re.sub(r"^(data analyst|data scientist|project manager|software engineer)\s*:\s*", "", description, flags=re.IGNORECASE)
         replacements = [
@@ -5342,29 +5437,24 @@ def build_additional_rewrite_instructions(
         if not cleaned_fragment:
             return
         normalized_hint = normalize_plain_text(category_hint)
-        if (
-            normalized_hint in {"certifications", "certificazioni"}
-            and re.fullmatch(r"(?i)(?:inglese\s+)?[abc][12]", cleaned_fragment)
+        fragment_plain = normalize_plain_text(cleaned_fragment)
+        language_values = []
+        for language in ("inglese", "italiano", "francese", "spagnolo", "tedesco", "portoghese"):
+            match = re.search(
+                rf"(?:\b([abc][12])\b(?:\s+(?:di|in))?\s+{language}\b|\b{language}\b(?:\s+livello)?\s+\b([abc][12])\b)",
+                fragment_plain,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                language_values.append(f"{language.capitalize()} {(match.group(1) or match.group(2)).upper()}")
+        if language_values and (
+            normalized_hint in {"certifications", "certificazioni", "languages", "lingue"}
+            or any(language.lower() in fragment_plain for language in language_values)
         ):
-            sections = extract_resume_sections(cv_text)
-            original_languages = sections.get("languages", "").strip()
-            level = re.search(r"(?i)[abc][12]", cleaned_fragment).group(0).upper()
-            if original_languages:
-                if re.search(r"(?i)\binglese\b", original_languages):
-                    replacement = re.sub(
-                        r"(?i)\binglese\b(?:\s+[abc][12])?",
-                        f"Inglese {level}",
-                        original_languages,
-                        count=1,
-                    )
-                else:
-                    replacement = f"{original_languages}\nInglese {level}"
-            else:
-                replacement = f"Inglese {level}"
             instructions.append(RewriteInstruction(
                 section="LINGUE",
-                original=original_languages,
-                replacement=replacement,
+                original="",
+                replacement="\n".join(language_values),
                 reason="Livello linguistico confermato dall'utente integrato nella sezione lingue.",
                 category="languages",
                 source_id=source_id,
@@ -5380,19 +5470,20 @@ def build_additional_rewrite_instructions(
             section, category = "COMPETENZE TECNICHE", "skill"
         elif normalized_hint in {"soft skills", "soft_skills"}:
             section, category = "SOFT SKILLS", "soft_skill"
-        elif normalized_hint in {"certifications", "certificazioni"}:
+        elif normalized_hint in {"certifications", "certificazioni"} and category != "languages":
             section, category = "CERTIFICAZIONI", "certification"
+        elif normalized_hint in {"languages", "lingue"}:
+            section, category = "LINGUE", "languages"
         elif normalized_hint in {"company role notes", "company_role_notes"}:
             section, category = "PROFILO", "profile"
         elif normalized_hint in {"experiences", "esperienze"}:
-            fragment_plain = normalize_plain_text(cleaned_fragment)
-            if any(term in fragment_plain for term in ["progetto", "project", "tesi"]):
-                section, category = "PROGETTI", "project"
-            elif any(term in fragment_plain for term in [
+            if any(term in fragment_plain for term in [
                 "azienda", "cliente", "lavoro", "lavorato", "ho lavorato",
                 "tirocinio", "stage", "impiego", "presso", "ruolo",
             ]):
                 section, category = "ESPERIENZE PROFESSIONALI", "experience"
+            elif any(term in fragment_plain for term in ["progetto", "project", "tesi"]):
+                section, category = "PROGETTI", "project"
             else:
                 section, category = "ATTIVITA RILEVANTI", "extra_page"
         elif normalized_hint in {"measurable results", "measurable_results"}:
@@ -5403,6 +5494,12 @@ def build_additional_rewrite_instructions(
                 force_project=normalized_hint in {"project", "projects", "progetto", "progetti"},
             )
             if professional_text:
+                project_lines = [line.strip() for line in professional_text.splitlines() if line.strip()]
+                if len(project_lines) == 1:
+                    project_lines = [project_lines[0], "Attivita progettuale descritta dall'utente."]
+                if len(project_lines) >= 2:
+                    project_lines[1] = project_lines[1].rstrip(".") + "."
+                    professional_text = "\n".join(project_lines[:2])
                 section, category = "PROGETTI", "project"
             else:
                 professional_text = skill_text(cleaned_fragment, "skill")
@@ -5422,7 +5519,6 @@ def build_additional_rewrite_instructions(
             if not professional_text:
                 return
         elif category == "experience":
-            fragment_plain = normalize_plain_text(cleaned_fragment)
             if not any(
                 term in fragment_plain
                 for term in ["azienda", "cliente", "lavoro", "lavorato", "presso", "tirocinio", "stage", "impiego", "ruolo"]
@@ -5430,10 +5526,11 @@ def build_additional_rewrite_instructions(
                 # Se l'utente ha descritto un'esperienza in forma sintetica,
                 # la manteniamo comunque ma la teniamo nella sezione corretta.
                 section = "ESPERIENZE PROFESSIONALI"
-            professional_text = build_professional_extra_text(
-                {"additional_notes": cleaned_fragment},
-                role,
-            )
+            professional_text = professionalize_user_fact(cleaned_fragment)
+            if not professional_text:
+                return
+        elif category in {"education", "certification", "languages"}:
+            professional_text = professionalize_user_fact(cleaned_fragment)
             if not professional_text:
                 return
         else:
@@ -5488,7 +5585,12 @@ def build_additional_rewrite_instructions(
         value = str((user_additional_data or {}).get(field_name) or "").strip()
         if not value:
             continue
-        fragments = [frag.strip() for frag in re.split(r"\n+|(?<=[.!?])\s+", value) if frag.strip()] or [value]
+        split_pattern = r"\n+"
+        if field_name == "projects":
+            split_pattern += r"|\s+(?:e|ed)\s+(?=progett[oi]\s+(?:di|su|per)\b)"
+        elif field_name not in {"experiences", "company_role_notes", "additional_notes"}:
+            split_pattern += r"|(?<=[.!?])\s+"
+        fragments = [frag.strip() for frag in re.split(split_pattern, value, flags=re.IGNORECASE) if frag.strip()] or [value]
         for fragment_index, fragment in enumerate(fragments):
             add_fragment(
                 fragment,
@@ -5580,7 +5682,15 @@ Regole obbligatorie:
 """
         replacement = ""
         applied_ids: List[str] = []
-        if use_llm:
+        contains_user_facts = any(
+            (instruction.source_id or "").startswith((
+                "user_box_",
+                "user_additional_",
+                "confirmed_skill_detail_",
+            ))
+            for instruction in section_instructions
+        )
+        if use_llm and not contains_user_facts:
             try:
                 result = call_rewrite_llm(
                     prompt,
@@ -6120,13 +6230,21 @@ def build_deterministic_skill_evidence(skill_name: str, detail: str) -> str:
     if normalize_plain_text(skill_name) in normalize_plain_text(clean_detail):
         return clean_detail[:1].upper() + clean_detail[1:]
     without_lead = re.sub(
-        r"^usat[oaie]\s+(?:in|durante)\s+",
+        r"^(?:l[' ]?ho\s+)?usat[oaie]?\s+(?:in|durante)\s+",
         "",
         clean_detail,
         flags=re.IGNORECASE,
     ).strip()
     if without_lead != clean_detail:
         return f"Utilizzo di {skill_name} in {without_lead}"
+    without_personal_lead = re.sub(
+        r"^(?:l[' ]?ho|ho)\s+(?:usato|utilizzato|applicato)\s+",
+        "",
+        clean_detail,
+        flags=re.IGNORECASE,
+    ).strip()
+    if without_personal_lead != clean_detail:
+        return f"Utilizzo di {skill_name} durante {without_personal_lead}"
     return f"Utilizzo di {skill_name}: {clean_detail[:1].lower() + clean_detail[1:]}"
 
 
@@ -6444,6 +6562,35 @@ def create_optimized_docx_file(optimized_text: str, original_file_bytes: Optiona
             for run in runs[1:]:
                 run.text = ""
 
+        def clone_paragraph_format(source, target) -> None:
+            try:
+                if source.style is not None:
+                    target.style = source.style
+                target.alignment = source.alignment
+                target.paragraph_format.left_indent = source.paragraph_format.left_indent
+                target.paragraph_format.right_indent = source.paragraph_format.right_indent
+                target.paragraph_format.first_line_indent = source.paragraph_format.first_line_indent
+                target.paragraph_format.space_before = source.paragraph_format.space_before
+                target.paragraph_format.space_after = source.paragraph_format.space_after
+                target.paragraph_format.line_spacing = source.paragraph_format.line_spacing
+                target.paragraph_format.keep_together = source.paragraph_format.keep_together
+                target.paragraph_format.keep_with_next = source.paragraph_format.keep_with_next
+                target.paragraph_format.page_break_before = source.paragraph_format.page_break_before
+                target.paragraph_format.widow_control = source.paragraph_format.widow_control
+                for src_run, dst_run in zip(source.runs, target.runs):
+                    if src_run.bold is not None:
+                        dst_run.bold = src_run.bold
+                    if src_run.italic is not None:
+                        dst_run.italic = src_run.italic
+                    if src_run.underline is not None:
+                        dst_run.underline = src_run.underline
+                    if src_run.font.name:
+                        dst_run.font.name = src_run.font.name
+                    if src_run.font.size:
+                        dst_run.font.size = src_run.font.size
+            except Exception:
+                pass
+
         paragraphs = list(document.paragraphs)
         for table in document.tables:
             for row in table.rows:
@@ -6451,17 +6598,17 @@ def create_optimized_docx_file(optimized_text: str, original_file_bytes: Optiona
                     paragraphs.extend(cell.paragraphs)
 
         if original_file_bytes and paragraphs:
-            last_style = None
+            last_paragraph = None
             for index, paragraph in enumerate(paragraphs):
                 if index < len(optimized_lines):
                     replace_paragraph_text_preserving_runs(paragraph, optimized_lines[index])
-                    last_style = paragraph.style
+                    last_paragraph = paragraph
                 else:
                     replace_paragraph_text_preserving_runs(paragraph, "")
             for line in optimized_lines[len(paragraphs):]:
                 new_paragraph = document.add_paragraph(line)
-                if last_style:
-                    new_paragraph.style = last_style
+                if last_paragraph:
+                    clone_paragraph_format(last_paragraph, new_paragraph)
         else:
             for line in optimized_lines:
                 paragraph = document.add_paragraph(line)
@@ -8995,6 +9142,18 @@ EDIT_SECTION_ALIASES = {
     "CONTATTI": ["contatti", "contact", "contacts"],
 }
 
+EDIT_SECTION_ALIASES.update({
+    "CHI SONO": sorted(SHARED_CV_SECTION_ALIASES["profile"]),
+    "HARD SKILLS": sorted(SHARED_CV_SECTION_ALIASES["hard_skills"]),
+    "SOFT SKILLS": sorted(SHARED_CV_SECTION_ALIASES["soft_skills"]),
+    "FORMAZIONE": sorted(SHARED_CV_SECTION_ALIASES["education"]),
+    "ESPERIENZE PROFESSIONALI": sorted(SHARED_CV_SECTION_ALIASES["experience"]),
+    "PROGETTI": sorted(SHARED_CV_SECTION_ALIASES["projects"]),
+    "CERTIFICAZIONI": sorted(SHARED_CV_SECTION_ALIASES["certifications"]),
+    "LINGUE": sorted(SHARED_CV_SECTION_ALIASES["languages"]),
+    "CONTATTI": sorted(SHARED_CV_SECTION_ALIASES["contacts"]),
+})
+
 EDIT_SECTION_MARKERS = [
     "CONTATTI", "LINGUE", "COMUNICAZIONE", "HARD SKILLS", "SOFT SKILLS",
     "COMPETENZE TECNICHE", "COMPETENZE", "CHI SONO", "OBIETTIVO",
@@ -9004,6 +9163,12 @@ EDIT_SECTION_MARKERS = [
     "PROGETTI", "PAGINA AGGIUNTIVA", "ATTIVITA RILEVANTI", "ATTIVITÀ RILEVANTI",
 ]
 
+EDIT_SECTION_MARKERS = sorted({
+    marker
+    for canonical, aliases in EDIT_SECTION_ALIASES.items()
+    for marker in [canonical, *aliases]
+}, key=len, reverse=True)
+
 CANONICAL_EDIT_SECTION_NAMES = {
     alias: canonical
     for canonical, aliases in EDIT_SECTION_ALIASES.items()
@@ -9011,9 +9176,22 @@ CANONICAL_EDIT_SECTION_NAMES = {
 }
 
 def canonical_edit_section_name(value: str) -> Optional[str]:
-    cleaned = normalize_plain_text(str(value or "")).strip()
+    cleaned = normalize_section_title(str(value or ""))
     if not cleaned:
         return None
+    shared_key = canonical_section_key(cleaned)
+    if shared_key:
+        return {
+            "profile": "CHI SONO",
+            "experience": "ESPERIENZE PROFESSIONALI",
+            "education": "FORMAZIONE",
+            "hard_skills": "HARD SKILLS",
+            "soft_skills": "SOFT SKILLS",
+            "languages": "LINGUE",
+            "projects": "PROGETTI",
+            "certifications": "CERTIFICAZIONI",
+            "contacts": "CONTATTI",
+        }.get(shared_key, cleaned.upper())
     return CANONICAL_EDIT_SECTION_NAMES.get(cleaned, cleaned.upper())
 
 
@@ -9038,6 +9216,8 @@ def _resume_section_key(canonical_section: str) -> str:
         "ESPERIENZA": "experience",
         "CONTATTI": "contacts",
         "LINGUE": "languages",
+        "CERTIFICAZIONI": "certifications",
+        "PROGETTI": "projects",
     }.get(normalized, normalized.lower().replace(" ", "_") if normalized else "")
 
 
@@ -9217,14 +9397,17 @@ def suggestion_targets_current_cv(suggestion: Dict, cv_text: str) -> bool:
     if not original:
         section_plain = normalize_plain_text(section)
         appendable_sections = {
+            "profilo",
             "progetti",
             "esperienze professionali",
             "esperienze",
             "formazione",
             "certificazioni",
+            "lingue",
             "competenze tecniche",
             "hard skills",
             "soft skills",
+            "attivita rilevanti",
         }
         return section_plain in appendable_sections or "user_additional_info" in source_id
 
@@ -9243,6 +9426,22 @@ def suggestion_targets_current_cv(suggestion: Dict, cv_text: str) -> bool:
     # Suggestions generated locally are conservative but often paraphrase the original.
     # Accept a lower overlap when the section clearly exists in the current CV.
     return coverage >= 0.55 or len(original_tokens.intersection(section_tokens)) >= 4
+
+
+def is_additive_user_rewrite_source(source_id: str) -> bool:
+    source = str(source_id or "")
+    additive_markers = (
+        "confirmed_",
+        "user_box_",
+        "user_additional_",
+        "fallback_confirmed_",
+    )
+    if source.startswith(additive_markers):
+        return True
+    if source.startswith("consolidated:"):
+        consolidated_ids = source.split(":", 1)[1].split("|")
+        return any(item.startswith(additive_markers) for item in consolidated_ids)
+    return False
 
 
 def _structured_target_profile(evaluation: Dict, section_map: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -10707,17 +10906,22 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         try:
             docx_pipeline = ResumeDocxOptimizationPipeline()
             rewrite_instructions = rewrite_result.get("instructions") or []
+
             docx_suggestions = [
                 {
                     "suggestion_id": instruction.source_id or f"rewrite-instruction-{index + 1}",
                     "target_section": instruction.section,
-                    "action": "append" if not (instruction.original or "").strip() else "replace",
-                    "old_text_hint": instruction.original,
+                    "action": "append",
+                    "old_text_hint": "",
                     "new_text": instruction.replacement,
                     "reason": instruction.reason,
                 }
                 for index, instruction in enumerate(rewrite_instructions)
-                if instruction.replacement and instruction.section
+                if (
+                    instruction.replacement
+                    and instruction.section
+                    and is_additive_user_rewrite_source(instruction.source_id)
+                )
             ]
             structured_instructions = docx_pipeline.generate_structured_instructions(
                 cv_text=cv_text,
