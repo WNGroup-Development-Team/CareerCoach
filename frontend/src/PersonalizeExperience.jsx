@@ -111,66 +111,97 @@ export default function PersonalizeExperience({
         <p>Queste informazioni verranno usate per ottimizzare il tuo CV e personalizzare la simulazione del colloquio.</p>
       </div>
 
-      <form className="personalize-card" onSubmit={handleSubmit}>
-        <div className="quick-method-label">Metodo rapido</div>
-        <label htmlFor="goal">Descrivilo in una frase</label>
-        <textarea
-          id="goal"
-          className={`interview-textarea ${fieldErrors.description ? "input-error" : ""}`}
-          value={goal}
-          onChange={(event) => onChange("goal", event.target.value)}
-          placeholder="Es. Voglio prepararmi per un colloquio da Data Analyst in Google."
-        />
-        {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
-
-        <div className="personalize-divider details-section-label">Dettagli specifici</div>
-
-        <label htmlFor="personalize-company">Azienda</label>
-        <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
-          <BuildingIcon />
-          <input
-            id="personalize-company"
-            value={company}
-            onChange={(event) => onChange("company", event.target.value)}
-            placeholder="es. Google, TechFlow"
+      <div className="personalize-layout">
+        <form className="personalize-card" onSubmit={handleSubmit}>
+          <div className="quick-method-label">Metodo rapido</div>
+          <label htmlFor="goal">Descrivilo in una frase</label>
+          <textarea
+            id="goal"
+            className={`interview-textarea ${fieldErrors.description ? "input-error" : ""}`}
+            value={goal}
+            onChange={(event) => onChange("goal", event.target.value)}
+            placeholder="Es. Voglio prepararmi per un colloquio da Data Analyst in Google."
           />
-        </div>
-        {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
+          {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
 
-        <label htmlFor="personalize-role">Ruolo</label>
-        <div className={`personalize-field ${fieldErrors.role || fieldErrors.coherence ? "input-error" : ""}`}>
-          <BriefcaseIcon />
-          <input
-            id="personalize-role"
-            value={role}
-            onChange={(event) => onChange("role", event.target.value)}
-            placeholder="Es. UX Designer, Data Analyst, Software Engineer"
-          />
-        </div>
-        {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
-        {validation.message && (
-          <p className={`job-validation-message ${validation.status}`}>
-            {validation.message}
-          </p>
-        )}
-        {(validation.warnings || []).map((warning, index) => (
-          <p className="field-warning" key={`${warning}-${index}`}>{warning}</p>
-        ))}
+          <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
-        <div className="personalize-actions">
-          <button type="button" className="secondary-button card-back-btn" onClick={onBack}>
-            <span aria-hidden="true">&larr;</span>
-            Indietro
-          </button>
-          <button
-            type="submit"
-            className={`primary-button continue-cv-btn ${canSubmit ? "active" : "disabled"}`}
-            disabled={!canSubmit}
-          >
-            {isValidating ? "Validazione..." : submitLabel}
-          </button>
-        </div>
-      </form>
+          <label htmlFor="personalize-company">Azienda</label>
+          <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
+            <BuildingIcon />
+            <input
+              id="personalize-company"
+              value={company}
+              onChange={(event) => onChange("company", event.target.value)}
+              placeholder="es. Google, TechFlow"
+            />
+          </div>
+          {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
+
+          <label htmlFor="personalize-role">Ruolo</label>
+          <div className={`personalize-field ${fieldErrors.role || fieldErrors.coherence ? "input-error" : ""}`}>
+            <BriefcaseIcon />
+            <input
+              id="personalize-role"
+              value={role}
+              onChange={(event) => onChange("role", event.target.value)}
+              placeholder="Es. UX Designer, Data Analyst, Software Engineer"
+            />
+          </div>
+          {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
+          {validation.message && (
+            <p className={`job-validation-message ${validation.status}`}>
+              {validation.message}
+            </p>
+          )}
+          {(validation.warnings || []).map((warning, index) => (
+            <p className="field-warning" key={`${warning}-${index}`}>{warning}</p>
+          ))}
+
+          <div className="personalize-actions">
+            <button type="button" className="secondary-button card-back-btn" onClick={onBack}>
+              Indietro
+            </button>
+            <button
+              type="submit"
+              className={`primary-button continue-cv-btn ${canSubmit ? "active" : "disabled"}`}
+              disabled={!canSubmit}
+            >
+              {isValidating ? "Validazione..." : submitLabel}
+            </button>
+          </div>
+        </form>
+
+        <aside className="personalize-sidebar">
+          <div className="personalize-sidebar-card">
+            <span className="personalize-sidebar-kicker">Come funziona</span>
+            <h3>Più dettagli, migliore sarà il risultato</h3>
+            <ol>
+              <li>Indica un ruolo professionale specifico.</li>
+              <li>Aggiungi l'azienda per rendere l'analisi più mirata.</li>
+              <li>Usa la frase libera per raccontare il tuo obiettivo.</li>
+            </ol>
+          </div>
+
+          <div className="personalize-sidebar-card personalize-live-summary">
+            <span className="personalize-sidebar-kicker">Riepilogo</span>
+            <div>
+              <BriefcaseIcon />
+              <span>
+                <small>Ruolo</small>
+                <strong>{normalizedRole || "Da definire"}</strong>
+              </span>
+            </div>
+            <div>
+              <BuildingIcon />
+              <span>
+                <small>Azienda</small>
+                <strong>{normalizedCompany || "Da definire"}</strong>
+              </span>
+            </div>
+          </div>
+        </aside>
+      </div>
     </section>
   );
 }
