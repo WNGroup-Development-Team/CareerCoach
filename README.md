@@ -1,3 +1,95 @@
+## CareerCoach - Descrizione tecnica
+
+CareerCoach è una web application che supporta gli utenti nella preparazione ai colloqui di lavoro e nell’ottimizzazione del curriculum.
+
+### Architettura
+
+L’applicazione è composta da:
+
+- **Frontend React**, responsabile dell’interfaccia e del flusso utente.
+- **Backend FastAPI**, che espone API REST e gestisce la logica applicativa.
+- **Database SQLite**, utilizzato per profili, sessioni, risposte, CV e risultati.
+- **Servizi AI**, utilizzati per generare domande, valutare risposte e migliorare il CV.
+
+### Funzionalità principali
+
+**Simulazione dei colloqui**
+
+L’utente seleziona ruolo, azienda, tipologia e difficoltà del colloquio. Il backend genera domande personalizzate utilizzando il profilo dell’utente, eventuali fonti web e un modello linguistico.
+
+Le risposte vengono valutate secondo:
+
+- chiarezza;
+- completezza;
+- pertinenza;
+- professionalità;
+- capacità di sintesi;
+- qualità del parlato.
+
+Il sistema restituisce punteggi, feedback, una risposta migliorata e, per le domande logiche, la spiegazione del ragionamento corretto.
+
+**Analisi del parlato**
+
+Il frontend può acquisire la risposta tramite microfono e calcola:
+
+- durata;
+- numero di parole;
+- velocità in parole al minuto;
+- parole riempitive.
+
+Questi dati vengono inviati al backend e integrati nella valutazione.
+
+**Ottimizzazione del CV**
+
+Il sistema accetta CV PDF o DOCX, ne estrae il testo e lo confronta con il ruolo o l’offerta di lavoro target.
+
+La pipeline:
+
+1. riconosce le sezioni del CV;
+2. estrae keyword e competenze richieste;
+3. confronta requisiti e contenuto del curriculum;
+4. individua punti di forza, lacune e problemi ATS;
+5. genera suggerimenti puntuali;
+6. applica esclusivamente le modifiche accettate o confermate dall’utente;
+7. esporta il risultato in DOCX e, quando disponibile, PDF.
+
+Sono presenti controlli per evitare l’inserimento di competenze o esperienze non confermate e per preservare la struttura originale del documento.
+
+### Tecnologie
+
+- **React 19**
+- **Vite 8**
+- **JavaScript**
+- **FastAPI**
+- **Python**
+- **Pydantic**
+- **SQLite**
+- **Groq API / modelli LLM**
+- **Tavily API**
+- **python-docx**
+- **PyMuPDF**
+- **pypdf**
+- **Uvicorn**
+- **OAuth e autenticazione tramite token**
+
+### Persistenza
+
+SQLite memorizza:
+
+- utenti e profili;
+- sessioni di autenticazione;
+- sessioni di colloquio;
+- domande e fonti;
+- risposte e punteggi;
+- CV originali;
+- CV ottimizzati;
+- analisi della presenza digitale.
+
+### Logica generale
+
+Il frontend mantiene lo stato del percorso dell’utente e comunica con il backend tramite API REST. FastAPI valida le richieste, applica le regole applicative, interroga i servizi AI e salva i risultati nel database.
+
+L’AI non prende completamente il controllo del processo: il codice contiene validazioni deterministiche, fallback locali e controlli di sicurezza. In particolare, le risposte non pertinenti ricevono punteggio zero e le modifiche al CV devono essere supportate dal contenuto originale o confermate dall’utente.
 
 # Setup progetto CareerCoach
 
