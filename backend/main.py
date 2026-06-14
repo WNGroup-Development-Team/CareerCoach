@@ -25,6 +25,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib3.exceptions import MaxRetryError, NewConnectionError
+from typing import Iterable, List
 
 from dotenv import dotenv_values, load_dotenv
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form

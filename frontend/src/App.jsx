@@ -18,6 +18,20 @@ import {
 
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_URL_FALLBACKS = (() => {
+  const localOrigins = [
+    "/api",
+    API_URL,
+    API_URL.includes("127.0.0.1") ? API_URL.replace("127.0.0.1", "localhost") : API_URL,
+  ];
+
+  if (typeof window !== "undefined" && window.location?.hostname) {
+    localOrigins.push(`http://${window.location.hostname}:8000`);
+  }
+
+  localOrigins.push("http://localhost:8000", "http://127.0.0.1:8000");
+  return [...new Set(localOrigins)];
+})();
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
 const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
@@ -299,6 +313,26 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
     clearTimeout(timeoutId);
     throw error;
   }
+}
+
+async function fetchWithApiFallbacks(path, options = {}, timeout = 30000) {
+  const attempts = [...new Set(API_URL_FALLBACKS)];
+  let lastError = null;
+
+  for (const baseUrl of attempts) {
+    try {
+      const response = await fetchWithTimeout(`${baseUrl}${path}`, options, timeout);
+      const contentType = response.headers.get("content-type") || "";
+      if (baseUrl === "/api" && (response.status === 404 || contentType.includes("text/html"))) {
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Impossibile contattare il backend.");
 }
 
 function analyzeSpeech(text, durationSeconds) {
@@ -1331,7 +1365,7 @@ function App() {
       setProfileImageSaving(true);
 
       try {
-        const response = await fetchWithTimeout(`${API_URL}/users/${userId}/profile-image`, {
+        const response = await fetchWithApiFallbacks(`/users/${userId}/profile-image`, {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
@@ -1350,7 +1384,10 @@ function App() {
         setProfileImageMessage("Foto profilo aggiornata.");
       } catch (err) {
         setProfile((current) => ({ ...current, profile_image_data_url: previousImage }));
-        setProfileImageMessage(err.message || "Impossibile salvare la foto profilo.");
+        const message = err?.message && /fetch/i.test(err.message)
+          ? "Backend non raggiungibile. Verifica che FastAPI sia attivo su 8000."
+          : err?.message || "Impossibile salvare la foto profilo.";
+        setProfileImageMessage(message);
       } finally {
         setProfileImageSaving(false);
       }
@@ -1368,7 +1405,7 @@ function App() {
     setProfileImageSaving(true);
 
     try {
-      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/profile-image`, {
+      const response = await fetchWithApiFallbacks(`/users/${userId}/profile-image`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${authToken}`,
@@ -1381,7 +1418,10 @@ function App() {
       setProfileImageMessage("Foto profilo rimossa.");
     } catch (err) {
       setProfile((current) => ({ ...current, profile_image_data_url: previousImage }));
-      setProfileImageMessage(err.message || "Impossibile rimuovere la foto profilo.");
+      const message = err?.message && /fetch/i.test(err.message)
+        ? "Backend non raggiungibile. Verifica che FastAPI sia attivo su 8000."
+        : err?.message || "Impossibile rimuovere la foto profilo.";
+      setProfileImageMessage(message);
     } finally {
       setProfileImageSaving(false);
     }
@@ -3093,11 +3133,11 @@ function App() {
   const hasInterviewPreparation = Boolean((progress?.total_answers || 0) > 0 || history.length > 0);
   const careerPathItems = [
     { label: "CV caricato", complete: hasMasterCv },
-    { label: "Ruolo target impostato", complete: hasTargetRole },
-    { label: "Azienda target aggiunta", complete: hasTargetCompany },
-    { label: "Analisi CV completata", complete: hasCvAnalysis },
-    { label: "CV ottimizzato generato", complete: hasOptimizedCv },
-    { label: "Preparazione colloquio avviata", complete: hasInterviewPreparation },
+    { label: "Ruolo target", complete: hasTargetRole },
+    { label: "Azienda target", complete: hasTargetCompany },
+    { label: "Analisi CV", complete: hasCvAnalysis },
+    { label: "CV ottimizzato", complete: hasOptimizedCv },
+    { label: "Preparazione colloquio", complete: hasInterviewPreparation },
   ];
   const totalProfileSteps = careerPathItems.length;
   const completedProfileSteps = careerPathItems.filter((item) => item.complete).length;
@@ -5152,6 +5192,13 @@ const screenshotUploadBoxes = [];
           <div className="profile-hero-card">
             <div className="profile-hero-main">
               <div className="profile-avatar-large">
+                <input
+                  ref={profileImageInputRef}
+                  className="profile-image-input"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  onChange={updateProfileImage}
+                />
                 <button
                   className="profile-avatar-button"
                   type="button"
@@ -5175,27 +5222,14 @@ const screenshotUploadBoxes = [];
                 >
                   +
                 </button>
-                <input
-                  ref={profileImageInputRef}
-                  className="profile-image-input"
-                  type="file"
-                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                  onChange={updateProfileImage}
-                />
               </div>
               <div className="profile-hero-copy">
                 <span className="profile-status-label">
-                  {hasProfileDetails ? "Profilo professionale" : "Profilo professionale da completare"}
+                  {hasProfileDetails ? "Profilo professionale" : "Profilo professionale"}
                 </span>
                 <h2>{profile.name || "Il tuo profilo"}</h2>
                 <p>{hasTargetRole ? profile.target_role : "Ruolo target non impostato"}</p>
-                <div className="profile-chip-row">
-                  <span>{hasMeaningfulProfileValue(profile.sector) ? profile.sector : "Settore da definire"}</span>
-                </div>
                 <div className="profile-image-controls">
-                  <button type="button" onClick={() => profileImageInputRef.current?.click()} disabled={profileImageSaving}>
-                    {profile.profile_image_data_url ? "Cambia foto" : "Aggiungi foto"}
-                  </button>
                   {profile.profile_image_data_url && (
                     <button type="button" onClick={removeProfileImage} disabled={profileImageSaving}>
                       Rimuovi
@@ -5267,11 +5301,10 @@ const screenshotUploadBoxes = [];
               {preferredCompanies.length > 0 ? (
                 <div className="favorite-company-grid">
                   {preferredCompanies.map((item) => (
-                    <div key={item}>
+                    <div className="favorite-company-card" key={item}>
                       <span>{item.charAt(0).toUpperCase()}</span>
                       <div>
                         <strong>{item}</strong>
-                        <p>Azienda rilevata dalle tue preferenze</p>
                       </div>
                     </div>
                   ))}

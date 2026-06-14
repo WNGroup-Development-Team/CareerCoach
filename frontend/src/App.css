@@ -4940,6 +4940,23 @@ textarea {
   display: grid;
   place-items: center;
   text-align: center;
+  box-shadow: none;
+  background: transparent;
+  border: none;
+}
+
+.favorite-company-grid > .favorite-company-card {
+  min-height: 92px;
+  padding: 14px 10px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  place-items: center start;
+  gap: 12px;
+  text-align: left;
+  border: 1px solid #dceffa;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(15, 76, 129, 0.06);
 }
 
 .favorite-company-grid span,
@@ -5009,8 +5026,28 @@ textarea {
 }
 
 .document-actions .danger-icon-button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 34px;
+  border: none;
+  border-radius: 8px;
   background: #fff1f0;
   color: #c2413b;
+  cursor: pointer;
+}
+
+.document-actions .danger-icon-button svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .profile-danger-zone {
@@ -5129,6 +5166,11 @@ textarea {
   cursor: pointer;
 }
 
+.profile-avatar-large .profile-avatar-button,
+.profile-avatar-large .profile-avatar-add {
+  position: absolute;
+}
+
 .profile-avatar-large .profile-avatar-button:disabled,
 .profile-avatar-large .profile-avatar-add:disabled {
   cursor: wait;
@@ -5152,10 +5194,16 @@ textarea {
   right: -2px;
   bottom: 2px;
   padding: 0;
+  z-index: 2;
 }
 
 .profile-image-input {
-  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .profile-hero-copy {
@@ -6032,4 +6080,3 @@ textarea {
   color: #8c96a3;
   margin-top: 2px;
 }
-
