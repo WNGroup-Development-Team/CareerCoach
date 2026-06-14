@@ -18,6 +18,20 @@ import {
 
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_URL_FALLBACKS = (() => {
+  const localOrigins = [
+    "/api",
+    API_URL,
+    API_URL.includes("127.0.0.1") ? API_URL.replace("127.0.0.1", "localhost") : API_URL,
+  ];
+
+  if (typeof window !== "undefined" && window.location?.hostname) {
+    localOrigins.push(`http://${window.location.hostname}:8000`);
+  }
+
+  localOrigins.push("http://localhost:8000", "http://127.0.0.1:8000");
+  return [...new Set(localOrigins)];
+})();
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
 const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
@@ -301,6 +315,26 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   }
 }
 
+async function fetchWithApiFallbacks(path, options = {}, timeout = 30000) {
+  const attempts = [...new Set(API_URL_FALLBACKS)];
+  let lastError = null;
+
+  for (const baseUrl of attempts) {
+    try {
+      const response = await fetchWithTimeout(`${baseUrl}${path}`, options, timeout);
+      const contentType = response.headers.get("content-type") || "";
+      if (baseUrl === "/api" && (response.status === 404 || contentType.includes("text/html"))) {
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Impossibile contattare il backend.");
+}
+
 function analyzeSpeech(text, durationSeconds) {
   const cleanText = text.toLowerCase();
   const words = cleanText.split(/\s+/).filter(Boolean);
@@ -531,6 +565,60 @@ function EyeIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function FileDocumentIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 3h7l4 4v14H7z" />
+      <path d="M14 3v5h5" />
+      <path d="M9.5 13h5" />
+      <path d="M9.5 16h5" />
+    </svg>
+  );
+}
+
+function CalendarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="5" width="16" height="15" rx="2" />
+      <path d="M8 3v4" />
+      <path d="M16 3v4" />
+      <path d="M4 10h16" />
+      <path d="M8 14h.01" />
+      <path d="M12 14h.01" />
+      <path d="M16 14h.01" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
+function MicrophoneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0" />
+      <path d="M12 18v3" />
+    </svg>
+  );
+}
+
+function ProfileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="8" r="4" />
+      <path d="M5 21a7 7 0 0 1 14 0" />
     </svg>
   );
 }
@@ -1331,7 +1419,7 @@ function App() {
       setProfileImageSaving(true);
 
       try {
-        const response = await fetchWithTimeout(`${API_URL}/users/${userId}/profile-image`, {
+        const response = await fetchWithApiFallbacks(`/users/${userId}/profile-image`, {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
@@ -1350,7 +1438,10 @@ function App() {
         setProfileImageMessage("Foto profilo aggiornata.");
       } catch (err) {
         setProfile((current) => ({ ...current, profile_image_data_url: previousImage }));
-        setProfileImageMessage(err.message || "Impossibile salvare la foto profilo.");
+        const message = err?.message && /fetch/i.test(err.message)
+          ? "Backend non raggiungibile. Verifica che FastAPI sia attivo su 8000."
+          : err?.message || "Impossibile salvare la foto profilo.";
+        setProfileImageMessage(message);
       } finally {
         setProfileImageSaving(false);
       }
@@ -1368,7 +1459,7 @@ function App() {
     setProfileImageSaving(true);
 
     try {
-      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/profile-image`, {
+      const response = await fetchWithApiFallbacks(`/users/${userId}/profile-image`, {
         method: "DELETE",
         headers: {
           Authorization: `Bearer ${authToken}`,
@@ -1381,7 +1472,10 @@ function App() {
       setProfileImageMessage("Foto profilo rimossa.");
     } catch (err) {
       setProfile((current) => ({ ...current, profile_image_data_url: previousImage }));
-      setProfileImageMessage(err.message || "Impossibile rimuovere la foto profilo.");
+      const message = err?.message && /fetch/i.test(err.message)
+        ? "Backend non raggiungibile. Verifica che FastAPI sia attivo su 8000."
+        : err?.message || "Impossibile rimuovere la foto profilo.";
+      setProfileImageMessage(message);
     } finally {
       setProfileImageSaving(false);
     }
@@ -3093,11 +3187,11 @@ function App() {
   const hasInterviewPreparation = Boolean((progress?.total_answers || 0) > 0 || history.length > 0);
   const careerPathItems = [
     { label: "CV caricato", complete: hasMasterCv },
-    { label: "Ruolo target impostato", complete: hasTargetRole },
-    { label: "Azienda target aggiunta", complete: hasTargetCompany },
-    { label: "Analisi CV completata", complete: hasCvAnalysis },
-    { label: "CV ottimizzato generato", complete: hasOptimizedCv },
-    { label: "Preparazione colloquio avviata", complete: hasInterviewPreparation },
+    { label: "Ruolo target", complete: hasTargetRole },
+    { label: "Azienda target", complete: hasTargetCompany },
+    { label: "Analisi CV", complete: hasCvAnalysis },
+    { label: "CV ottimizzato", complete: hasOptimizedCv },
+    { label: "Preparazione colloquio", complete: hasInterviewPreparation },
   ];
   const totalProfileSteps = careerPathItems.length;
   const completedProfileSteps = careerPathItems.filter((item) => item.complete).length;
@@ -3340,7 +3434,7 @@ function App() {
 const screenshotUploadBoxes = [];
 
   return (
-    <div className={step === "auth" ? "page auth-page" : "page"}>
+    <div className={step === "auth" ? "page auth-page page-auth" : `page page-${step}`}>
       {step !== "auth" && (
         <header className="app-navbar">
           <div className="navbar-left">
@@ -3351,7 +3445,6 @@ const screenshotUploadBoxes = [];
               aria-label="Torna indietro"
               title="Torna indietro"
             >
-              <span aria-hidden="true">←</span>
               <strong>Indietro</strong>
             </button>
 
@@ -3599,7 +3692,7 @@ const screenshotUploadBoxes = [];
 
               {authMode === "register" && (
                 <div className="auth-form">
-                  <label>Nome</label>
+                  <label>Nome e Cognome</label>
                   <input
                     value={authForm.name}
                     onChange={(e) => updateAuthForm("name", e.target.value)}
@@ -3748,7 +3841,7 @@ const screenshotUploadBoxes = [];
               <p>
               Per ottenere un CV ottimizzato identico nello stile, carica il file Word originale.
               Con un DOCX l'app prova a mantenere struttura, font e formattazione del documento; con un PDF
-              puo analizzarlo, ma il layout potrebbe non essere preservato perfettamente.
+              può analizzarlo, ma il layout potrebbe non essere preservato perfettamente.
             </p>
           </div>
 
@@ -4366,7 +4459,7 @@ const screenshotUploadBoxes = [];
       )}
 
       {step === "cv-optimize-details" && (
-        <section className="cv-strategy-page cv-optimize-details-page">
+        <section className={`cv-strategy-page cv-optimize-details-page cv-optimize-details-page--stage-${cvOptimizationStage}`}>
           <div className="cv-strategy-heading">
             <h2>
               {[
@@ -4896,67 +4989,50 @@ const screenshotUploadBoxes = [];
       )}
 
       {step === "cv-optimized" && (
-        <section className="cv-strategy-page">
-          <div className="cv-strategy-heading">
-            <h2>CV ottimizzato generato</h2>
-            <p>Il tuo CV per {optimizedCv?.target_role || cvStrategyTargetRole} presso {optimizedCv?.target_company || cvStrategyTargetCompany} e pronto.</p>
+        <section className="cv-ready-page">
+          <div className="cv-ready-heading">
+            <span>CV ottimizzato generato</span>
+            <h2>Il tuo CV è pronto</h2>
+            <p>Ottimizzato per {optimizedCv?.target_role || cvStrategyTargetRole} presso {optimizedCv?.target_company || cvStrategyTargetCompany}.</p>
           </div>
 
-          <div className="cv-strategy-section optimized-cv-section">
-            <div className="cv-strategy-section-title">
-              <span className="success">+</span>
-              <h3>Scarica il nuovo CV</h3>
-            </div>
+          <div className="cv-ready-card">
             {optimizedCv && (
-              <div className="ats-summary-grid optimized-cv-summary-grid">
-                <div className="optimized-cv-summary-item file-item">
-                  <strong>{optimizedCv.filename || "CV ottimizzato"}</strong>
-                  <p>Nome file</p>
+              <>
+                <div className="cv-ready-file">
+                  <span className="cv-ready-file-icon">
+                    <FileDocumentIcon />
+                  </span>
+                  <div>
+                    <strong>{optimizedCv.filename || "CV ottimizzato"}</strong>
+                    <p>Nome file</p>
+                  </div>
                 </div>
-                <div className="optimized-cv-summary-item date-item">
+
+                <div className="cv-ready-metrics">
+                  <div>
+                    <strong>{optimizedCv.analysis_score || cvStrategyOverallScore || 0}</strong>
+                    <span>Punteggio CV</span>
+                  </div>
+                  <div>
+                    <strong>{optimizedCv.applied_changes_count ?? 0}</strong>
+                    <span>Modifiche applicate</span>
+                  </div>
+                </div>
+
+                <div className="cv-ready-date">
+                  <span>
+                    <CalendarIcon />
+                    Generato il
+                  </span>
                   <strong>{formatGeneratedDate(optimizedCv.generated_at || optimizedCv.created_at)}</strong>
-                  <p>Data generazione</p>
                 </div>
-                <div className="optimized-cv-summary-item metric-item">
-                  <strong>{optimizedCv.analysis_score || cvStrategyOverallScore || 0}</strong>
-                  <p>Punteggio</p>
-                </div>
-                <div className="optimized-cv-summary-item metric-item">
-                  <strong>{optimizedCv.applied_changes_count ?? 0}</strong>
-                  <p>Modifiche applicate</p>
-                </div>
-              </div>
+              </>
             )}
-            {optimizedCv?.file_base64 ? (
-              <a
-                className="cv-next-button optimized-cv-download"
-                href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
-                download={optimizedCv.filename || "cv-ottimizzato.pdf"}
-              >
-                Scarica {optimizedCv.content_type?.includes("wordprocessingml") ? "DOCX" : "PDF"}
-              </a>
-            ) : (
-              <button className="cv-next-button" type="button" onClick={() => transitionToStep("cv-optimize-details")}>
-                Torna alla generazione
-              </button>
-            )}
-            {(optimizedCv?.alternatives || []).length > 0 && (
-              <div className="optimized-cv-actions">
-                {optimizedCv.alternatives.map((file) => (
-                  <a
-                    className="secondary-button optimized-cv-download"
-                    href={`data:${file.content_type};base64,${file.file_base64}`}
-                    download={file.filename || "cv-ottimizzato.docx"}
-                    key={file.filename}
-                  >
-                    Scarica anche {file.filename?.toLowerCase().endsWith(".docx") ? "DOCX" : "file alternativo"}
-                  </a>
-                ))}
-              </div>
-            )}
+
             {optimizedCv?.quality_review?.local_checks_completed && (
-              <div className="cv-strategy-item success">
-                <span>+</span>
+              <div className="cv-ready-checks">
+                <CheckCircleIcon size={20} />
                 <div>
                   <strong>Controlli finali completati</strong>
                   <p>
@@ -4967,8 +5043,39 @@ const screenshotUploadBoxes = [];
                 </div>
               </div>
             )}
+
+            {optimizedCv?.file_base64 ? (
+              <a
+                className="cv-ready-download"
+                href={`data:${optimizedCv.content_type};base64,${optimizedCv.file_base64}`}
+                download={optimizedCv.filename || "cv-ottimizzato.pdf"}
+              >
+                <DownloadIcon />
+                Scarica {optimizedCv.content_type?.includes("wordprocessingml") ? "DOCX" : "PDF"}
+              </a>
+            ) : (
+              <button className="cv-ready-download" type="button" onClick={() => transitionToStep("cv-optimize-details")}>
+                Torna alla generazione
+              </button>
+            )}
+
+            {(optimizedCv?.alternatives || []).length > 0 && (
+              <div className="cv-ready-alternatives">
+                {optimizedCv.alternatives.map((file) => (
+                  <a
+                    href={`data:${file.content_type};base64,${file.file_base64}`}
+                    download={file.filename || "cv-ottimizzato.docx"}
+                    key={file.filename}
+                  >
+                    <DownloadIcon />
+                    Scarica anche {file.filename?.toLowerCase().endsWith(".docx") ? "DOCX" : "file alternativo"}
+                  </a>
+                ))}
+              </div>
+            )}
+
             {optimizedCvWarnings.length > 0 && (
-              <div className="cv-analysis-card linkedin-basic-card">
+              <div className="cv-ready-warnings">
                 <h3>Avvisi di verifica</h3>
                 <p>
                   Alcune frasi potrebbero richiedere un controllo manuale prima dell'invio.
@@ -4984,13 +5091,19 @@ const screenshotUploadBoxes = [];
                 ))}
               </div>
             )}
-            <button className="secondary-button" type="button" onClick={() => transitionToStep("home")}>
+          </div>
+
+          <div className="cv-ready-actions">
+            <button type="button" onClick={startCvPath}>
+              <SparkleIcon size={17} />
               Crea un altro CV ottimizzato
             </button>
-            <button className="cv-next-button" type="button" onClick={() => transitionToStep("gym")}>
+            <button type="button" onClick={() => transitionToStep("gym")}>
+              <MicrophoneIcon />
               Vai al colloquio
             </button>
-            <button className="secondary-button" type="button" onClick={() => transitionToStep("profile")}>
+            <button type="button" onClick={() => transitionToStep("profile")}>
+              <ProfileIcon />
               Vai al profilo
             </button>
           </div>
@@ -5152,6 +5265,13 @@ const screenshotUploadBoxes = [];
           <div className="profile-hero-card">
             <div className="profile-hero-main">
               <div className="profile-avatar-large">
+                <input
+                  ref={profileImageInputRef}
+                  className="profile-image-input"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                  onChange={updateProfileImage}
+                />
                 <button
                   className="profile-avatar-button"
                   type="button"
@@ -5175,27 +5295,14 @@ const screenshotUploadBoxes = [];
                 >
                   +
                 </button>
-                <input
-                  ref={profileImageInputRef}
-                  className="profile-image-input"
-                  type="file"
-                  accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                  onChange={updateProfileImage}
-                />
               </div>
               <div className="profile-hero-copy">
                 <span className="profile-status-label">
-                  {hasProfileDetails ? "Profilo professionale" : "Profilo professionale da completare"}
+                  {hasProfileDetails ? "Profilo professionale" : "Profilo professionale"}
                 </span>
                 <h2>{profile.name || "Il tuo profilo"}</h2>
                 <p>{hasTargetRole ? profile.target_role : "Ruolo target non impostato"}</p>
-                <div className="profile-chip-row">
-                  <span>{hasMeaningfulProfileValue(profile.sector) ? profile.sector : "Settore da definire"}</span>
-                </div>
                 <div className="profile-image-controls">
-                  <button type="button" onClick={() => profileImageInputRef.current?.click()} disabled={profileImageSaving}>
-                    {profile.profile_image_data_url ? "Cambia foto" : "Aggiungi foto"}
-                  </button>
                   {profile.profile_image_data_url && (
                     <button type="button" onClick={removeProfileImage} disabled={profileImageSaving}>
                       Rimuovi
@@ -5206,6 +5313,7 @@ const screenshotUploadBoxes = [];
               </div>
             </div>
             <button className="profile-analysis-button" type="button" onClick={() => transitionToStep("cv-digital")}>
+              <SparkleIcon size={20} />
               Analisi digitale
             </button>
           </div>
@@ -5267,11 +5375,10 @@ const screenshotUploadBoxes = [];
               {preferredCompanies.length > 0 ? (
                 <div className="favorite-company-grid">
                   {preferredCompanies.map((item) => (
-                    <div key={item}>
+                    <div className="favorite-company-card" key={item}>
                       <span>{item.charAt(0).toUpperCase()}</span>
                       <div>
                         <strong>{item}</strong>
-                        <p>Azienda rilevata dalle tue preferenze</p>
                       </div>
                     </div>
                   ))}
