@@ -219,6 +219,107 @@ def unique(values: Any) -> List[str]:
     return result
 
 
+def contact_identifiers(text: str) -> set[str]:
+    identifiers = {
+        f"email:{match.lower()}"
+        for match in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", text or "")
+    }
+    for raw_phone in re.findall(r"\+?\d[\d\s().-]{7,}\d", text or ""):
+        digits = re.sub(r"\D+", "", raw_phone)
+        if len(digits) >= 8:
+            identifiers.add(f"phone:{digits}")
+            identifiers.add(f"phone-suffix:{digits[-9:]}")
+    for raw_url in re.findall(
+        r"(?:https?://|www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s,;|]*)?",
+        text or "",
+        flags=re.IGNORECASE,
+    ):
+        normalized_url = raw_url.strip().lower().rstrip("./")
+        normalized_url = re.sub(r"^https?://", "", normalized_url)
+        normalized_url = re.sub(r"^www\.", "", normalized_url)
+        normalized_url = normalized_url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        if normalized_url:
+            identifiers.add(f"url:{normalized_url}")
+    return identifiers
+
+
+def dedupe_contact_line(line: str, existing_contact_ids: Optional[set[str]] = None) -> str:
+    cleaned = clean_line(line)
+    if not cleaned or not contact_identifiers(cleaned):
+        return cleaned
+
+    contact_value_pattern = r"(?:https?://|www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s,;|]*)?|[\w.+-]+@[\w.-]+\.\w+|\+?\d[\d\s().-]{7,}\d"
+    fragment_pattern = re.compile(contact_value_pattern, flags=re.IGNORECASE)
+    label_pattern = r"linkedin|github|portfolio|website|sito web|email|e-mail|telefono|phone|mobile|cellulare"
+    labeled_item_pattern = re.compile(
+        rf"(?P<item>(?:(?P<label>{label_pattern})\s*:\s*)?(?P<value>{contact_value_pattern}))",
+        flags=re.IGNORECASE,
+    )
+
+    def collapse_repeated_fragment(fragment: str) -> str:
+        token = fragment.strip()
+        for size in range(len(token) // 2, 7, -1):
+            if len(token) % size != 0:
+                continue
+            unit = token[:size]
+            repeats = len(token) // size
+            if repeats <= 1:
+                continue
+            if token == unit * repeats and contact_identifiers(unit):
+                return unit
+        return token
+
+    rebuilt: List[str] = []
+    seen_contacts: set[str] = set()
+    cursor = 0
+    for match in fragment_pattern.finditer(cleaned):
+        between = cleaned[cursor:match.start()]
+        fragment = collapse_repeated_fragment(match.group(0))
+        identifiers = contact_identifiers(fragment)
+        is_duplicate = bool(identifiers) and identifiers.issubset(seen_contacts)
+        if not is_duplicate or not re.fullmatch(r"[\s,;|/-]*", between or ""):
+            rebuilt.append(between)
+        if not is_duplicate:
+            rebuilt.append(fragment)
+            seen_contacts.update(identifiers)
+        cursor = match.end()
+    rebuilt.append(cleaned[cursor:])
+
+    cleaned = "".join(rebuilt)
+    seen_contacts = set(existing_contact_ids or set())
+    matches = list(labeled_item_pattern.finditer(cleaned))
+    if matches:
+        unique_items: List[str] = []
+        duplicates_found = False
+        for match in matches:
+            value = collapse_repeated_fragment(match.group("value"))
+            label = (match.group("label") or "").strip()
+            item_text = f"{label}: {value}" if label else value
+            identifiers = contact_identifiers(item_text)
+            if identifiers and identifiers.issubset(seen_contacts):
+                duplicates_found = True
+                continue
+            if identifiers:
+                seen_contacts.update(identifiers)
+            unique_items.append(item_text)
+        if duplicates_found and unique_items:
+            separator = " | " if "|" in cleaned else (" • " if "•" in cleaned else ("; " if ";" in cleaned else " "))
+            cleaned = separator.join(unique_items)
+        elif duplicates_found and not unique_items:
+            cleaned = ""
+
+    cleaned = re.sub(
+        rf"(?:\s*[|,;•/-]?\s*)(?:{label_pattern})\s*:\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;|/-")
+    if cleaned and existing_contact_ids and contact_identifiers(cleaned).issubset(existing_contact_ids):
+        return ""
+    return cleaned
+
+
 def normalize_professional_language(text: str) -> str:
     cleaned_lines: List[str] = []
     for raw_line in re.sub(r"\r\n?", "\n", text or "").splitlines():
@@ -1231,15 +1332,18 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
     def _merge_unique_lines(*chunks: str) -> str:
         lines: List[str] = []
         seen_lines = set()
+        seen_contacts = set()
         for chunk in chunks:
             for raw_line in str(chunk or "").splitlines():
-                line = clean_line(raw_line)
+                line = dedupe_contact_line(raw_line, seen_contacts)
                 if not line:
                     continue
                 marker = normalize(line)
-                if marker in seen_lines:
+                identifiers = contact_identifiers(line)
+                if marker in seen_lines or identifiers.intersection(seen_contacts):
                     continue
                 seen_lines.add(marker)
+                seen_contacts.update(identifiers)
                 lines.append(line)
         return "\n".join(lines).strip()
 
@@ -1372,7 +1476,14 @@ Suggerisci istruzioni solo per le sezioni che hanno davvero valore.
         if incoming_text:
             existing_terms = extract_skill_terms(current)
             incoming_terms = extract_skill_terms(incoming_text)
-            merged_terms = unique([*existing_terms, *incoming_terms, *[clean_line(line) for line in incoming_text.splitlines() if clean_line(line)]])
+            derived_terms: List[str] = []
+            for line in incoming_text.splitlines():
+                cleaned_line = clean_line(line)
+                if not cleaned_line:
+                    continue
+                extracted_terms = extract_skill_terms(cleaned_line)
+                derived_terms.extend(extracted_terms if extracted_terms else [cleaned_line])
+            merged_terms = unique([*existing_terms, *incoming_terms, *derived_terms])
             sections["hard_skills"] = group_skills(merged_terms) or incoming_text
             if normalize(sections["hard_skills"]) == normalize(current) and normalize(incoming_text) != normalize(current):
                 sections["hard_skills"] = incoming_text

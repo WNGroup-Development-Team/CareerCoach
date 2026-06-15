@@ -582,11 +582,86 @@ Regole:
         lines = [self.clean_line(line) for line in (value or "").splitlines()]
         return "\n".join(line for line in lines if line).strip()
 
-
 class DocxPreserver:
     def __init__(self) -> None:
         self.applied_source_ids: List[str] = []
         self.skipped_source_ids: List[str] = []
+
+    def dedupe_contact_line(self, line: str, existing_contact_ids: Optional[set[str]] = None) -> str:
+        cleaned = re.sub(r"\s+", " ", line or "").strip()
+        if not cleaned or not self._contact_identifiers(cleaned):
+            return cleaned
+
+        contact_value_pattern = r"(?:https?://|www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s,;|]*)?|[\w.+-]+@[\w.-]+\.\w+|\+?\d[\d\s().-]{7,}\d"
+        fragment_pattern = re.compile(contact_value_pattern, flags=re.IGNORECASE)
+        label_pattern = r"linkedin|github|portfolio|website|sito web|email|e-mail|telefono|phone|mobile|cellulare"
+        labeled_item_pattern = re.compile(
+            rf"(?P<item>(?:(?P<label>{label_pattern})\s*:\s*)?(?P<value>{contact_value_pattern}))",
+            flags=re.IGNORECASE,
+        )
+
+        def collapse_repeated_fragment(fragment: str) -> str:
+            token = fragment.strip()
+            for size in range(len(token) // 2, 7, -1):
+                if len(token) % size != 0:
+                    continue
+                unit = token[:size]
+                repeats = len(token) // size
+                if repeats <= 1:
+                    continue
+                if token == unit * repeats and self._contact_identifiers(unit):
+                    return unit
+            return token
+
+        rebuilt: List[str] = []
+        seen_contacts: set[str] = set()
+        cursor = 0
+        for match in fragment_pattern.finditer(cleaned):
+            between = cleaned[cursor:match.start()]
+            fragment = collapse_repeated_fragment(match.group(0))
+            identifiers = self._contact_identifiers(fragment)
+            is_duplicate = bool(identifiers) and identifiers.issubset(seen_contacts)
+            if not is_duplicate or not re.fullmatch(r"[\s,;|/-]*", between or ""):
+                rebuilt.append(between)
+            if not is_duplicate:
+                rebuilt.append(fragment)
+                seen_contacts.update(identifiers)
+            cursor = match.end()
+        rebuilt.append(cleaned[cursor:])
+
+        cleaned = "".join(rebuilt)
+        seen_contacts = set(existing_contact_ids or set())
+        matches = list(labeled_item_pattern.finditer(cleaned))
+        if matches:
+            unique_items: List[str] = []
+            duplicates_found = False
+            for match in matches:
+                value = collapse_repeated_fragment(match.group("value"))
+                label = (match.group("label") or "").strip()
+                item_text = f"{label}: {value}" if label else value
+                identifiers = self._contact_identifiers(item_text)
+                if identifiers and identifiers.issubset(seen_contacts):
+                    duplicates_found = True
+                    continue
+                if identifiers:
+                    seen_contacts.update(identifiers)
+                unique_items.append(item_text)
+            if duplicates_found and unique_items:
+                separator = " | " if "|" in cleaned else (" • " if "•" in cleaned else ("; " if ";" in cleaned else " "))
+                cleaned = separator.join(unique_items)
+            elif duplicates_found and not unique_items:
+                cleaned = ""
+
+        cleaned = re.sub(
+            rf"(?:\s*[|,;•/-]?\s*)(?:{label_pattern})\s*:\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,;|/-")
+        if cleaned and existing_contact_ids and self._contact_identifiers(cleaned).issubset(existing_contact_ids):
+            return ""
+        return cleaned
 
     def apply(self, original_file_bytes: bytes, instructions: List[RewriteInstruction]) -> tuple[bytes, int]:
         from docx import Document
@@ -1489,7 +1564,11 @@ Dati aggiuntivi utente:
         if not matching:
             return self._insert_missing_section(document, instruction, sections_detected)
 
-        replacement_lines = [line.strip() for line in instruction.new_text.splitlines() if line.strip()]
+        replacement_lines = [
+            (self.dedupe_contact_line(line) if target == "contatti" else line.strip())
+            for line in instruction.new_text.splitlines()
+            if line.strip()
+        ]
         if not replacement_lines:
             return "failed"
         if instruction.action == "append":
@@ -1498,7 +1577,7 @@ Dati aggiuntivi utente:
                     matching,
                     replacement_lines,
                 )
-            self._append_to_existing_section(matching, replacement_lines)
+            self._append_to_existing_section(document, matching, replacement_lines)
             return "applied"
         if self._is_high_confidence_section_instruction(instruction):
             self._rewrite_section_block(document, matching, replacement_lines, instruction)
@@ -1520,11 +1599,11 @@ Dati aggiuntivi utente:
             ]
             if section_contexts:
                 replacement_lines = [
-                    line.strip()
+                    (self.dedupe_contact_line(line) if target == "contatti" else line.strip())
                     for line in replacement.splitlines()
                     if line.strip()
                 ]
-                self._append_to_existing_section(section_contexts, replacement_lines)
+                self._append_to_existing_section(document, section_contexts, replacement_lines)
                 return "applied"
             heading_anchor = self._find_section_heading_paragraph(document, target)
             if heading_anchor is not None:
@@ -1608,17 +1687,84 @@ Dati aggiuntivi utente:
 
     def _append_to_existing_section(
         self,
+        document,
         matching_contexts: List[ParagraphContext],
         replacement_lines: List[str],
     ) -> None:
+        existing_lines = {
+            normalize_text(context.paragraph.text or "")
+            for context in matching_contexts
+            if normalize_text(context.paragraph.text or "")
+        }
+        existing_contact_ids = self._document_contact_identifiers(document)
+        lines_to_append: List[str] = []
+        for line in replacement_lines:
+            candidate_line = self.dedupe_contact_line(line, existing_contact_ids)
+            normalized_line = normalize_text(candidate_line)
+            contact_ids = self._contact_identifiers(candidate_line)
+            if (
+                not normalized_line
+                or normalized_line in existing_lines
+                or bool(contact_ids.intersection(existing_contact_ids))
+            ):
+                continue
+            existing_lines.add(normalized_line)
+            existing_contact_ids.update(contact_ids)
+            lines_to_append.append(candidate_line)
+
+        if not lines_to_append:
+            return
+
         anchor = matching_contexts[-1]
         section_name = anchor.section
         previous = anchor.paragraph
-        for line_index, line in enumerate(replacement_lines):
+        for line_index, line in enumerate(lines_to_append):
             new_paragraph = self._insert_paragraph_after(previous, line)
             self._copy_paragraph_format(previous, new_paragraph)
             self._style_section_line(new_paragraph, section_name, line_index)
             previous = new_paragraph
+
+    def _contact_identifiers(self, text: str) -> set[str]:
+        identifiers = {
+            f"email:{match.lower()}"
+            for match in re.findall(r"[\w.+-]+@[\w.-]+\.\w+", text or "")
+        }
+        for raw_phone in re.findall(r"\+?\d[\d\s().-]{7,}\d", text or ""):
+            digits = re.sub(r"\D+", "", raw_phone)
+            if len(digits) >= 8:
+                identifiers.add(f"phone:{digits}")
+                identifiers.add(f"phone-suffix:{digits[-9:]}")
+        for raw_url in re.findall(
+            r"(?:https?://|www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s,;|]*)?",
+            text or "",
+            flags=re.IGNORECASE,
+        ):
+            normalized_url = raw_url.strip().lower().rstrip("./")
+            normalized_url = re.sub(r"^https?://", "", normalized_url)
+            normalized_url = re.sub(r"^www\.", "", normalized_url)
+            normalized_url = normalized_url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            if normalized_url:
+                identifiers.add(f"url:{normalized_url}")
+        return identifiers
+
+    def _document_contact_identifiers(self, document) -> set[str]:
+        texts = [
+            context.paragraph.text or ""
+            for context in self._paragraph_contexts(document)
+        ]
+        for section in getattr(document, "sections", []):
+            for container in (section.header, section.footer):
+                texts.extend(
+                    paragraph.text or ""
+                    for paragraph in container.paragraphs
+                )
+                for table in container.tables:
+                    texts.extend(self._collect_table_text(table))
+        return {
+            contact_id
+            for text in texts
+            for contact_id in self._contact_identifiers(text)
+        }
 
     def _merge_skill_lines_into_existing_section(
         self,
@@ -1705,7 +1851,22 @@ Dati aggiuntivi utente:
                 continue
             seen.add(normalized)
             deduped.append(re.sub(r"\s+", " ", item).strip())
-        return deduped
+        filtered: List[str] = []
+        normalized_items = [
+            re.sub(r"\s+", " ", normalize_text(item)).strip(" \t\r\n-â€“â€”â€¢Â·;:,.")
+            for item in deduped
+        ]
+        for index, item in enumerate(deduped):
+            normalized = normalized_items[index]
+            contained_items = [
+                other
+                for other_index, other in enumerate(normalized_items)
+                if other_index != index and other and len(other) >= 4 and other in normalized
+            ]
+            if len(normalized.split()) >= 4 and len(contained_items) >= 2:
+                continue
+            filtered.append(item)
+        return filtered
 
     def _best_skill_anchor_paragraph(self, matching_contexts: List[ParagraphContext]):
         preferred = [
@@ -2057,6 +2218,9 @@ Dati aggiuntivi utente:
         known_corrupted = {"fhaurehds"}
         kept: List[str] = []
         for token in (text or "").split():
+            if re.search(r"https?://|www\.|[\w.+-]+@[\w.-]+\.\w+", token, re.IGNORECASE):
+                kept.append(token)
+                continue
             bare = re.sub(r"^[^\w]+|[^\w]+$", "", token)
             normalized = normalize_text(bare)
             letters = re.sub(r"[^a-z]", "", normalized)
@@ -2138,11 +2302,12 @@ Dati aggiuntivi utente:
             return False
         if normalized_target in normalized_final:
             return True
-        target_tokens = [token for token in normalized_target.split() if len(token) > 2]
+        target_tokens = [token for token in tokenize(normalized_target) if len(token) > 2]
         if len(target_tokens) < 3:
             return False
+        final_tokens = set(token for token in tokenize(normalized_final) if len(token) > 2)
         window = " ".join(target_tokens[:6])
-        return window in normalized_final or len(set(target_tokens).intersection(set(normalized_final.split()))) >= max(3, len(target_tokens) // 2)
+        return window in normalized_final or len(set(target_tokens).intersection(final_tokens)) >= max(3, len(target_tokens) // 2)
 
     def _objective_followed_by_education(self, normalized_final: str) -> bool:
         lines = [line.strip() for line in normalized_final.splitlines() if line.strip()]

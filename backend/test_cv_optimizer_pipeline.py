@@ -587,6 +587,97 @@ class ResumeRewriterTests(unittest.TestCase):
         self.assertNotIn("Utilizzato in esame di basi di dati", optimized)
         self.assertIn("PROGETTI", optimized)
 
+    def test_build_optimized_cv_text_deduplicates_contact_links_with_different_url_formats(self):
+        original = (
+            "SILVIA MUCCI\n"
+            "CONTATTI\n"
+            "LinkedIn: https://www.linkedin.com/in/example-profile/\n"
+            "user@example.com\n"
+        )
+
+        accepted = [
+            {
+                "id": "contacts-1",
+                "type": "actionableEdit",
+                "section": "CONTATTI",
+                "original_text": "",
+                "proposed_text": "linkedin.com/in/example-profile",
+            },
+        ]
+
+        optimized = build_optimized_cv_text(
+            original,
+            accepted,
+            user_additional_data={},
+            role="Data Analyst",
+            company="",
+            use_llm=False,
+        )
+
+        self.assertEqual(
+            optimized.lower().count("linkedin.com/in/example-profile"),
+            1,
+        )
+
+    def test_build_optimized_cv_text_deduplicates_contact_phone_variants(self):
+        original = (
+            "SILVIA MUCCI\n"
+            "CONTATTI\n"
+            "Telefono: +39 333 123 4567\n"
+        )
+
+        accepted = [
+            {
+                "id": "contacts-phone-1",
+                "type": "actionableEdit",
+                "section": "CONTATTI",
+                "original_text": "",
+                "proposed_text": "Phone: 3331234567",
+            },
+        ]
+
+        optimized = build_optimized_cv_text(
+            original,
+            accepted,
+            user_additional_data={},
+            role="Data Analyst",
+            company="",
+            use_llm=False,
+        )
+
+        self.assertIn("Telefono: +39 333 123 4567", optimized)
+        self.assertNotIn("Phone: 3331234567", optimized)
+
+    def test_build_optimized_cv_text_deduplicates_compact_skill_lines(self):
+        original = (
+            "SILVIA MUCCI\n"
+            "HARD SKILLS\n"
+            "Python ML & AI C++ SQL Java\n"
+        )
+
+        accepted = [
+            {
+                "id": "skills-compact-1",
+                "type": "actionableEdit",
+                "section": "HARD SKILLS",
+                "original_text": "",
+                "proposed_text": "Python, SQL, Java, C++, ML & AI, Debugging, Git",
+            },
+        ]
+
+        optimized = build_optimized_cv_text(
+            original,
+            accepted,
+            user_additional_data={},
+            role="Software Engineer",
+            company="",
+            use_llm=False,
+        )
+
+        self.assertNotIn("Python ML & AI C++ SQL Java, Python", optimized)
+        self.assertEqual(optimized.count("Python"), 1)
+        self.assertIn("Debugging", optimized)
+
     def test_build_resume_rewrite_result_converts_informal_notes_and_deduplicates_skills(self):
         with patch("main.CV_REWRITE_LLM_ENABLED", False):
             result = build_resume_rewrite_result(
@@ -1481,6 +1572,223 @@ class DocxPreserverLayoutTests(unittest.TestCase):
                 "FORMAZIONE",
                 "Laurea originale.",
             ],
+        )
+
+    def test_structured_pipeline_does_not_append_duplicate_lines(self):
+        document = Document()
+        document.add_paragraph("PROGETTI")
+        document.add_paragraph("Dashboard vendite con Python e Power BI.")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="append-projects",
+                    target_section="PROGETTI",
+                    action="append",
+                    old_text_hint="",
+                    new_text=(
+                        "Dashboard vendite con Python e Power BI.\n"
+                        "Analisi dei KPI commerciali."
+                    ),
+                )
+            ],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+
+        self.assertEqual(
+            texts,
+            [
+                "PROGETTI",
+                "Dashboard vendite con Python e Power BI.",
+                "Analisi dei KPI commerciali.",
+            ],
+        )
+
+    def test_structured_pipeline_does_not_duplicate_linkedin_from_header(self):
+        document = Document()
+        document.add_paragraph(
+            "LinkedIn: https://www.linkedin.com/in/example-profile/"
+        )
+        document.add_paragraph("CONTATTI")
+        document.add_paragraph("user@example.com")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="append-linkedin",
+                    target_section="CONTATTI",
+                    action="append",
+                    old_text_hint="",
+                    new_text="linkedin.com/in/example-profile",
+                )
+            ],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+
+        self.assertEqual(
+            sum("linkedin.com/in/example-profile" in text.lower() for text in texts),
+            1,
+        )
+
+    def test_structured_pipeline_does_not_duplicate_linkedin_from_docx_header(self):
+        document = Document()
+        document.sections[0].header.paragraphs[0].text = (
+            "LinkedIn: https://www.linkedin.com/in/example-profile/"
+        )
+        document.add_paragraph("CONTATTI")
+        document.add_paragraph("user@example.com")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="append-linkedin",
+                    target_section="CONTATTI",
+                    action="append",
+                    old_text_hint="",
+                    new_text="www.linkedin.com/in/example-profile",
+                )
+            ],
+        )
+
+        extracted_text = pipeline._extract_docx_text_bytes(result.file_bytes)
+        self.assertEqual(
+            extracted_text.lower().count("linkedin.com/in/example-profile"),
+            1,
+        )
+
+    def test_structured_pipeline_collapses_duplicate_linkedin_inside_same_line(self):
+        document = Document()
+        document.add_paragraph("CONTATTI")
+        document.add_paragraph("user@example.com")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="append-linkedin-inline-duplicate",
+                    target_section="CONTATTI",
+                    action="append",
+                    old_text_hint="",
+                    new_text="LinkedIn: linkedin.com/in/example-profilelinkedin.com/in/example-profile",
+                )
+            ],
+        )
+
+        extracted_text = pipeline._extract_docx_text_bytes(result.file_bytes).lower()
+        self.assertEqual(
+            extracted_text.count("linkedin.com/in/example-profile"),
+            1,
+        )
+
+    def test_structured_pipeline_deduplicates_mixed_contact_items_on_same_line(self):
+        document = Document()
+        document.add_paragraph("CONTATTI")
+        document.add_paragraph("user@example.com")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="append-mixed-contacts",
+                    target_section="CONTATTI",
+                    action="append",
+                    old_text_hint="",
+                    new_text=(
+                        "LinkedIn: linkedin.com/in/example-profile | "
+                        "GitHub: github.com/example | "
+                        "LinkedIn: https://www.linkedin.com/in/example-profile/ | "
+                        "Email: user@example.com | "
+                        "Telefono: +39 333 123 4567 | "
+                        "Phone: 3331234567"
+                    ),
+                )
+            ],
+        )
+
+        extracted_text = pipeline._extract_docx_text_bytes(result.file_bytes).lower()
+        self.assertEqual(extracted_text.count("linkedin.com/in/example-profile"), 1)
+        self.assertEqual(extracted_text.count("github.com/example"), 1)
+        self.assertEqual(extracted_text.count("user@example.com"), 1)
+        self.assertEqual(extracted_text.count("3331234567"), 1)
+
+    def test_structured_pipeline_collapses_compact_skill_duplicates(self):
+        document = Document()
+        document.add_paragraph("HARD SKILLS")
+        document.add_paragraph("Python ML & AI C++ SQL Java")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="append-skills",
+                    target_section="HARD SKILLS",
+                    action="append",
+                    old_text_hint="",
+                    new_text="Python, SQL, Java, C++, ML & AI, Debugging, Git",
+                )
+            ],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+
+        self.assertEqual(
+            texts,
+            [
+                "HARD SKILLS",
+                "Python, SQL, Java, C++, ML & AI, Debugging, Git",
+            ],
+        )
+
+    def test_structured_pipeline_validates_canonical_skill_rewrite_as_applied(self):
+        document = Document()
+        document.add_paragraph("HARD SKILLS")
+        document.add_paragraph("Python, SQL")
+        document.add_paragraph("SOFT SKILLS")
+        document.add_paragraph("Problem solving")
+
+        pipeline = ResumeDocxOptimizationPipeline()
+        result = pipeline.apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [
+                StructuredRewriteInstruction(
+                    suggestion_id="consolidated:hard-skills-update|confirmed_hard_skills",
+                    target_section="HARD SKILLS",
+                    action="append",
+                    old_text_hint="",
+                    new_text="Python, SQL, Excel, Accounting",
+                ),
+                StructuredRewriteInstruction(
+                    suggestion_id="consolidated:soft-skills-update|confirmed_soft_skills",
+                    target_section="SOFT SKILLS",
+                    action="append",
+                    old_text_hint="",
+                    new_text="Problem solving, Precisione, Organizzazione",
+                ),
+            ],
+        )
+
+        self.assertEqual(result.validation_report["status"], "applied")
+        self.assertIn(
+            "consolidated:hard-skills-update|confirmed_hard_skills",
+            result.validation_report["applied"],
+        )
+        self.assertIn(
+            "consolidated:soft-skills-update|confirmed_soft_skills",
+            result.validation_report["applied"],
         )
 
     def test_appends_inside_existing_table_section(self):
