@@ -7539,21 +7539,31 @@ def create_optimized_docx_file(optimized_text: str, original_file_bytes: Optiona
         optimized_lines = [line.strip() for line in optimized_text.splitlines() if line.strip()]
 
         def replace_paragraph_text_preserving_runs(paragraph, value: str) -> None:
-            # Svuota anche i run dentro w:hyperlink, altrimenti il display text
-            # dell'hyperlink (es. "linkedin.com/in/...") resta visibile insieme
-            # al nuovo testo, causando duplicazione del contenuto.
+            # Gestione hyperlink: se il nuovo testo contiene il display text
+            # gia' presente dentro un <w:hyperlink> (es. "linkedin.com/in/..."),
+            # lo lasciamo dentro l'hyperlink per non perdere la cliccabilita',
+            # e lo rimuoviamo dal testo dei run normali (evitando il duplicato).
+            ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            remaining = value
             try:
-                ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
                 for hyperlink in paragraph._p.iter(f"{ns_w}hyperlink"):
-                    for t in hyperlink.iter(f"{ns_w}t"):
-                        t.text = ""
+                    t_elements = list(hyperlink.iter(f"{ns_w}t"))
+                    link_text = "".join((t.text or "") for t in t_elements)
+                    stripped = link_text.strip()
+                    if stripped and stripped in remaining:
+                        remaining = remaining.replace(stripped, "", 1)
+                    else:
+                        for t in t_elements:
+                            t.text = ""
+                import re as _re
+                remaining = _re.sub(r"[ \t]{2,}", " ", remaining).strip()
             except Exception:
-                pass
+                remaining = value
             runs = list(paragraph.runs)
             if not runs:
-                paragraph.add_run(value)
+                paragraph.add_run(remaining)
                 return
-            runs[0].text = value
+            runs[0].text = remaining
             for run in runs[1:]:
                 run.text = ""
 

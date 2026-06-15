@@ -2122,21 +2122,37 @@ Dati aggiuntivi utente:
                 pass
 
     def _replace_paragraph_preserving_style(self, paragraph, replacement: str) -> None:
-        # Svuota il testo dentro <w:hyperlink> per evitare che resti visibile
-        # accanto al testo riscritto (causava duplicazione del link LinkedIn).
+        # Gestione hyperlink: se il replacement contiene il testo gia' presente
+        # dentro un <w:hyperlink> (es. "linkedin.com/in/..."), lo lasciamo dentro
+        # l'hyperlink (per non perdere la cliccabilita') e lo rimuoviamo dal
+        # testo che verra' scritto nei run normali. Cosi' evitiamo duplicati
+        # senza rompere il link.
+        ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        remaining = replacement
         try:
-            ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
             for hyperlink in paragraph._p.iter(f"{ns_w}hyperlink"):
-                for t in hyperlink.iter(f"{ns_w}t"):
-                    t.text = ""
+                t_elements = list(hyperlink.iter(f"{ns_w}t"))
+                link_text = "".join((t.text or "") for t in t_elements)
+                stripped = link_text.strip()
+                if stripped and stripped in remaining:
+                    # Rimuovo dalla stringa da scrivere; il link resta cliccabile.
+                    remaining = remaining.replace(stripped, "", 1)
+                else:
+                    # Hyperlink non piu' citato nel nuovo testo: svuotalo per
+                    # evitare doppioni residui.
+                    for t in t_elements:
+                        t.text = ""
+            # Normalizza spazi residui (es. "LinkedIn: " senza URL accanto).
+            import re as _re
+            remaining = _re.sub(r"[ \t]{2,}", " ", remaining).strip()
         except Exception:
-            pass
+            remaining = replacement
         runs = list(paragraph.runs)
         if not runs:
-            paragraph.text = replacement
+            paragraph.text = remaining
             return
         first_run = runs[0]
-        first_run.text = replacement
+        first_run.text = remaining
         for run in runs[1:]:
             run.text = ""
 
