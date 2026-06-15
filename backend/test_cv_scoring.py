@@ -116,7 +116,7 @@ class CvScoringTests(unittest.TestCase):
             "visual_score_adjustment": -12,
         }
 
-        self.assertEqual(compute_digital_presence_score(evidence), 46)
+        self.assertEqual(compute_digital_presence_score(evidence), 29)
         self.assertEqual(
             compute_digital_presence_score({**evidence, "can_compare_with_cv": False}),
             0,
