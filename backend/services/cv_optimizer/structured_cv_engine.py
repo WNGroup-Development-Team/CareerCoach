@@ -576,6 +576,105 @@ def group_skills(skills: List[str]) -> str:
     return "\n".join(rows)
 
 
+def _professionalize_user_note(text: str) -> str:
+    cleaned = shorten(normalize_professional_language(text), 520)
+    if not cleaned:
+        return ""
+    plain = normalize(cleaned)
+    match = re.match(
+        r"^ho lavorato (?:in|presso)\s+(.+?)\s+dove ho\s+(.+)$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        company, activity = match.groups()
+        return f"Presso {clean_line(company)}, {clean_line(activity).rstrip('.') }."
+    replacements = (
+        (r"^ho lavorato presso\s+", "Presso "),
+        (r"^ho lavorato in\s+", "Presso "),
+        (r"^ho sviluppato\s+", "Sviluppo di "),
+        (r"^ho realizzato\s+", "Realizzazione di "),
+        (r"^ho creato\s+", "Creazione di "),
+        (r"^ho analizzato\s+", "Analisi di "),
+        (r"^ho definito\s+", "Definizione di "),
+        (r"^ho interpretato\s+", "Interpretazione di "),
+        (r"^ho utilizzato\s+", "Utilizzo di "),
+        (r"^ho usato\s+", "Utilizzo di "),
+    )
+    for pattern, replacement in replacements:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = clean_line(cleaned).rstrip(".")
+    if not cleaned:
+        return ""
+    if plain.startswith("presso "):
+        return cleaned + "."
+    return cleaned[:1].upper() + cleaned[1:] + "."
+
+
+def _classify_additional_note(section_hint: str, text: str) -> str:
+    hint = normalize(section_hint)
+    plain = normalize(text)
+    if hint in {"experiences", "experience", "esperienze", "esperienza"}:
+        return "experience"
+    if hint in {"projects", "project", "progetti", "progetto", "measurable_results"}:
+        return "projects"
+    if hint in {"technical_skills", "technical skills", "tools", "soft_skills", "soft skills"}:
+        return "hard_skills" if "soft" not in hint else "soft_skills"
+    if any(term in plain for term in ["presso ", "poste italiane", "azienda", "cliente", "stage", "tirocinio", "impiego", "chatbot"]):
+        return "experience"
+    if any(term in plain for term in ["progetto", "progetti", "machine learning", "analisi dati", "kpi", "metriche", "report", "dataset", "dashboard"]):
+        return "projects"
+    return "profile"
+
+
+def _collect_additional_section_payloads(user_additional_data: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    payloads: Dict[str, List[str]] = {}
+
+    def add(section_key: str, raw_text: str) -> None:
+        cleaned = _professionalize_user_note(raw_text)
+        if not cleaned:
+            return
+        payloads.setdefault(section_key, [])
+        if normalize(cleaned) not in {normalize(item) for item in payloads[section_key]}:
+            payloads[section_key].append(cleaned)
+
+    if not isinstance(user_additional_data, dict):
+        return payloads
+
+    direct_fields = {
+        "experiences": "experience",
+        "projects": "projects",
+        "measurable_results": "projects",
+        "company_role_notes": "profile",
+        "additional_notes": "profile",
+    }
+    for field_name, section_key in direct_fields.items():
+        value = str(user_additional_data.get(field_name) or "").strip()
+        if value:
+            add(section_key, value)
+
+    for item in user_additional_data.get("adaptation_answers", []) if isinstance(user_additional_data.get("adaptation_answers"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        answer = str(item.get("answer") or "").strip()
+        if not answer:
+            continue
+        section_key = _classify_additional_note(str(item.get("category") or ""), answer)
+        add(section_key, answer)
+
+    for item in user_additional_data.get("confirmed_skills", []) if isinstance(user_additional_data.get("confirmed_skills"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        detail = str(item.get("detail") or item.get("user_example") or "").strip()
+        if not detail:
+            continue
+        section_key = _classify_additional_note(str(item.get("target_section") or ""), detail)
+        if section_key in {"experience", "projects", "profile"}:
+            add(section_key, detail)
+
+    return payloads
+
+
 def suggestion_id(section: str, title: str, original: str) -> str:
     raw = normalize(f"{section}-{title}-{original[:80]}")
     return re.sub(r"[^a-z0-9]+", "-", raw).strip("-")[:96] or "cv-suggestion"
@@ -1048,6 +1147,20 @@ def build_optimized_cv_text(
         }
         accepted_payload.append(payload_item)
         section_buckets.setdefault(section_key, []).append(payload_item)
+
+    for section_key, texts in _collect_additional_section_payloads(user_additional_data).items():
+        for index, text in enumerate(texts):
+            payload_item = {
+                "target_section": section_key,
+                "action": "replace",
+                "old_text_hint": "",
+                "new_text": text[:900],
+                "used_existing_evidence": True,
+                "forbidden_added_claims": [],
+                "source_id": f"user_additional_{section_key}_{index}",
+            }
+            accepted_payload.append(payload_item)
+            section_buckets.setdefault(section_key, []).append(payload_item)
 
     body_sections = [key for key in sections.keys() if key != "header"]
     if not body_sections:

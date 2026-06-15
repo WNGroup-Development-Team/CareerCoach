@@ -13,6 +13,7 @@ def build_skill_mini_shot_suggestions(evaluation: Dict[str, Any]) -> List[Dict[s
         is_valid_actionable_suggestion,
         normalize_plain_text,
         role_keyword_snapshot,
+        skill_semantically_present,
         suggestion_targets_current_cv,
     )
     from services.cv_optimizer.structured_cv_engine import extract_skill_terms
@@ -52,7 +53,7 @@ def build_skill_mini_shot_suggestions(evaluation: Dict[str, Any]) -> List[Dict[s
         str(target.get("description") or evaluation.get("description") or ""),
         str(evaluation.get("required_skills") or ""),
     )
-    missing_hard = [str(x).strip() for x in (evaluation.get("missing_hard_skills") or evaluation.get("missing_keywords") or []) if str(x).strip()]
+    missing_hard = [str(x).strip() for x in (evaluation.get("missing_hard_skills") or []) if str(x).strip()]
     missing_soft = [str(x).strip() for x in (evaluation.get("missing_soft_skills") or []) if str(x).strip()]
     present_skills = [str(x).strip() for x in (evaluation.get("relevant_skills_found") or evaluation.get("present_keywords") or []) if str(x).strip()]
     confirmation_items = [
@@ -152,6 +153,8 @@ Regole:
             bucket = str(candidate.get("bucket") or "").strip()
             skill = str(candidate.get("skill") or "").strip()
             if not skill:
+                continue
+            if skill_semantically_present(cv_text, skill):
                 continue
             reason = str(candidate.get("reason") or "").strip()
             candidate.update({

@@ -3,7 +3,6 @@ import "./App.css";
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
 import PersonalizeExperience from "./PersonalizeExperience";
-import TagInput from "./TagInput";
 import {
   SparkleIcon,
   LinkedInIcon,
@@ -37,12 +36,9 @@ const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
 const CV_ADDITIONAL_DATA_FIELDS = [
   { key: "experiences", label: "Esperienze da valorizzare" },
-  { key: "technical_skills", label: "Competenze tecniche aggiuntive" },
-  { key: "soft_skills", label: "Soft skills rilevanti" },
   { key: "projects", label: "Progetti importanti" },
   { key: "measurable_results", label: "Risultati misurabili ottenuti" },
   { key: "certifications", label: "Certificazioni o corsi" },
-  { key: "tools", label: "Strumenti e tecnologie utilizzate" },
   { key: "company_role_notes", label: "Informazioni specifiche per azienda e ruolo" },
   { key: "additional_notes", label: "Note aggiuntive per l'ottimizzazione" },
 ];
@@ -3086,9 +3082,6 @@ function App() {
   ];
   const cvAtsAnalysis = cvOptimizationAnalysis?.ats_analysis || {};
   const cvAtsPresentKeywords = cvAtsAnalysis.present_keywords || cvAtsAnalysis.keywords_present || cvOptimizationAnalysis?.present_keywords || [];
-  const cvAtsMissingKeywords = cvAtsAnalysis.missing_keywords || cvAtsAnalysis.keywords_missing || cvOptimizationAnalysis?.missing_keywords || [];
-  const cvAtsPartiallyPresentKeywords = cvAtsAnalysis.keywords_partially_present || [];
-  const cvAtsKeywordsToConfirm = cvAtsAnalysis.keywords_to_confirm || [];
   const cvAtsMissingHardSkills = cvAtsAnalysis.missing_hard_skills || cvOptimizationAnalysis?.missing_hard_skills || [];
   const cvAtsMissingSoftSkills = cvAtsAnalysis.missing_soft_skills || cvOptimizationAnalysis?.missing_soft_skills || [];
   const suggestedSkills = cvOptimizationAnalysis?.suggested_skills || {};
@@ -3099,17 +3092,13 @@ function App() {
       category: "hard_skill",
       target_section: "HARD SKILLS",
     })),
-    ...cvAtsKeywordsToConfirm.map((keyword, index) => normalizeSkillConfirmationItem(keyword, index, {
-      type: "keywordConfirmation",
-      category: "keyword",
-      target_section: "HARD SKILLS",
-    })),
-    ...cvAtsMissingKeywords.map((keyword, index) => normalizeSkillConfirmationItem(keyword, index, {
-      type: "keywordConfirmation",
-      category: "keyword",
-      target_section: "HARD SKILLS",
-    })),
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .filter((item) =>
+      item.type === "skillConfirmation"
+      && ["hard_skill", "soft_skill", "tool", "language"].includes(item.category)
+      && !item.already_present
+    );
   const skillConfirmationItems = rawSkillConfirmationItems
     .map((item, index) => normalizeSkillConfirmationItem(item, index))
     .filter(Boolean)
@@ -3126,14 +3115,6 @@ function App() {
     });
   const presentSkillItems = [
     ...skillConfirmationItems.filter((item) => item.already_present),
-    ...cvAtsPresentKeywords.map((name, index) => normalizeSkillConfirmationItem({
-      id: `present-keyword-${index}-${name}`,
-      name,
-      category: "keyword",
-      already_present: true,
-      requires_confirmation: false,
-      reason: "Rilevata nel CV corrente.",
-    }, index)),
   ]
     .filter(Boolean)
     .filter((item, index, list) =>
@@ -3379,13 +3360,10 @@ function App() {
   const cvSummaryAcceptedSkillGroups = {
     hard: [
       ...acceptedSkillConfirmations.filter((item) => !["soft_skill", "tool"].includes(item.category)).map((item) => item.name),
-      ...splitTagList(cvAdditionalData.technical_skills),
       ...acceptedSkillConfirmations.filter((item) => item.category === "tool").map((item) => item.name),
-      ...splitTagList(cvAdditionalData.tools),
     ],
     soft: [
       ...acceptedSkillConfirmations.filter((item) => item.category === "soft_skill").map((item) => item.name),
-      ...splitTagList(cvAdditionalData.soft_skills),
     ],
   };
   Object.keys(cvSummaryAcceptedSkillGroups).forEach((key) => {
@@ -4632,7 +4610,7 @@ const screenshotUploadBoxes = [];
           <div className="cv-strategy-section">
             <div className="cv-strategy-section-title">
               <span>?</span>
-              <h3>Hard skill, soft skill e keyword ATS</h3>
+              <h3>Hard skill e soft skill</h3>
             </div>
             {currentSkillConfirmation ? (
               <div className="ai-suggestion-card-list">
@@ -4646,7 +4624,7 @@ const screenshotUploadBoxes = [];
                     <div className={`coach-suggestion-option skill-confirmation-card ai-suggestion-card ${itemStatus}`} key={item.id}>
                       <span className="suggestion-state-icon" aria-hidden="true">{isAccepted ? "✓" : isRejected ? "✖" : "i"}</span>
                       <span>
-                        <small>{item.type === "keywordConfirmation" ? "Keyword ATS" : "Skill"} {index + 1} di {proposedSkillConfirmationItems.length}</small>
+                        <small>Skill {index + 1} di {proposedSkillConfirmationItems.length}</small>
                         <b>{item.name}</b>
                         <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
                         <small><b>Perché è utile:</b> {item.reason}</small>
@@ -4662,9 +4640,7 @@ const screenshotUploadBoxes = [];
                             value={item.user_example}
                             onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
                             placeholder={
-                              item.type === "keywordConfirmation"
-                                ? "Facoltativo: descrivi un uso reale di questa keyword in un progetto, studio o lavoro..."
-                                : item.category === "soft_skill"
+                              item.category === "soft_skill"
                                 ? "Facoltativo: descrivi una situazione reale in cui hai dimostrato questa competenza..."
                                 : "Facoltativo: descrivi dove hai usato questa competenza tecnica..."
                             }
@@ -4700,7 +4676,7 @@ const screenshotUploadBoxes = [];
                 })}
               </div>
             ) : (
-              <p className="cv-strategy-note">Nessuna skill o keyword specifica da valutare.</p>
+              <p className="cv-strategy-note">Nessuna nuova skill specifica da valutare.</p>
             )}
             {decidedSkillConfirmations.length > 0 && (
               <div className="reviewed-choice-list">
@@ -4731,7 +4707,7 @@ const screenshotUploadBoxes = [];
             onClick={() => setCvOptimizationStage(1)}
             disabled={!allSkillConfirmationsReviewed}
           >
-            {allSkillConfirmationsReviewed ? "Continua al riepilogo" : "Valuta tutte le skill e keyword per continuare"}
+            {allSkillConfirmationsReviewed ? "Continua al riepilogo" : "Valuta tutte le skill per continuare"}
           </button>
             </>
           )}
@@ -4827,29 +4803,7 @@ const screenshotUploadBoxes = [];
                   Aggiungi solo informazioni vere: verranno riscritte e inserite nelle sezioni più adatte del CV, senza creare doppioni.
                 </p>
 
-                <TagInput
-                  label="Hard Skills"
-                  placeholder="Es. Python, Data Analysis, SQL..."
-                  value={cvAdditionalData.technical_skills || ""}
-                  onChange={(value) => updateCvAdditionalData("technical_skills", value)}
-                />
-
-                <TagInput
-                  label="Soft Skills"
-                  placeholder="Es. Problem Solving, Teamwork..."
-                  value={cvAdditionalData.soft_skills || ""}
-                  onChange={(value) => updateCvAdditionalData("soft_skills", value)}
-                />
-
-                <TagInput
-                  label="Parole chiave e strumenti"
-                  placeholder="Es. Jira, SCRUM, Power BI..."
-                  value={cvAdditionalData.tools || ""}
-                  onChange={(value) => updateCvAdditionalData("tools", value)}
-                />
-
                 {CV_ADDITIONAL_DATA_FIELDS
-                  .filter((field) => !["technical_skills", "soft_skills", "tools"].includes(field.key))
                   .map((field) => (
                     <label
                       className={[
@@ -4938,7 +4892,7 @@ const screenshotUploadBoxes = [];
               Continua alla generazione
             </button>
             <button className="secondary-button" type="button" onClick={() => setCvOptimizationStage(0)}>
-              Torna a skill e keyword
+              Torna alle skill
             </button>
           </div>
             </>

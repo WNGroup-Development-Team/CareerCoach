@@ -27,7 +27,33 @@ def build_resume_rewrite_result(
         normalize_plain_text,
     )
     from services.cv_optimizer.safe_cv_guard import sanitize_accepted_cv_suggestions
-    from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
+    from services.cv_optimizer.structured_cv_engine import (
+        build_optimized_cv_text,
+        extract_skill_terms,
+        normalize_professional_language,
+    )
+
+    def _instruction_applied(text: str, instruction: Any) -> bool:
+        replacement = normalize_plain_text(str(getattr(instruction, "replacement", "") or ""))
+        if not replacement:
+            return True
+        return replacement in normalize_plain_text(text)
+
+    def _should_reapply_instruction(text: str, instruction: Any) -> bool:
+        section = normalize_plain_text(str(getattr(instruction, "section", "") or ""))
+        if section in {"hard skills", "soft skills", "competenze", "skills"}:
+            replacement_terms = {
+                normalize_plain_text(term)
+                for term in extract_skill_terms(str(getattr(instruction, "replacement", "") or ""))
+            }
+            if replacement_terms:
+                current_terms = {
+                    normalize_plain_text(term)
+                    for term in extract_skill_terms(text)
+                }
+                if replacement_terms.issubset(current_terms):
+                    return False
+        return True
 
     parser = ResumeParser()
     sections = parser.parse_text(cv_text)
@@ -154,9 +180,29 @@ def build_resume_rewrite_result(
             )
         ):
             optimized_text = rewriter.apply_to_text(cv_text, instructions)
+        elif instructions:
+            missing_instructions = [
+                instruction
+                for instruction in instructions
+                if not _instruction_applied(optimized_text, instruction)
+                and _should_reapply_instruction(optimized_text, instruction)
+            ]
+            if missing_instructions:
+                print(
+                    "[REWRITE DEBUG] istruzioni mancanti dopo build_optimized_cv_text: "
+                    + ", ".join(
+                        f"{inst.section}:{(inst.source_id or 'unknown')}" for inst in missing_instructions[:10]
+                    )
+                )
+                patched_text = rewriter.apply_to_text(optimized_text, missing_instructions)
+                if normalize_plain_text(patched_text) != normalize_plain_text(optimized_text):
+                    optimized_text = patched_text
     except Exception as exc:
         print(f"Generazione CV strutturato non disponibile, uso rewriter esistente: {exc}")
         optimized_text = rewriter.apply_to_text(cv_text, instructions)
+
+    optimized_text = normalize_professional_language(optimized_text)
+    optimized_text = rewriter.clean_final_text(optimized_text)
 
     if instructions and normalize_plain_text(optimized_text) == normalize_plain_text(cv_text):
         raise HTTPException(

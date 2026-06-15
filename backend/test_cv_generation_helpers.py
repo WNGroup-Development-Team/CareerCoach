@@ -61,9 +61,26 @@ class CvGenerationHelperTests(unittest.TestCase):
         self.assertEqual(rejected, [])
         self.assertIn("experiences", sanitized)
         self.assertIn("certifications", sanitized)
-        self.assertEqual(sanitized["technical_skills"], "SQL")
-        self.assertEqual(sanitized["soft_skills"], "Problem solving")
+        self.assertNotIn("technical_skills", sanitized)
+        self.assertNotIn("soft_skills", sanitized)
         self.assertEqual(sanitized["confirmed_skills"][0]["name"], "KPI")
+
+    def test_manual_skill_fields_and_keyword_confirmations_are_ignored(self):
+        sanitized, rejected = sanitize_cv_additional_data({
+            "technical_skills": "Python",
+            "soft_skills": "Leadership",
+            "tools": "Power BI",
+            "confirmed_skills": [{
+                "id": "manual-keyword",
+                "type": "keywordConfirmation",
+                "name": "game",
+                "category": "keyword",
+                "status": "confirmed",
+            }],
+        })
+
+        self.assertEqual(sanitized, {})
+        self.assertEqual(rejected, [])
 
     @patch("main.build_professional_extra_text")
     def test_experience_box_builds_rewrite_instruction(self, build_text):
@@ -180,11 +197,7 @@ class CvGenerationHelperTests(unittest.TestCase):
             "Data Analyst",
         )
 
-        self.assertEqual(len(instructions), 1)
-        self.assertEqual(instructions[0].section, "COMPETENZE TECNICHE")
-        self.assertIn("Excel", instructions[0].replacement)
-        self.assertIn("Analisi dati", instructions[0].replacement)
-        self.assertNotIn("Ho usato", instructions[0].replacement)
+        self.assertEqual(instructions, [])
 
     @patch("main.build_professional_extra_text")
     def test_additional_rewrite_instructions_classify_short_fragments(self, build_text):
@@ -208,14 +221,13 @@ class CvGenerationHelperTests(unittest.TestCase):
 
         self.assertEqual(
             [item.section for item in instructions],
-            ["COMPETENZE TECNICHE", "PROGETTI"],
+            ["PROGETTI"],
         )
-        self.assertIn("Excel", instructions[0].replacement)
-        self.assertIn("Progetto universitario", instructions[1].replacement)
-        self.assertNotIn("Ho lavorato", instructions[1].replacement)
+        self.assertIn("progetto universitario", instructions[0].replacement.lower())
+        self.assertNotIn("Ho lavorato", instructions[0].replacement)
 
     @patch("main.build_professional_extra_text")
-    def test_all_user_boxes_are_transformed_into_cv_instructions(self, build_text):
+    def test_only_non_skill_user_boxes_are_transformed_into_cv_instructions(self, build_text):
         build_text.side_effect = lambda payload, role: str(payload.get("additional_notes") or "")
 
         instructions = build_additional_rewrite_instructions(
@@ -230,8 +242,9 @@ class CvGenerationHelperTests(unittest.TestCase):
         )
 
         sections = [item.section for item in instructions]
-        self.assertIn("COMPETENZE TECNICHE", sections)
-        self.assertIn("SOFT SKILLS", sections)
+        self.assertNotIn("COMPETENZE TECNICHE", sections)
+        self.assertNotIn("SOFT SKILLS", sections)
+
         self.assertIn("PROGETTI", sections)
         self.assertIn("CERTIFICAZIONI", sections)
         self.assertIn("PROFILO", sections)

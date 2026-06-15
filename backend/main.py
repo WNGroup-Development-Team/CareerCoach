@@ -5532,6 +5532,11 @@ Schema:
                 professional_text = skill_text(cleaned_fragment, "skill")
                 section, category = "COMPETENZE TECNICHE", "skill"
         elif category in {"skill", "soft_skill"}:
+            if normalized_hint not in {
+                "technical skills", "technical_skills", "tools",
+                "soft skills", "soft_skills",
+            }:
+                return
             professional_text = skill_text(cleaned_fragment, category)
             section = "SOFT SKILLS" if category == "soft_skill" else "COMPETENZE TECNICHE"
             if not professional_text:
@@ -5599,12 +5604,9 @@ Schema:
 
     box_fields = {
         "experiences": "experiences",
-        "technical_skills": "technical_skills",
-        "soft_skills": "soft_skills",
         "projects": "projects",
         "measurable_results": "measurable_results",
         "certifications": "certifications",
-        "tools": "tools",
         "company_role_notes": "company_role_notes",
         "additional_notes": "",
     }
@@ -5939,6 +5941,12 @@ def clean_skill_section_source(value: str) -> str:
 
 def canonical_skill_identity(value: str) -> str:
     normalized = normalize_plain_text(value)
+    normalized = re.sub(
+        r"\b(programming|programmazione|language|linguaggio|framework|tool|strumento)\b",
+        "",
+        normalized,
+    )
+    normalized = re.sub(r"\s+", " ", normalized).strip()
     aliases = {
         "ml ai": "machine learning",
         "ml & ai": "machine learning",
@@ -5947,11 +5955,54 @@ def canonical_skill_identity(value: str) -> str:
         "machine learning ai": "machine learning",
         "team working": "collaborazione",
         "teamwork": "collaborazione",
+        "collaborazione in team": "collaborazione",
+        "lavoro di squadra": "collaborazione",
+        "lavoro in team": "collaborazione",
+        "team collaboration": "collaborazione",
+        "risoluzione dei problemi": "problem solving",
+        "gestione delle priorita": "gestione priorita",
+        "priority management": "gestione priorita",
+        "communication": "comunicazione",
+        "organization": "organizzazione",
+        "leadership skills": "leadership",
         "data visualisation": "data visualization",
+        "visualizzazione dati": "data visualization",
+        "analisi dei dati": "analisi dati",
+        "data analysis": "analisi dati",
         "powerbi": "power bi",
         "google bigquery": "bigquery",
     }
     return aliases.get(normalized, normalized)
+
+
+def skill_semantically_present(cv_text: str, skill: str) -> bool:
+    identity = canonical_skill_identity(skill)
+    if not identity:
+        return True
+    equivalent_groups = {
+        "collaborazione": {
+            "collaborazione", "team working", "teamwork", "lavoro di squadra",
+            "lavoro in team", "collaborazione in team", "team collaboration",
+        },
+        "problem solving": {
+            "problem solving", "problem-solving", "risoluzione dei problemi",
+        },
+        "gestione priorita": {
+            "gestione priorita", "gestione delle priorita", "priority management",
+        },
+        "comunicazione": {"comunicazione", "communication"},
+        "organizzazione": {"organizzazione", "organization"},
+        "data visualization": {
+            "data visualization", "data visualisation", "visualizzazione dati",
+        },
+        "analisi dati": {"analisi dati", "analisi dei dati", "data analysis"},
+    }
+    variants = {
+        identity,
+        normalize_plain_text(skill),
+        *equivalent_groups.get(identity, set()),
+    }
+    return keyword_group_present(normalize_plain_text(cv_text), list(variants))
 
 
 def extract_clean_skill_items(value: str, is_soft: bool = False) -> List[str]:
@@ -6669,6 +6720,8 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     for key, value in (data or {}).items():
         if key in {"adaptation_answers", "confirmed_skills"}:
             continue
+        if key in {"technical_skills", "soft_skills", "tools"}:
+            continue
         if not isinstance(value, str) or not value.strip():
             continue
         cleaned = value.strip()
@@ -6710,11 +6763,7 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     seen_confirmed_skills = set()
     for item in (data or {}).get("confirmed_skills", []):
         if isinstance(item, str):
-            name = item.strip()
-            detail = ""
-            category = "hard_skill"
-            target_section = "HARD SKILLS"
-            item_type = "skillConfirmation"
+            continue
         elif isinstance(item, dict):
             name = str(item.get("name") or item.get("skill") or "").strip()
             detail = str(item.get("user_example") or item.get("detail") or item.get("example") or "").strip()
@@ -6724,6 +6773,10 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
         else:
             continue
         if not name:
+            continue
+        if item_type != "skillConfirmation" or category not in {
+            "hard_skill", "soft_skill", "tool", "language",
+        }:
             continue
         if detail and not is_meaningful_cv_detail(detail) and is_low_quality_text(detail, min_chars=6, min_words=2):
             rejected_candidates.append(f"conferma skill {name}")
@@ -8626,7 +8679,7 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
         elif group_name == "soft_skills":
             ordered_skills = ordered_skills[:8]
         for skill in ordered_skills:
-            present = keyword_group_present(cv_plain, [skill])
+            present = skill_semantically_present(cv_text, skill)
             item = {"name": skill, "status": "present" if present else "to_confirm"}
             result[group_name].append(item)
             category = {
@@ -8634,6 +8687,10 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                 "programming_languages": "language",
                 "tools": "tool",
             }.get(group_name, "hard_skill")
+            if present:
+                result["already_present"].append(skill)
+                result["to_highlight"].append(skill)
+                continue
             result["confirmation_items"].append({
                 "id": f"{(family or normalize_plain_text(role)).replace(' ', '-')}-{group_name.replace('_', '-')}-{normalize_plain_text(skill).replace(' ', '-')}",
                 "type": "skillConfirmation",
@@ -8644,17 +8701,13 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
                     if not present
                     else f"Competenze già presenti nel CV e utili per il ruolo futuro {role or family}."
                 ),
-                "already_present": present,
+                "already_present": False,
                 "requires_confirmation": True,
                 "status": "pending",
                 "user_example": "",
                 "target_section": "SOFT SKILLS" if category == "soft_skill" else "HARD SKILLS",
             })
-            if present:
-                result["already_present"].append(skill)
-                result["to_highlight"].append(skill)
-            else:
-                result["to_confirm"].append(skill)
+            result["to_confirm"].append(skill)
 
     deduped_confirmations = []
     seen_confirm_ids = set()
@@ -8672,6 +8725,7 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
     
     snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
     keywords_to_add = [keyword for keyword in snapshot.get("to_confirm", []) if not is_cv_noise_keyword(keyword)]
+    keywords_to_add = []
     print(f"[build_role_skill_suggestions] keywords_to_confirm={len(keywords_to_add)}")
     
     for keyword in keywords_to_add:
@@ -8706,6 +8760,12 @@ def build_role_skill_suggestions(cv_text: str, role: str, description: str = "",
         plain = normalize_plain_text(name)
         tokens = plain.split()
         if not plain:
+            continue
+        if item.get("type") != "skillConfirmation":
+            continue
+        if item.get("category") not in {"hard_skill", "soft_skill", "tool", "language"}:
+            continue
+        if skill_semantically_present(cv_text, name):
             continue
         if plain in seen_confirmation_names:
             continue
@@ -10816,6 +10876,34 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         print(f"[CV-OPT DEBUG] errore nel logging raw_additional_data: {_dbg_exc}")
 
     user_additional_data, rejected_additional_fields = sanitize_cv_additional_data(raw_additional_data)
+    allowed_skill_suggestions = build_role_skill_suggestions(
+        cv_text,
+        role_context,
+        goal,
+        str(job_data.get("required_skills") or ""),
+    ).get("confirmation_items", [])
+    allowed_skill_identities = {
+        canonical_skill_identity(str(item.get("name") or ""))
+        for item in allowed_skill_suggestions
+        if isinstance(item, dict)
+        and item.get("type") == "skillConfirmation"
+        and item.get("category") in {"hard_skill", "soft_skill", "tool", "language"}
+    }
+    confirmed_from_suggestions = []
+    for item in user_additional_data.get("confirmed_skills", []):
+        if not isinstance(item, dict):
+            continue
+        identity = canonical_skill_identity(str(item.get("name") or ""))
+        if (
+            identity
+            and identity in allowed_skill_identities
+            and not skill_semantically_present(cv_text, str(item.get("name") or ""))
+        ):
+            confirmed_from_suggestions.append(item)
+    if confirmed_from_suggestions:
+        user_additional_data["confirmed_skills"] = confirmed_from_suggestions
+    else:
+        user_additional_data.pop("confirmed_skills", None)
 
     # === DEBUG cv-optimize: risultati sanitize ===
     try:

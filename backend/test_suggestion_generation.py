@@ -22,14 +22,87 @@ from main import (
     infer_role_family,
     sanitize_cv_additional_data,
     clean_job_role_title,
+    skill_semantically_present,
 )
 from services.cv_optimizer import RewriteInstruction
 from services.cv_optimizer.skill_suggestions import build_skill_mini_shot_suggestions
 from services.cv_optimizer.suggestions import refine_cv_job_suggestions
+from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
 
 
 class TestSuggestionGeneration(unittest.TestCase):
     """Test suggestion generation with fallback."""
+
+    def test_semantic_skill_duplicates_are_not_suggested(self):
+        result = build_role_skill_suggestions(
+            "HARD SKILLS\nPython programming\nSOFT SKILLS\nTeam working",
+            "Data Analyst",
+        )
+
+        names = {
+            canonical_skill_identity(item["name"])
+            for item in result["confirmation_items"]
+        }
+        self.assertNotIn("python", names)
+        self.assertNotIn("collaborazione", names)
+        self.assertTrue(
+            skill_semantically_present("Team working", "Collaborazione in team")
+        )
+
+    def test_skill_suggestions_do_not_include_keyword_cards(self):
+        result = build_role_skill_suggestions(
+            "HARD SKILLS\nExcel",
+            "Data Analyst",
+        )
+
+        self.assertTrue(result["confirmation_items"])
+        self.assertTrue(all(
+            item["type"] == "skillConfirmation"
+            and item["category"] in {
+                "hard_skill", "soft_skill", "tool", "language",
+            }
+            for item in result["confirmation_items"]
+        ))
+
+    def test_structured_cv_engine_merges_additional_experience_and_project_notes(self):
+        cv_text = (
+            "CHI SONO\n"
+            "Studentessa magistrale con interesse per analisi dei dati.\n"
+            "ESPERIENZE PROFESSIONALI\n"
+            "Tirocinio curriculare in ambito ottimizzazione.\n"
+            "HARD SKILLS\n"
+            "Python | SQL | Data Analysis\n"
+        )
+
+        optimized = build_optimized_cv_text(
+            cv_text,
+            accepted_suggestions=[],
+            user_additional_data={
+                "experiences": (
+                    "ho lavorato presso Poste Italiane dove ho realizzato una chatbot "
+                    "che risponde a domande relative a documentazione aziendale"
+                ),
+                "projects": (
+                    "Ho lavorato su progetti universitari di Data Analysis e Machine Learning "
+                    "in cui ho analizzato dati, definito indicatori di performance e interpretato metriche "
+                    "utili per valutare l efficacia dei risultati ottenuti, anche tramite report e tabelle."
+                ),
+                "measurable_results": (
+                    "Usata in progetti universitari di analisi dati per definire e monitorare KPI e indicatori "
+                    "utili alla valutazione dei risultati, confrontando metriche, performance e andamento dei dati."
+                ),
+            },
+            role="Data Analyst",
+            company="Google",
+            use_llm=False,
+        )
+
+        normalized = optimized.lower()
+        self.assertIn("poste italiane", normalized)
+        self.assertIn("chatbot", normalized)
+        self.assertIn("kpi", normalized)
+        self.assertIn("metriche", normalized)
+        self.assertIn("report", normalized)
 
     def test_ollama_respects_explicit_short_timeout(self):
         captured = {}

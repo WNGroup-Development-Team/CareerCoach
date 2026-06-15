@@ -284,6 +284,9 @@ class DynamicAdditionalContentTests(unittest.TestCase):
                     role="Data Analyst",
                     cv_text="PROFILO\nProfilo esistente.",
                 )
+                if field_name in {"technical_skills", "soft_skills", "tools"}:
+                    self.assertEqual(instructions, [])
+                    continue
                 self.assertTrue(
                     instructions,
                     f"La box {field_name} non ha prodotto istruzioni per il CV.",
@@ -682,6 +685,36 @@ class ResumeRewriterTests(unittest.TestCase):
         self.assertIn("progetto universitario", text.lower())
         self.assertIn("jira", text.lower())
         self.assertTrue(result["instructions"])
+
+    def test_resume_rewrite_result_recovers_missing_structured_modifications(self):
+        with patch("main.CV_REWRITE_LLM_ENABLED", False):
+            with patch(
+                "services.cv_optimizer.structured_cv_engine.build_optimized_cv_text",
+                return_value="PROFILO\nProfilo originale.\n\nHARD SKILLS\nPython\n",
+            ):
+                result = build_resume_rewrite_result(
+                    cv_text=(
+                        "PROFILO\n"
+                        "Profilo originale.\n\n"
+                        "HARD SKILLS\n"
+                        "Python\n"
+                    ),
+                    company="",
+                    role="Data Analyst",
+                    goal="Ottimizzazione CV",
+                    accepted_suggestions=[
+                        {
+                            "id": "profile-1",
+                            "type": "actionableEdit",
+                            "section": "PROFILO",
+                            "original_text": "Profilo originale.",
+                            "proposed_text": "Profilo aggiornato e orientato ai dati.",
+                        }
+                    ],
+                    user_additional_data={},
+                )
+
+        self.assertIn("Profilo aggiornato e orientato ai dati.", result["optimized_text"])
 
 
 class DocxPreserverLayoutTests(unittest.TestCase):
