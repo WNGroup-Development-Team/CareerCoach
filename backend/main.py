@@ -6005,13 +6005,35 @@ def infer_extra_content_section(value: str) -> tuple[str, str]:
         "feature engineering", "cross-validation", "deploy", "deployment",
     )
 
+    # Una "frase descrittiva" e' un periodo con almeno 4 parole e un verbo in
+    # prima persona o un marker temporale: l'utente sta raccontando qualcosa,
+    # non sta elencando una competenza secca. Va in ATTIVITA RILEVANTI come
+    # paragrafo riformulato, NON in COMPETENZE TECNICHE come parola chiave.
+    word_count = len(plain.split())
+    descriptive_markers = (
+        "ho usato", "ho utilizzato", "ho applicato", "ho fatto", "ho lavorato",
+        "ho realizzato", "ho sviluppato", "ho implementato", "ho creato",
+        "ho collaborato", "ho coordinato", "ho gestito", "ho analizzato",
+        "ho costruito", "ho condotto", "sto usando", "ho preparato",
+        "mi sono occupat", "mi occupo", "per fare", "per creare",
+        "per analizzare", "durante", "nell'ambito", "nell ambito",
+        # marker piu' generici: l'utente sta descrivendo un USO/applicazione
+        " per i ", " per il ", " per la ", " per le ", " per gli ",
+        " per analisi ", " per analizzare ", " per creare ",
+        " usato ", " usata ", " utilizzato ", " utilizzata ",
+        " applicat", " gestit", " realizzat", " sviluppat",
+    )
+    has_verb_marker = any(marker in f" {plain} " for marker in descriptive_markers)
+    is_descriptive_sentence = word_count >= 4 and has_verb_marker
+
     # Priorita' di routing per il testo "info extra" dell'utente:
     # 1. CERTIFICAZIONI se ne parla esplicitamente
     # 2. PROGETTI se l'utente menziona un progetto / dataset / dashboard
     #    (anche se cita strumenti tecnici - l'intento e' descrivere un progetto reale)
     # 3. ESPERIENZE se cita azienda/tirocinio/stage
     # 4. CERTIFICAZIONI/FORMAZIONE specifiche
-    # 5. solo come ultima risorsa: COMPETENZE TECNICHE
+    # 5. Frase descrittiva (verbo + >=4 parole) senza marker espliciti -> ATTIVITA RILEVANTI
+    # 6. solo come ultima risorsa: COMPETENZE TECNICHE
     has_language_level = bool(re.search(r"\b[abc][12]\b", plain))
     if score_terms(language_terms) and (has_language_level or "madrelingua" in plain):
         return "LINGUE", "languages"
@@ -6025,6 +6047,10 @@ def infer_extra_content_section(value: str) -> tuple[str, str]:
     # ma menziona uno strumento tecnico, e' tipicamente un'attivita di studio
     # -> meglio PROGETTI o ATTIVITA RILEVANTI di una nuova competenza generica
     if any(term in plain for term in ["universita", "università", "esame", "corso"]):
+        return "ATTIVITA RILEVANTI", "extra_page"
+    # Frase narrativa con verbo: l'utente racconta un'esperienza/uso reale,
+    # non sta elencando una skill. Mai trattarla come parola chiave secca.
+    if is_descriptive_sentence:
         return "ATTIVITA RILEVANTI", "extra_page"
 
     scores = {
@@ -6340,11 +6366,22 @@ Schema:
                 "technical skills", "technical_skills", "tools",
                 "soft skills", "soft_skills",
             }:
-                return
-            professional_text = skill_text(cleaned_fragment, category)
-            section = "SOFT SKILLS" if category == "soft_skill" else "COMPETENZE TECNICHE"
-            if not professional_text:
-                return
+                # L'utente ha scritto qualcosa che contiene parole chiave
+                # tecniche ma non e' stato indirizzato esplicitamente come
+                # skill (es. additional_notes o adaptation answer senza
+                # category): non scartare silenziosamente. Riformula come
+                # paragrafo in ATTIVITA RILEVANTI.
+                professional_text = build_professional_extra_text(
+                    {"additional_notes": cleaned_fragment}, role
+                )
+                section, category = "ATTIVITA RILEVANTI", "extra_page"
+                if not professional_text:
+                    return
+            else:
+                professional_text = skill_text(cleaned_fragment, category)
+                section = "SOFT SKILLS" if category == "soft_skill" else "COMPETENZE TECNICHE"
+                if not professional_text:
+                    return
         elif category == "extra_page":
             professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
             section, category = "ATTIVITA RILEVANTI", "extra_page"
