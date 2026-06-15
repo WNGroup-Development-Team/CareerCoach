@@ -32,7 +32,7 @@ from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from services.cv_optimizer import (
     CoachSuggestionEngine,
@@ -431,21 +431,6 @@ class DigitalPresenceUpdate(BaseModel):
     instagram_handle: Optional[str] = None
     target_role: Optional[str] = None
     linkedin_connected: bool = False
-
-
-class DigitalCoherenceInput(BaseModel):
-    cv_name: Optional[str] = None
-    cv_surname: Optional[str] = None
-    linkedin_url: Optional[str] = None
-    linkedin_export_name: Optional[str] = None
-    linkedin_export_surname: Optional[str] = None
-    linkedin_export_role: Optional[str] = None
-    linkedin_export_companies: List[str] = Field(default_factory=list)
-    instagram_handle: Optional[str] = None
-    instagram_handle_from_profile: Optional[str] = None
-    instagram_screenshots_analysis: Optional[str] = None
-    github_url: Optional[str] = None
-    github_username_from_url: Optional[str] = None
 
 
 class ProfileImageUpdate(BaseModel):
@@ -3205,15 +3190,8 @@ VISUAL_SENSITIVE_CATEGORIES = {
     "nudita",
     "contenuto sessuale esplicito",
     "contenuto intimo o non professionale",
-    "violenza",
-    "armi",
-    "droghe",
     "sexual",
     "sexual/minors",
-    "violence",
-    "violence/graphic",
-    "illicit",
-    "illicit/violent",
 }
 
 
@@ -3226,12 +3204,6 @@ def is_sensitive_visual_category(category: str) -> bool:
         or "nudita" in normalized
         or "nude" in normalized
         or "intim" in normalized
-        or "violen" in normalized
-        or "weapon" in normalized
-        or "armi" in normalized
-        or "drug" in normalized
-        or "drog" in normalized
-        or "illicit" in normalized
     )
 
 
@@ -3242,17 +3214,16 @@ def build_visual_analysis_result(
     failed_count: int,
     content_count: Optional[int] = None,
 ) -> Dict:
-    provider_flagged_results = [result for result in analyzed if result.get("flagged")]
+    flagged_results = [result for result in analyzed if result.get("flagged")]
     sensitive_results = [
         result
-        for result in provider_flagged_results
+        for result in flagged_results
         if any(is_sensitive_visual_category(category) for category in result.get("categories", []))
     ]
     categories = sorted({
         category
-        for result in sensitive_results
+        for result in flagged_results
         for category in result.get("categories", [])
-        if is_sensitive_visual_category(category)
     })
     incomplete_message = f" {failed_count} media non sono risultati leggibili." if failed_count else ""
     analyzed_content_count = len(analyzed) if content_count is None else content_count
@@ -3272,13 +3243,13 @@ def build_visual_analysis_result(
         "analyzed_count": len(analyzed),
         "analyzed_content_count": analyzed_content_count,
         "analyzed_preview_count": preview_count,
-        "flagged_count": len(sensitive_results),
+        "flagged_count": len(flagged_results),
         "sensitive_flagged_count": len(sensitive_results),
         "failed_count": failed_count,
         "flagged_categories": categories,
         "message": (
-            f"{scope_message}: {len(sensitive_results)} mostrano possibili contenuti sensibili.{incomplete_message}"
-            if sensitive_results
+            f"{scope_message}: {len(flagged_results)} richiedono una verifica manuale.{incomplete_message}"
+            if flagged_results
             else (
                 f"{scope_message}: "
                 f"non sono emersi contenuti sensibili evidenti.{incomplete_message}"
@@ -3301,11 +3272,10 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
             '{"flagged": boolean, "categories": string[], "summary": string}. '
             "Use categories only from: nudita, contenuto sessuale esplicito, "
             "contenuto intimo o non professionale, violenza, armi, droghe, "
-            "Flag intimate, revealing, underwear, "
+            "linguaggio offensivo visibile. Flag intimate, revealing, underwear, "
             "topless, nude, or sexually suggestive images even when they are not explicit. "
             "Do not flag pets, landscapes, food, hobbies, or neutral casual photos unless "
-            "another listed visual risk is present. Ignore all written text, usernames, bios, "
-            "captions, comments, and interface labels. Keep summary brief and factual."
+            "another listed risk is visible. Keep summary brief and factual."
         )
     payload = {
         "model": OLLAMA_VISION_MODEL,
@@ -3348,6 +3318,7 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
             "violenza": ("violence", "violent", "blood", "injury", "wound"),
             "armi": ("weapon", "gun", "rifle", "knife", "firearm"),
             "droghe": ("drug", "cocaine", "heroin", "marijuana", "syringe"),
+            "linguaggio offensivo visibile": ("offensive language", "slur", "insult"),
         }
         categories = [
             category
@@ -3368,6 +3339,7 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
         "violenza",
         "armi",
         "droghe",
+        "linguaggio offensivo visibile",
     }
     categories = [
         str(category)
@@ -4190,7 +4162,7 @@ def classify_additional_link(url: str, sources: List[Dict[str, str]], identity: 
             "platform": "github" if is_github_link else "generic",
             "message": (
                 "Non e stato possibile analizzare direttamente il profilo GitHub dal link fornito. "
-                "Verifica che lo username sia riconducibile al tuo nome e cognome."
+                "Carica uno screenshot del profilo GitHub per rendere l'analisi digitale piu completa."
                 if is_github_link
                 else "Il link aggiuntivo e stato registrato, ma non risultano contenuti pubblici accessibili."
                 f"{blocked_note}"
@@ -4227,7 +4199,7 @@ def classify_additional_link(url: str, sources: List[Dict[str, str]], identity: 
         "platform": platform,
         "message": (
             "Non e stato possibile analizzare direttamente il profilo GitHub dal link fornito. "
-            "Verifica che lo username sia riconducibile al tuo nome e cognome."
+            "Carica uno screenshot del profilo GitHub per rendere l'analisi digitale piu completa."
             if is_github_link and identity["status"] == "unverified"
             else f"Il link risulta essere un {link_type}, ma non posso attribuirlo con certezza al candidato."
             if identity["status"] == "unverified"
@@ -4524,7 +4496,7 @@ def summarize_screenshot_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
         "count": screenshots_count,
         "flagged_count": flagged_count,
         "sensitive_flagged_count": sensitive_flagged_count,
-        "safe_content": bool(valid_batches) and sensitive_flagged_count == 0,
+        "safe_content": bool(valid_batches) and flagged_count == 0,
         "profile_types": sorted({str(batch.get("profile_type") or "") for batch in valid_batches if batch.get("profile_type")}),
         "message": (
             f"Sono stati caricati {screenshots_count} screenshot validi di profili digitali."
@@ -4805,388 +4777,6 @@ def evaluate_linkedin_cv_coherence(cv_text: str, linkedin_text: str) -> Dict[str
     }
 
 
-DIGITAL_SECTION_POINTS = {
-    "linkedin": {"allineato": 40, "da_migliorare": 20, "da_risolvere": 0},
-    "instagram": {"allineato": 30, "da_migliorare": 15, "da_risolvere": 0},
-    "github": {"allineato": 30, "da_migliorare": 15, "da_risolvere": 0},
-}
-
-DIGITAL_SCORE_COPY = (
-    (29, "Profilo digitale molto incompleto", "La tua presenza online non è verificabile dai recruiter. Collegare i profili principali è il primo passo."),
-    (49, "Profilo digitale parziale", "Alcuni profili sono presenti ma incompleti o non verificati. Pochi passi possono migliorare significativamente il tuo score."),
-    (69, "Buon punto di partenza", "La presenza digitale è parzialmente allineata al CV. Completa i profili mancanti per massimizzare l'impatto."),
-    (89, "Profilo digitale solido", "La maggior parte dei profili è coerente con il CV. Risolvi le ultime aree per raggiungere la piena coerenza."),
-    (100, "Profilo digitale eccellente", "CV e presenza online sono perfettamente allineati. I recruiter troveranno un profilo professionale coerente su tutti i canali."),
-)
-
-
-def split_candidate_identity(value: Any) -> tuple[str, str]:
-    tokens = [
-        token
-        for token in re.findall(r"[a-z]+", strip_accents(str(value or "")).lower())
-        if len(token) >= 2
-    ]
-    if len(tokens) < 2:
-        return "", ""
-    return tokens[0], tokens[-1]
-
-
-def identity_names_match(first_name: str, surname: str, other_first_name: str, other_surname: str) -> bool:
-    return bool(
-        first_name
-        and surname
-        and other_first_name
-        and other_surname
-        and first_name == other_first_name
-        and surname == other_surname
-    )
-
-
-def profile_screenshot_state(evidence: Dict[str, Any], profile_type: str) -> Dict[str, Any]:
-    batches = [
-        batch
-        for batch in (evidence.get("social_screenshot_batches") or [])
-        if isinstance(batch, dict)
-        and batch.get("valid")
-        and batch.get("profile_type") == profile_type
-    ]
-    sensitive_count = sum(
-        int(batch.get("sensitive_flagged_count", 0) or 0)
-        for batch in batches
-    )
-    return {
-        "uploaded": bool(batches),
-        "sensitive": sensitive_count > 0,
-        "sensitive_count": sensitive_count,
-    }
-
-
-def instagram_preview_handle(sources: List[Dict[str, str]]) -> str:
-    for source in sources or []:
-        if source.get("kind") != "instagram_public_metadata":
-            continue
-        handle = extract_social_username(source.get("url", ""), "instagram.com")
-        if handle:
-            return normalize_instagram_handle(handle).lower()
-    return ""
-
-
-def digital_headline_and_summary(score: int) -> tuple[str, str]:
-    for upper_bound, headline, summary in DIGITAL_SCORE_COPY:
-        if score <= upper_bound:
-            return headline, summary
-    return DIGITAL_SCORE_COPY[-1][1], DIGITAL_SCORE_COPY[-1][2]
-
-
-def evaluate_linkedin_section(user: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[str, str]:
-    has_url = bool(user.get("linkedin_url"))
-    export_text = str(user.get("linkedin_profile_text") or "").strip()
-    has_export = bool(export_text)
-    if not has_url and not has_export:
-        return {
-            "title": "LinkedIn",
-            "status": "da_risolvere",
-            "description": "Nessun profilo LinkedIn collegato. I recruiter cercano quasi sempre il candidato su LinkedIn prima del colloquio.",
-            "coach_tip": "Crea o collega il tuo profilo LinkedIn e carica l'esportazione PDF per sbloccare l'analisi completa.",
-        }
-    if has_url and not has_export:
-        return {
-            "title": "LinkedIn",
-            "status": "da_migliorare",
-            "description": "Il link LinkedIn è presente ma non è stata caricata l'esportazione PDF. Il confronto è parziale.",
-            "coach_tip": "Scarica il tuo profilo LinkedIn come PDF (Altro → Salva come PDF) e caricalo per un'analisi completa.",
-        }
-    if has_export and not has_url:
-        return {
-            "title": "LinkedIn",
-            "status": "da_migliorare",
-            "description": "L'esportazione LinkedIn è stata caricata ma il link pubblico non è stato fornito. Non è possibile verificare la visibilità del profilo.",
-            "coach_tip": "Aggiungi il link al tuo profilo LinkedIn pubblico per completare la verifica.",
-        }
-
-    cv_name = str((evidence.get("cv_detected_name") or {}).get("name") or "")
-    export_name = str(extract_candidate_name_from_cv(export_text).get("name") or "")
-    cv_first, cv_surname = split_candidate_identity(cv_name)
-    export_first, export_surname = split_candidate_identity(export_name)
-    coherence = evidence.get("linkedin_cv_coherence") or {}
-    names_match = identity_names_match(cv_first, cv_surname, export_first, export_surname)
-    professional_data_diverge = coherence.get("status") == "warning"
-    if not names_match or professional_data_diverge:
-        return {
-            "title": "LinkedIn",
-            "status": "da_migliorare" if cv_first and export_first else "da_risolvere",
-            "description": "Nome, cognome o esperienze nel profilo LinkedIn non corrispondono a quelli del CV. Potrebbe generare dubbi nei recruiter.",
-            "coach_tip": "Allinea le informazioni tra CV e LinkedIn: verifica nome completo, ruoli e date di impiego.",
-        }
-    return {
-        "title": "LinkedIn",
-        "status": "allineato",
-        "description": "Profilo LinkedIn e CV risultano coerenti: nome, cognome e principali esperienze coincidono.",
-        "coach_tip": "Ottimo lavoro. Mantieni il profilo aggiornato ogni volta che aggiorni il CV.",
-    }
-
-
-def evaluate_instagram_section(user: Dict[str, Any], sources: List[Dict[str, str]], evidence: Dict[str, Any]) -> Dict[str, str]:
-    inserted_handle = normalize_instagram_handle(user.get("instagram_handle")).lower()
-    screenshots = profile_screenshot_state(evidence, "instagram")
-    if not inserted_handle:
-        return {
-            "title": "Instagram",
-            "status": "da_risolvere",
-            "description": "Nessun account Instagram collegato. Non è possibile verificare se nome e cognome corrispondono. Molti recruiter verificano i profili social del candidato.",
-            "coach_tip": "Se hai un profilo Instagram professionale o creativo, aggiungilo per aumentare la tua visibilità.",
-        }
-
-    name_verification = verify_instagram_slug(user, inserted_handle)
-    name_matches = bool(name_verification.get("matched"))
-    name_message = (
-        "Il nome e cognome corrispondono all'handle Instagram."
-        if name_matches
-        else "Il nome e cognome non corrispondono all'handle Instagram."
-    )
-    if not name_matches:
-        return {
-            "title": "Instagram",
-            "status": "da_migliorare",
-            "description": f"{name_message} L'handle non rende il profilo immediatamente riconducibile al candidato.",
-            "coach_tip": "Valuta un handle riconoscibile basato su nome e cognome, anche con iniziali, separatori o numeri.",
-        }
-    if not screenshots["uploaded"]:
-        return {
-            "title": "Instagram",
-            "status": "da_migliorare",
-            "description": f"{name_message} Handle inserito ma nessuno screenshot caricato. Non è possibile completare il controllo sulla presenza di immagini sensibili.",
-            "coach_tip": "Carica 2–3 screenshot del profilo per verificare esclusivamente l'eventuale presenza di immagini sensibili.",
-        }
-
-    if screenshots["sensitive"]:
-        return {
-            "title": "Instagram",
-            "status": "da_migliorare",
-            "description": f"{name_message} Gli screenshot caricati mostrano contenuti che potrebbero risultare inappropriati in un contesto professionale.",
-            "coach_tip": "Valuta di rendere privati o rimuovere i post che potrebbero influenzare negativamente la percezione dei recruiter.",
-        }
-    return {
-        "title": "Instagram",
-        "status": "allineato",
-        "description": f"{name_message} Gli screenshot sono presenti e non mostrano contenuti sensibili. Presenza digitale coerente.",
-        "coach_tip": "Profilo in ordine: nome e cognome sono riconoscibili e le immagini controllate non presentano contenuti sensibili.",
-    }
-
-
-def evaluate_github_section(user: Dict[str, Any], evidence: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    github_profile = evidence.get("github_profile") or {}
-    is_github = bool(github_profile.get("is_github_link"))
-    if not is_github:
-        return {
-            "title": "GitHub",
-            "status": "da_risolvere",
-            "description": "Nessun profilo GitHub collegato. Per ruoli tecnici è spesso il primo riferimento consultato dai recruiter.",
-            "coach_tip": "Crea o collega il tuo profilo GitHub con almeno un repository pubblico che mostri le tue competenze.",
-        }
-
-    username_match = github_profile.get("username_match") or {}
-    if not username_match.get("matched"):
-        return {
-            "title": "GitHub",
-            "status": "da_migliorare",
-            "description": "L'URL GitHub è presente ma il nome utente non è chiaramente riconducibile al candidato. Potrebbe creare confusione.",
-            "coach_tip": "Se possibile, aggiorna il tuo username GitHub con nome e cognome per essere immediatamente riconoscibile.",
-        }
-    return {
-        "title": "GitHub",
-        "status": "allineato",
-        "description": "Profilo GitHub riconducibile al candidato tramite URL e nome utente.",
-        "coach_tip": "Ottimo. Continua a mantenere i repository pubblici aggiornati e ben documentati con un README chiaro.",
-    }
-
-
-def build_deterministic_digital_analysis(
-    user: Dict[str, Any],
-    sources: List[Dict[str, str]],
-    evidence: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    evidence = evidence or build_analysis_evidence(user, sources)
-    linkedin = evaluate_linkedin_section(user, evidence)
-    instagram = evaluate_instagram_section(user, sources, evidence)
-    github = evaluate_github_section(user, evidence)
-    findings = [linkedin, instagram, github]
-
-    score = DIGITAL_SECTION_POINTS["linkedin"][linkedin["status"]]
-    score += DIGITAL_SECTION_POINTS["instagram"][instagram["status"]]
-    score += DIGITAL_SECTION_POINTS["github"][github["status"]]
-    headline, summary = digital_headline_and_summary(score)
-
-    instagram_screenshots = profile_screenshot_state(evidence, "instagram")
-    cv_name = str((evidence.get("cv_detected_name") or {}).get("name") or "")
-    export_text = str(user.get("linkedin_profile_text") or "")
-    export_name = str(extract_candidate_name_from_cv(export_text).get("name") or "")
-    cv_first, cv_surname = split_candidate_identity(cv_name)
-    export_first, export_surname = split_candidate_identity(export_name)
-    linkedin_export_matches = identity_names_match(
-        cv_first,
-        cv_surname,
-        export_first,
-        export_surname,
-    )
-    linkedin_export_status = (
-        "non caricato"
-        if not export_text
-        else "caricato"
-        if linkedin_export_matches
-        else "caricato ma non corrispondente"
-    )
-    inserted_instagram = normalize_instagram_handle(user.get("instagram_handle")).lower()
-    instagram_name_matches = bool(
-        (evidence.get("instagram_slug_verification") or {}).get("matched")
-        or verify_instagram_slug(user, inserted_instagram).get("matched")
-    )
-    instagram_status = (
-        "non caricato"
-        if not inserted_instagram
-        else "caricato"
-        if instagram_name_matches
-        else "caricato ma non corrispondente"
-    )
-    github_username_matches = bool(
-        ((evidence.get("github_profile") or {}).get("username_match") or {}).get("matched")
-    )
-    github_status = (
-        "non caricato"
-        if not (evidence.get("github_profile") or {}).get("is_github_link")
-        else "caricato"
-        if github_username_matches
-        else "caricato ma non corrispondente"
-    )
-    return {
-        "score": score,
-        "headline": headline,
-        "summary": summary,
-        "sources": {
-            "linkedin_url": "caricato" if user.get("linkedin_url") else "non caricato",
-            "linkedin_export": linkedin_export_status,
-            "instagram": instagram_status,
-            "instagram_screenshots": (
-                "non caricati"
-                if not instagram_screenshots["uploaded"]
-                else "caricati con contenuti sensibili"
-                if instagram_screenshots["sensitive"]
-                else "caricati"
-            ),
-            "github": github_status,
-        },
-        "findings": findings,
-        "analysis_evidence": evidence,
-        "linkedin_basic_info": build_linkedin_basic_info(user.get("linkedin_url", "")),
-    }
-
-
-def screenshot_analysis_is_sensitive(value: Any) -> bool:
-    normalized = normalize_plain_text(value or "")
-    if not normalized:
-        return False
-    safe_markers = (
-        "nessun contenuto sensibile",
-        "nessun contenuto inappropriato",
-        "non sono presenti contenuti sensibili",
-        "senza contenuti sensibili",
-    )
-    if any(marker in normalized for marker in safe_markers):
-        return False
-    return any(
-        marker in normalized
-        for marker in ("sensibile", "inappropriato", "inappropriata", "violenza", "nudita", "droga")
-    )
-
-
-def build_digital_analysis_from_payload(data: DigitalCoherenceInput) -> Dict[str, Any]:
-    cv_full_name = " ".join(filter(None, [data.cv_name, data.cv_surname])).strip()
-    export_full_name = " ".join(
-        filter(None, [data.linkedin_export_name, data.linkedin_export_surname])
-    ).strip()
-    cv_text = cv_full_name
-    if data.github_url:
-        cv_text = f"{cv_text}\nGitHub"
-    linkedin_profile_text = "\n".join(
-        part
-        for part in [
-            export_full_name,
-            data.linkedin_export_role or "",
-            ", ".join(data.linkedin_export_companies),
-        ]
-        if part
-    )
-    user = {
-        "name": cv_full_name,
-        "cv_text": cv_text,
-        "linkedin_url": str(data.linkedin_url or "").strip(),
-        "linkedin_profile_text": linkedin_profile_text,
-        "instagram_handle": str(data.instagram_handle or "").strip(),
-        "portfolio_url": str(data.github_url or "").strip(),
-    }
-    sources = []
-    preview_handle = normalize_instagram_handle(data.instagram_handle_from_profile)
-    if preview_handle:
-        sources.append({
-            "kind": "instagram_public_metadata",
-            "url": f"https://www.instagram.com/{preview_handle}/",
-            "title": f"Instagram @{preview_handle}",
-            "content": preview_handle,
-        })
-
-    screenshot_batches = []
-    for profile_type, analysis in (("instagram", data.instagram_screenshots_analysis),):
-        if not str(analysis or "").strip():
-            continue
-        sensitive = screenshot_analysis_is_sensitive(analysis)
-        screenshot_batches.append({
-            "valid": True,
-            "profile_type": profile_type,
-            "analyzed_count": 1,
-            "flagged_count": int(sensitive),
-            "sensitive_flagged_count": int(sensitive),
-        })
-
-    github_username = str(data.github_username_from_url or "").strip()
-    if not github_username and data.github_url:
-        github_username = extract_social_username(data.github_url, "github.com")
-    github_username_match = (
-        match_personal_brand_username(user, github_username)
-        if github_username
-        else {"matched": False}
-    )
-    cv_first, cv_surname = split_candidate_identity(cv_full_name)
-    export_first, export_surname = split_candidate_identity(export_full_name)
-    linkedin_names_match = identity_names_match(
-        cv_first,
-        cv_surname,
-        export_first,
-        export_surname,
-    )
-    evidence = {
-        "cv_detected_name": {"name": cv_full_name},
-        "linkedin_cv_coherence": {
-            "status": "success" if linkedin_names_match else "unverified",
-            "details": ["Nome e cognome coerenti"] if linkedin_names_match else [],
-        },
-        "github_profile": {
-            "is_github_link": bool(data.github_url),
-            "username": github_username,
-            "username_match": github_username_match,
-        },
-        "instagram_handle_from_profile": preview_handle,
-        "social_screenshot_batches": screenshot_batches,
-    }
-    result = build_deterministic_digital_analysis(user, sources, evidence)
-    return {
-        "score": result["score"],
-        "headline": result["headline"],
-        "summary": result["summary"],
-        "sources": result["sources"],
-        "findings": result["findings"],
-    }
-
-
 def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     official_profile_sources = build_official_profile_sources(user)
     linkedin_export_identity = evaluate_profile_identity(user, sources, {"linkedin_export"}, "PDF LinkedIn")
@@ -5231,13 +4821,6 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     screenshot_summary = summarize_screenshot_evidence({
         "social_screenshot_batches": social_screenshot_batches,
     })
-    instagram_screenshot_summary = summarize_screenshot_evidence({
-        "social_screenshot_batches": [
-            batch
-            for batch in social_screenshot_batches
-            if batch.get("profile_type") == "instagram"
-        ],
-    })
     github_profile = build_github_profile_evidence(user, sources)
     verified_profiles = [
         profile
@@ -5281,7 +4864,6 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "instagram_identity": instagram_identity,
         "cv_instagram_name_match": cv_instagram_match,
         "instagram_visibility": instagram_visibility,
-        "instagram_handle_from_profile": instagram_preview_handle(sources),
         "instagram_metadata_found": has_public_instagram_metadata(sources),
         "instagram_media_analyzed": visual_media_analysis.get("analyzed_content_count", 0) > 0,
         "public_preview_analyzed": visual_media_analysis.get("analyzed_preview_count", 0) > 0,
@@ -5305,7 +4887,6 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "linkedin_public_verified": linkedin_public_verified,
         "linkedin_public_snippet_found": any(source.get("kind") == "linkedin_public_snippet" for source in sources),
         "screenshots_summary": screenshot_summary,
-        "instagram_screenshots_summary": instagram_screenshot_summary,
         "verified_profiles": verified_profiles,
         "verified_profile_count": len(verified_profiles),
         "can_compare_with_cv": bool(
@@ -5687,10 +5268,6 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
 
 
 def analyze_digital_profile(user: Dict, sources: List[Dict[str, str]]) -> Dict:
-    return build_deterministic_digital_analysis(user, sources)
-
-    # Legacy generative path kept below for compatibility while the deterministic
-    # contract is rolled out. It is intentionally bypassed.
     fallback = build_fallback_digital_analysis(user, sources)
     has_linkedin = bool(user.get("linkedin_url"))
     has_instagram = bool(user.get("instagram_handle"))
@@ -5789,9 +5366,7 @@ Regole:
             and "instagram" in str(result.get("summary", "")).lower()
         ):
             result["summary"] = (
-                "Il confronto usa il CV e i profili pubblici verificabili disponibili. "
-                "Per Instagram risultano accessibili soltanto metadati o anteprime pubbliche: "
-                "foto e post non sono stati analizzati."
+                "Il confronto usa il CV e i profili pubblici verificabili disponibili."
             )
         if not evidence["can_compare_with_cv"]:
             result["headline"] = "Analisi non disponibile"
@@ -14786,11 +14361,6 @@ def analyze_user_cv_for_optimization(
     }
 
 
-@app.post("/digital-coherence-analysis")
-def analyze_digital_coherence_payload(data: DigitalCoherenceInput):
-    return build_digital_analysis_from_payload(data)
-
-
 @app.put("/users/{user_id}/digital-presence")
 def update_digital_presence(
     user_id: int,
@@ -14822,28 +14392,41 @@ def update_digital_presence(
     previous_analysis = json.loads(existing_user[19]) if existing_user[19] else {}
     previous_evidence = previous_analysis.get("analysis_evidence", {})
     previous_profile_analyses = dict(previous_evidence.get("visual_media_analyses", {}))
-    previous_screenshot_batches = list(previous_evidence.get("social_screenshot_batches", []))
+    previous_text_analyses = dict(previous_evidence.get("social_text_analyses", {}))
+    same_target_role = (
+        normalize_plain_text(previous_evidence.get("target_role"))
+        == normalize_plain_text(public_user.get("target_role"))
+    )
     same_instagram_profile = (
         normalize_instagram_handle(existing_user[18])
         == normalize_instagram_handle(public_user["instagram_handle"])
     )
     if not same_instagram_profile:
         previous_profile_analyses.pop("instagram", None)
-    previous_profile_analyses.pop("github", None)
-    preserved_screenshot_batches = [
-        batch
-        for batch in previous_screenshot_batches
-        if batch.get("profile_type") == "instagram" and same_instagram_profile
-    ]
-    if previous_profile_analyses or preserved_screenshot_batches:
+        previous_text_analyses.pop("instagram", None)
+    elif not same_target_role:
+        for profile_type, analysis in previous_text_analyses.items():
+            ocr = analysis.get("ocr") or {}
+            analysis["evaluation"] = evaluate_social_profile_text(
+                ocr.get("extracted_text", ""),
+                profile_type,
+                public_user,
+            )
+    if previous_profile_analyses or previous_text_analyses:
         evidence = digital_analysis.setdefault("analysis_evidence", {})
         evidence["visual_media_analyses"] = previous_profile_analyses
-        evidence["social_screenshot_batches"] = preserved_screenshot_batches
+        evidence["social_text_analyses"] = previous_text_analyses
+        evidence["social_screenshot_batches"] = list(previous_evidence.get("social_screenshot_batches", []))
         evidence["profile_screenshots_analyzed"] = previous_evidence.get(
             "profile_screenshots_analyzed", sorted(previous_profile_analyses)
         )
         evidence["instagram_media_analyzed"] = (
             previous_evidence.get("instagram_media_analyzed", False)
+            if same_instagram_profile
+            else False
+        )
+        evidence["instagram_bio_analyzed"] = (
+            previous_evidence.get("instagram_bio_analyzed", False)
             if same_instagram_profile
             else False
         )
@@ -14857,17 +14440,21 @@ def update_digital_presence(
         )
         if previous_evidence.get("visual_media_analysis"):
             evidence["visual_media_analysis"] = previous_evidence["visual_media_analysis"]
-        evidence["screenshots_summary"] = summarize_screenshot_evidence(evidence)
-        evidence["instagram_screenshots_summary"] = summarize_screenshot_evidence({
-            "social_screenshot_batches": preserved_screenshot_batches,
-        })
-        evidence.pop("social_text_analyses", None)
-        evidence.pop("instagram_bio_analyzed", None)
-        digital_analysis = build_deterministic_digital_analysis(
-            public_user,
-            sources,
-            evidence,
-        )
+        digital_analysis["score"] = compute_digital_presence_score(evidence)
+
+        preserved_titles = {"foto e contenuti pubblici", "bio e testo profilo"}
+        preserved_findings = [
+            finding
+            for finding in previous_analysis.get("findings", [])
+            if str(finding.get("title", "")).strip().lower() in preserved_titles
+        ]
+        if preserved_findings:
+            digital_analysis["findings"] = [
+                finding
+                for finding in digital_analysis.get("findings", [])
+                if str(finding.get("title", "")).strip().lower() not in preserved_titles
+            ]
+            digital_analysis["findings"].extend(preserved_findings)
     digital_analysis_json = json.dumps(digital_analysis, ensure_ascii=False)
 
     cursor.execute("""
@@ -14927,6 +14514,13 @@ async def analyze_social_screenshots(
             "image_url": {"url": f"data:{content_type};base64,{encoded}"},
         })
 
+    ocr_analysis = await run_in_threadpool(
+        extract_social_screenshot_texts,
+        image_inputs,
+    )
+    content_classification = classify_social_screenshot_text(ocr_analysis.get("extracted_text", ""))
+    if not content_classification["valid"]:
+        raise HTTPException(status_code=400, detail=content_classification["reason"])
     screenshot_analysis = await run_in_threadpool(
         moderate_visual_inputs,
         image_inputs,
@@ -14952,6 +14546,12 @@ async def analyze_social_screenshots(
         )
         conn.commit()
         user = fetch_user_by_id(cursor, user_id)
+    profile_text_analysis = evaluate_social_profile_text(
+        ocr_analysis.get("extracted_text", ""),
+        profile_type,
+        user_to_response(user),
+    )
+
     digital_analysis = json.loads(user[19]) if user[19] else {
         "score": 0,
         "headline": "Analisi screenshot completata",
@@ -14977,7 +14577,10 @@ async def analyze_social_screenshots(
         "profile_type": profile_type,
         "profile_label": VISUAL_PROFILE_LABELS[profile_type],
         "valid": True,
+        "classification": content_classification,
+        "ocr": ocr_analysis,
         "visual_analysis": screenshot_analysis,
+        "text_analysis": profile_text_analysis,
         "flagged_count": int(screenshot_analysis.get("flagged_count", 0) or 0),
         "sensitive_flagged_count": int(screenshot_analysis.get("sensitive_flagged_count", 0) or 0),
         "analyzed_count": int(screenshot_analysis.get("analyzed_count", 0) or 0),
@@ -14992,7 +14595,8 @@ async def analyze_social_screenshots(
         "profile_label": VISUAL_PROFILE_LABELS[profile_type],
         "batch_count": sum(1 for item in profile_batches if item.get("profile_type") == profile_type),
     }
-    evidence["visual_score_adjustment"] = 0
+    visual_score_adjustment = calculate_social_screenshot_score_adjustment(profile_batches)
+    evidence["visual_score_adjustment"] = visual_score_adjustment
     evidence["visual_media_analysis"] = profile_analyses[profile_type]
     evidence["instagram_media_analyzed"] = any(
         item.get("profile_type") == "instagram" and int(item.get("analyzed_count", 0) or 0) > 0
@@ -15006,22 +14610,90 @@ async def analyze_social_screenshots(
         }
     )
     evidence["screenshots_summary"] = summarize_screenshot_evidence(evidence)
-    evidence["instagram_screenshots_summary"] = summarize_screenshot_evidence({
-        "social_screenshot_batches": [
-            batch
-            for batch in profile_batches
-            if batch.get("profile_type") == "instagram"
-        ],
+    text_analyses = evidence.setdefault("social_text_analyses", {})
+    previous_text_entry = text_analyses.get(profile_type, {})
+    history = list(previous_text_entry.get("history", []))
+    history.append({
+        "ocr": ocr_analysis,
+        "evaluation": profile_text_analysis,
+        "classification": content_classification,
     })
-    evidence.pop("social_text_analyses", None)
-    evidence.pop("instagram_bio_analyzed", None)
-    analysis_user = user_to_response(user)
-    analysis_user["cv_text"] = recover_saved_cv_text(cursor, user)
-    analysis_user["linkedin_profile_text"] = user[21] or ""
-    digital_analysis = build_deterministic_digital_analysis(
-        analysis_user,
-        [],
-        evidence,
+    text_analyses[profile_type] = {
+        "ocr": ocr_analysis,
+        "evaluation": profile_text_analysis,
+        "classification": content_classification,
+        "history": history[-6:],
+    }
+    evidence["instagram_bio_analyzed"] = bool(
+        any(
+            item.get("ocr", {}).get("extracted_text")
+            for item in (text_analyses.get("instagram", {}) or {}).get("history", [])
+        )
+        or text_analyses.get("instagram", {}).get("ocr", {}).get("extracted_text")
+    )
+    digital_analysis["score"] = compute_digital_presence_score(evidence)
+    findings = digital_analysis.setdefault("findings", [])
+    media_finding = next(
+        (
+            finding
+            for finding in findings
+            if "foto" in str(finding.get("title", "")).lower()
+            or "contenuti pubblici" in str(finding.get("title", "")).lower()
+        ),
+        None,
+    )
+    if not media_finding:
+        media_finding = {"title": "Foto e contenuti pubblici", "coach_tip": ""}
+        findings.append(media_finding)
+    media_finding["status"] = (
+        "warning"
+        if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
+        else "success"
+    )
+    media_finding["description"] = describe_profile_screenshot_analyses(profile_analyses)
+    media_finding["coach_tip"] = (
+        "Rivedi manualmente i contenuti intimi o sensibili segnalati prima di candidarti."
+        if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
+        else "Gli screenshot non mostrano contenuti sensibili evidenti e ricevono un piccolo bonus nel punteggio."
+    )
+    text_finding = next(
+        (
+            finding
+            for finding in findings
+            if str(finding.get("title", "")).lower() == "bio e testo profilo"
+        ),
+        None,
+    )
+    if not text_finding:
+        text_finding = {"title": "Bio e testo profilo"}
+        findings.append(text_finding)
+    text_finding["status"] = (
+        "success" if profile_text_analysis.get("status") == "aligned" else "warning"
+    )
+    text_finding["description"] = (
+        f"{ocr_analysis.get('message', '')} {profile_text_analysis.get('message', '')}"
+    ).strip()
+    text_finding["coach_tip"] = " ".join(profile_text_analysis.get("suggestions") or []) or (
+        "Mantieni la bio sintetica, verificabile e coerente con il ruolo target."
+    )
+    score_finding = next(
+        (
+            finding
+            for finding in findings
+            if "punteggio" in str(finding.get("title", "")).lower() or "score" in str(finding.get("title", "")).lower()
+        ),
+        None,
+    )
+    if not score_finding:
+        score_finding = {"title": "Punteggio digitale"}
+        findings.append(score_finding)
+    score_finding["status"] = "success"
+    score_finding["description"] = (
+        f"Punteggio digitale aggiornato dopo l'aggiunta di {len(image_inputs)} screenshot validi. "
+        f"Contributo screenshot: {visual_score_adjustment:+d}."
+    )
+    score_finding["coach_tip"] = (
+        "Aggiungi screenshot validi di profili o piattaforme professionali per aggiornare il punteggio in modo cumulativo."
     )
 
     cursor.execute(
@@ -15036,7 +14708,9 @@ async def analyze_social_screenshots(
         "analysis": digital_analysis,
         "message": (
             f"{VISUAL_PROFILE_LABELS[profile_type]}: {screenshot_analysis['message']} "
-            f"Punteggio digitale aggiornato: {digital_analysis['score']}%."
+            f"{ocr_analysis.get('message', '')} "
+            f"Punteggio digitale aggiornato: {digital_analysis['score']}% "
+            f"(screenshot: {visual_score_adjustment:+d})."
         ),
     }
 
