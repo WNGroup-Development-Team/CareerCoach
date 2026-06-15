@@ -3136,7 +3136,7 @@ function App() {
       return;
     }
 
-    setCompany(nextCompany || "Generica");
+    setCompany(nextCompany || "Azienda Generica");
     setPersonalizeForm((current) => ({
       ...current,
       role: nextRole,
@@ -4958,32 +4958,7 @@ const screenshotUploadBoxes = [];
                     </label>
                   ))}
 
-                {cvOptimizationQuestions.length > 0 && (
-                  <div className="coach-suggestion-group">
-                    <strong>Domande facoltative</strong>
-                    {cvOptimizationQuestions.slice(0, 5).map((question, index) => (
-                      <label className="cv-additional-field" key={question.id || `${question.question}-${index}`}>
-                        <span>{question.question}</span>
-                        <textarea
-                          value={stripRepeatedQuestionFromAnswer(
-                            cvAdaptationAnswers[index] || "",
-                            question.question
-                          )}
-                          onChange={(event) => updateCvAdaptationAnswer(
-                            index,
-                            stripRepeatedQuestionFromAnswer(event.target.value, question.question)
-                          )}
-                          placeholder="Aggiungi una risposta reale e verificabile."
-                          rows={3}
-                        />
-                        {question.reason && <small>{question.reason}</small>}
-                        {cvFieldErrors.adaptation[index] && (
-                          <small className="cv-field-error">{cvFieldErrors.adaptation[index]}</small>
-                        )}
-                      </label>
-                    ))}
-                  </div>
-                )}
+            
 
                 {cvAdditionalDataError && (
                   <p className="cv-additional-error">{cvAdditionalDataError}</p>
