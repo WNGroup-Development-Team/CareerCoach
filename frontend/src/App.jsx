@@ -7,8 +7,8 @@ import PersonalizeExperience from "./PersonalizeExperience";
 import {
   SparkleIcon,
   LinkedInIcon,
-  LinkIcon,
   InstagramIcon,
+  GitHubIcon,
   CheckCircleIcon,
   ExportIcon,
   BrainIcon,
@@ -536,6 +536,13 @@ function normalizeProfileUrl(value = "") {
 }
 
 function normalizeDigitalAnalysis(analysis) {
+  const deterministicStatuses = new Set(["allineato", "da_migliorare", "da_risolvere"]);
+  if (
+    analysis?.findings?.length
+    && analysis.findings.every((finding) => deterministicStatuses.has(finding.status))
+  ) {
+    return analysis;
+  }
   if (!analysis?.findings || analysis.analysis_evidence?.instagram_media_analyzed === true) {
     return analysis;
   }
@@ -562,6 +569,36 @@ function normalizeDigitalAnalysis(analysis) {
       };
     }),
   };
+}
+
+function getDigitalFindingMeta(finding = {}) {
+  const status = String(finding.status || "warning").toLowerCase();
+  const title = String(finding.title || "").toLowerCase();
+
+  if (status === "success" || status === "allineato") {
+    return { tone: "success", label: "Allineato" };
+  }
+  if (status === "da_migliorare") {
+    return { tone: "warning", label: "Da migliorare" };
+  }
+  if (status === "da_risolvere" || title.includes("linkedin") || title.includes("coerenza cv")) {
+    return { tone: "danger", label: "Da risolvere" };
+  }
+  return { tone: "warning", label: "Da migliorare" };
+}
+
+function getDigitalFindingTitle(title = "") {
+  const normalized = String(title).trim().toLowerCase();
+  const titleMap = {
+    "coerenza linkedin": "LinkedIn",
+    "coerenza cv e profili": "Coerenza CV / Profili social",
+    "coerenza cv/profili": "Coerenza CV / Profili social",
+    "foto e contenuti pubblici": "Impatto recruiter",
+    "screenshot caricati": "Verifica screenshot",
+    "verifica screenshot": "Verifica screenshot",
+  };
+
+  return titleMap[normalized] || title;
 }
 
 function getCanonicalProfileKey(value = "") {
@@ -839,8 +876,12 @@ function App() {
   const profileImageInputRef = useRef(null);
   const screenshotAnalysisQueueRef = useRef([]);
   const screenshotAnalysisRunningRef = useRef(false);
+  const screenshotQueueGenerationRef = useRef(0);
+  const screenshotFileInputRef = useRef(null);
+  const selectedScreenshotFilesRef = useRef([]);
   const [linkedinUploadMessage, setLinkedinUploadMessage] = useState("");
   const [socialScreenshotMessages, setSocialScreenshotMessages] = useState({});
+  const [selectedScreenshotFiles, setSelectedScreenshotFiles] = useState([]);
   const [screenshotAnalysisProgress, setScreenshotAnalysisProgress] = useState({
     active: false,
     fileCount: 0,
@@ -1020,6 +1061,40 @@ function App() {
 
     return () => clearInterval(timer);
   }, [screenshotAnalysisProgress.active]);
+
+  useEffect(() => {
+    if (step === "cv-digital") {
+      return;
+    }
+
+    screenshotQueueGenerationRef.current += 1;
+    screenshotAnalysisQueueRef.current = [];
+    setSelectedScreenshotFiles((current) => {
+      current.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+      return [];
+    });
+    setSocialScreenshotMessages({});
+    setScreenshotAnalysisProgress({
+      active: false,
+      fileCount: 0,
+      queuedCount: 0,
+      elapsedSeconds: 0,
+      profileType: "",
+    });
+    if (screenshotFileInputRef.current) {
+      screenshotFileInputRef.current.value = "";
+    }
+  }, [step]);
+
+  useEffect(() => {
+    selectedScreenshotFilesRef.current = selectedScreenshotFiles;
+  }, [selectedScreenshotFiles]);
+
+  useEffect(() => () => {
+    selectedScreenshotFilesRef.current.forEach((item) => {
+      URL.revokeObjectURL(item.previewUrl);
+    });
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -2041,9 +2116,14 @@ function App() {
       return;
     }
 
+    const processGeneration = screenshotQueueGenerationRef.current;
     screenshotAnalysisRunningRef.current = true;
     while (screenshotAnalysisQueueRef.current.length) {
       const batch = screenshotAnalysisQueueRef.current.shift();
+      const batchGeneration = batch.generation;
+      if (batchGeneration !== screenshotQueueGenerationRef.current) {
+        continue;
+      }
       const queuedCount = screenshotAnalysisQueueRef.current.reduce(
         (total, queuedBatch) => total + queuedBatch.files.length,
         0
@@ -2066,6 +2146,9 @@ function App() {
           body: formData,
         }, 300000);
         const data = await response.json();
+        if (batchGeneration !== screenshotQueueGenerationRef.current) {
+          continue;
+        }
         if (!response.ok) {
           setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi degli screenshot.");
           continue;
@@ -2078,6 +2161,9 @@ function App() {
           [batch.profileType]: data.message || "Screenshot analizzati.",
         }));
       } catch (err) {
+        if (batchGeneration !== screenshotQueueGenerationRef.current) {
+          continue;
+        }
         console.error(err);
         setError(
           err?.name === "AbortError"
@@ -2088,6 +2174,9 @@ function App() {
     }
 
     screenshotAnalysisRunningRef.current = false;
+    if (processGeneration !== screenshotQueueGenerationRef.current) {
+      return;
+    }
     setScreenshotAnalysisProgress({
       active: false,
       fileCount: 0,
@@ -2109,6 +2198,7 @@ function App() {
       profileType,
       files: selectedFiles,
       instagramHandle: digitalPresence.instagram_handle.trim(),
+      generation: screenshotQueueGenerationRef.current,
     });
     const queuedCount = screenshotAnalysisQueueRef.current.reduce(
       (total, batch) => total + batch.files.length,
@@ -2128,6 +2218,60 @@ function App() {
         : "",
     }));
     processSocialScreenshotQueue();
+  };
+
+  const addSelectedScreenshotFiles = (files) => {
+    resetError();
+    const imageFiles = Array.from(files || []).filter((file) =>
+      (file?.type || "").startsWith("image/")
+    );
+    if (!imageFiles.length) {
+      setSocialScreenshotMessages((current) => ({
+        ...current,
+        instagram: "Seleziona immagini PNG, JPG o WebP.",
+      }));
+      return;
+    }
+
+    setSelectedScreenshotFiles((current) => {
+      const existingKeys = new Set(
+        current.map((item) => `${item.file.name}:${item.file.size}:${item.file.lastModified}`)
+      );
+      const availableSlots = Math.max(0, 8 - current.length);
+      const additions = imageFiles
+        .filter((file) => !existingKeys.has(`${file.name}:${file.size}:${file.lastModified}`))
+        .slice(0, availableSlots)
+        .map((file) => ({
+          id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+          file,
+          previewUrl: URL.createObjectURL(file),
+        }));
+      return [...current, ...additions];
+    });
+    setSocialScreenshotMessages((current) => ({ ...current, instagram: "" }));
+  };
+
+  const removeSelectedScreenshotFile = (fileId) => {
+    setSelectedScreenshotFiles((current) => {
+      const removed = current.find((item) => item.id === fileId);
+      if (removed) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return current.filter((item) => item.id !== fileId);
+    });
+  };
+
+  const submitSelectedScreenshots = () => {
+    if (!selectedScreenshotFiles.length) {
+      return;
+    }
+    const files = selectedScreenshotFiles.map((item) => item.file);
+    selectedScreenshotFiles.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    setSelectedScreenshotFiles([]);
+    if (screenshotFileInputRef.current) {
+      screenshotFileInputRef.current.value = "";
+    }
+    analyzeSocialScreenshots("instagram", files);
   };
 
   const analyzeCvOptimization = async (profileOverride = profile, fileOverride = null, targetOverride = null) => {
@@ -3084,14 +3228,20 @@ function App() {
   const isLinkedInConnected = profile.auth_provider === "linkedin";
   const hasAnyDigitalProfile = Boolean(
     digitalPresence.linkedin_url.trim() ||
+    digitalPresence.portfolio_url.trim() ||
     digitalPresence.instagram_handle.trim()
   );
   const canAnalyzeDigitalPresence = isLinkedInConnected || hasAnyDigitalProfile;
   const exactInstagramHandle = normalizeInstagramHandle(digitalPresence.instagram_handle || profile.instagram_handle || "");
   const linkedinProfileUrl = digitalPresence.linkedin_url || profile.linkedin_url || "";
+  const portfolioProfileUrl = digitalPresence.portfolio_url || profile.portfolio_url || "";
   const connectedDigitalProfiles = [
     linkedinProfileUrl ? { title: "Link LinkedIn pubblico", url: normalizeProfileUrl(linkedinProfileUrl) } : null,
     exactInstagramHandle ? { title: `Instagram @${exactInstagramHandle}`, url: `https://www.instagram.com/${exactInstagramHandle}/` } : null,
+    portfolioProfileUrl ? {
+      title: normalizeProfileUrl(portfolioProfileUrl).includes("github.com") ? "Profilo GitHub" : "Profilo collegato",
+      url: normalizeProfileUrl(portfolioProfileUrl),
+    } : null,
   ].filter(Boolean);
   const cvStrategyTargetRole = cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "ruolo target";
   const cvStrategyTargetCompany = cvOptimizationAnalysis?.target?.company || company || "azienda target";
@@ -3948,6 +4098,20 @@ function App() {
                   autoComplete="off"
                 />
 
+                <label className="digital-field-label">
+                  <span className="digital-field-icon" aria-hidden="true">
+                    <GitHubIcon />
+                  </span>
+                  GitHub <span className="optional-pill">opzionale</span>
+                </label>
+                <input
+                  className="digital-input"
+                  value={digitalPresence.portfolio_url}
+                  onChange={(event) => updateDigitalPresence("portfolio_url", event.target.value)}
+                  placeholder="https://github.com/tuonome"
+                  autoComplete="off"
+                />
+
                 {!canAnalyzeDigitalPresence && (
                   <p className="digital-profile-help">
                     Inserisci almeno un profilo online oppure salta questo passaggio.
@@ -3959,7 +4123,9 @@ function App() {
             {/* Card 2: screenshots */}
             <div className="digital-card digital-card--screens">
               <h3 className="digital-card-title">Screenshot del profilo</h3>
-              <p className="digital-card-subtitle">Fino a 8 immagini — vengono analizzate e non salvate</p>
+              <p className="digital-card-subtitle">
+                Fino a 8 immagini · controlliamo solo la presenza di contenuti sensibili e non le salviamo
+              </p>
 
               <div
                 className={`screenshot-dropzone digital-screenshot-dropzone ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
@@ -4006,7 +4172,7 @@ function App() {
                     return;
                   }
 
-                  analyzeSocialScreenshots("instagram", imageFiles);
+                  addSelectedScreenshotFiles(imageFiles);
                 }}
               >
                 <div className="screenshot-dropzone-content">
@@ -4015,11 +4181,13 @@ function App() {
 
                   <input
                     id="social-screenshot-files"
+                    ref={screenshotFileInputRef}
                     type="file"
                     accept="image/jpeg,image/png,image/webp"
                     multiple
+                    disabled={screenshotAnalysisProgress.active}
                     onChange={(event) => {
-                      analyzeSocialScreenshots("instagram", event.target.files);
+                      addSelectedScreenshotFiles(event.target.files);
                       event.target.value = "";
                     }}
                   />
@@ -4027,15 +4195,45 @@ function App() {
                     className="digital-upload-button"
                     htmlFor="social-screenshot-files"
                   >
-                    {screenshotAnalysisProgress.active ? "Aggiungi altri file" : "Scegli file"}
+                    {screenshotAnalysisProgress.active ? "Analisi in corso" : "Scegli file"}
                   </label>
+
+                  {selectedScreenshotFiles.length > 0 && (
+                    <>
+                      <div className="screenshot-selection-grid">
+                        {selectedScreenshotFiles.map((item) => (
+                          <div className="screenshot-selection-item" key={item.id}>
+                            <img src={item.previewUrl} alt={`Anteprima ${item.file.name}`} />
+                            <button
+                              type="button"
+                              onClick={() => removeSelectedScreenshotFile(item.id)}
+                              aria-label={`Rimuovi ${item.file.name}`}
+                              title="Rimuovi immagine"
+                            >
+                              ×
+                            </button>
+                            <span>{item.file.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        className="digital-analyze-screenshots-button"
+                        type="button"
+                        onClick={submitSelectedScreenshots}
+                        disabled={screenshotAnalysisProgress.active}
+                      >
+                        Analizza {selectedScreenshotFiles.length}{" "}
+                        {selectedScreenshotFiles.length === 1 ? "screenshot selezionato" : "screenshot selezionati"}
+                      </button>
+                    </>
+                  )}
 
                   {screenshotAnalysisProgress.active && (
                     <div className="screenshot-analysis-progress" role="status">
                       <div className="screenshot-analysis-spinner" />
                       <div>
                         <strong>
-                          Analisi locale di {screenshotAnalysisProgress.fileCount}{" "}
+                          Controllo contenuti sensibili su {screenshotAnalysisProgress.fileCount}{" "}
                           {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
                         </strong>
                         <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
@@ -4084,170 +4282,164 @@ function App() {
       )}
 
       {step === "cv-analysis" && (
-        <section className="cv-flow-page digital-profile-page digital-redesign-page">
-          <div className="cv-analysis-heading">
-            <h2>Analisi Coerenza Digitale</h2>
+        <section className="cv-flow-page digital-profile-page digital-results-page">
+          <div className="digital-results-heading">
+            <span>Risultato analisi</span>
+            <h2>Analisi coerenza digitale</h2>
             <p>Confronto tra il tuo CV e i profili online: cosa è allineato e cosa migliorare.</p>
           </div>
 
-          <div className="digital-redesign-cards">
-            {/* Card 1: score */}
-            <div className="digital-card digital-card--main">
-              <h3 className="digital-card-title">Score di coerenza</h3>
-              <p className="digital-card-subtitle">Quanto il tuo CV “parla” lo stesso linguaggio della tua presenza online</p>
-              <p className="digital-field-hint" style={{ marginTop: 0 }}>
-                Questo punteggio riguarda solo la presenza digitale. Il punteggio CV resta separato nella fase di ottimizzazione del curriculum.
-              </p>
-
+          <div className="digital-results-overview">
+            <article className="digital-results-panel digital-score-panel">
+              <h3>Score di coerenza</h3>
               <div
-                className="digital-analysis-score"
+                className="digital-results-score"
                 style={{
-                  background: `radial-gradient(circle at center, #ffffff 58%, transparent 60%), conic-gradient(#139ff2 0 ${digitalCoherenceScore}%, #dfe8ef ${digitalCoherenceScore}% 100%)`,
+                  background: `radial-gradient(circle at center, #ffffff 59%, transparent 61%), conic-gradient(#139ff2 0 ${digitalCoherenceScore}%, #dfe8ef ${digitalCoherenceScore}% 100%)`,
                 }}
               >
                 <span>{digitalCoherenceScore}%</span>
               </div>
-
-
-              <h4 style={{ margin: "14px 0 6px", color: "#263548", fontSize: 18, fontWeight: 900 }}>
-                {displayedDigitalAnalysis?.headline || digitalCoherenceScore >= 75
-                  ? "Allineamento forte"
-                  : digitalCoherenceScore >= 45
-                    ? "Buona base, margine di crescita"
-                    : "Coerenza da migliorare"}
+              <h4>
+                {displayedDigitalAnalysis?.headline || (
+                  digitalCoherenceScore >= 75
+                    ? "Allineamento forte"
+                    : digitalCoherenceScore >= 45
+                      ? "Buona base, margine di crescita"
+                      : "Coerenza da migliorare"
+                )}
               </h4>
-              <p style={{ margin: 0, color: "#6d7784", fontWeight: 800, lineHeight: 1.45, fontSize: 13 }}>
+              <p>
                 {displayedDigitalAnalysis?.summary ||
                   "Abbiamo confrontato solo i profili digitali inseriti per stimare l'impatto sulla presenza professionale."}
               </p>
-            </div>
+            </article>
 
-            {/* Card 2: evidence */}
             {digitalAnalysis?.analysis_evidence && (
-              <div className="digital-card digital-card--main">
-                <h3 className="digital-card-title">Cosa abbiamo confrontato davvero</h3>
-                <p className="digital-card-subtitle">Trasparenza su fonti e contenuti usati nell'analisi</p>
+              <article className="digital-results-panel digital-evidence-panel">
+                <h3>Cosa abbiamo confrontato</h3>
+                <div className="digital-evidence-table">
+                  <div>
+                    <span>CV</span>
+                    <strong className={digitalAnalysis.analysis_evidence.cv_profile_loaded ? "is-good" : "is-bad"}>
+                      {digitalAnalysis.analysis_evidence.cv_profile_loaded
+                        ? `Caricato · ${digitalAnalysis.analysis_evidence.cv_filename || profile.cv_filename || "CV"}`
+                        : "Non disponibile"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>LinkedIn export</span>
+                    <strong className={digitalAnalysis.analysis_evidence.linkedin_export_compared ? "is-good" : "is-bad"}>
+                      {digitalAnalysis.analysis_evidence.linkedin_export_compared
+                        ? `Caricato · ${digitalAnalysis.analysis_evidence.linkedin_export_filename || profile.linkedin_profile_filename || "PDF LinkedIn"}`
+                        : "Non caricato"}
+                    </strong>
+                  </div>
 
-                <div className="digital-fields">
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>CV:</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.cv_profile_loaded
-                      ? `caricato (${digitalAnalysis.analysis_evidence.cv_filename || profile.cv_filename || "CV"})`
-                      : "non disponibile"}
-                  </p>
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>LinkedIn (export):</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.linkedin_export_compared
-                      ? `caricato e confrontato (${digitalAnalysis.analysis_evidence.linkedin_export_filename || profile.linkedin_profile_filename || "PDF LinkedIn"})`
-                      : "non caricato"}
-                  </p>
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>LinkedIn pubblico:</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.linkedin_public_identity?.message || "—"}
-                  </p>
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>Fonti ufficiali:</strong>{" "}
-                    {(digitalAnalysis.analysis_evidence.official_profile_source_count || 0) > 0
-                      ? `${digitalAnalysis.analysis_evidence.official_profile_source_count} collegate${digitalAnalysis.analysis_evidence.linkedin_official_identity?.message ? ` - ${digitalAnalysis.analysis_evidence.linkedin_official_identity.message}` : ""}`
-                      : "non collegate"}
-                  </p>
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>Profili verificati:</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.verified_profile_count || 0}
-                  </p>
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>Instagram:</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.instagram_media_analyzed
-                      ? "screenshot o contenuti caricati analizzati"
-                      : digitalAnalysis.analysis_evidence.public_preview_analyzed
-                        ? "analizzata solo un'anteprima pubblica del profilo; foto e post non sono stati analizzati"
-                        : digitalAnalysis.analysis_evidence.instagram_metadata_found
-                          ? "profilo rintracciabile sul web: foto, video e post non sono stati analizzati"
-                          : "profilo non accessibile: foto e post non sono stati analizzati"}
-                  </p>
-
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>Bio Instagram:</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.instagram_bio_analyzed
-                      ? "testo estratto dallo screenshot e confrontato con il ruolo target"
-                      : "non analizzata; carica uno screenshot leggibile della bio"}
-                  </p>
-
-                  {digitalAnalysis.analysis_evidence.visual_media_analysis && (
-                    <p className="digital-field-hint" style={{ margin: 0 }}>
-                      <strong style={{ color: "#263548" }}>Impatto analisi visuali:</strong>{" "}
-                      {(digitalAnalysis.analysis_evidence.visual_score_adjustment || 0) > 0 ? "+" : ""}
-                      {digitalAnalysis.analysis_evidence.visual_score_adjustment || 0}
-                    </p>
-                  )}
-
-
+                  <div>
+                    <span>Instagram</span>
+                    <strong className={digitalAnalysis.analysis_evidence.instagram_slug_verification?.matched ? "is-good" : "is-warning"}>
+                      {digitalAnalysis.analysis_evidence.instagram_slug_verification?.matched
+                        ? "Nome e cognome corrispondono all'handle"
+                        : "Nome e cognome non corrispondono all'handle"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>GitHub</span>
+                    <strong className={digitalAnalysis.analysis_evidence.cv_github_name_match?.status === "matched" ? "is-good" : "is-warning"}>
+                      {digitalAnalysis.analysis_evidence.github_link_provided
+                        ? digitalAnalysis.analysis_evidence.cv_github_name_match?.message || "Profilo inserito"
+                        : "Non inserito"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Screenshot Instagram</span>
+                    <strong className={
+                      (digitalAnalysis.analysis_evidence.instagram_screenshots_summary?.sensitive_flagged_count || 0) > 0
+                        ? "is-bad"
+                        : (digitalAnalysis.analysis_evidence.instagram_screenshots_summary?.count || 0) > 0
+                          ? "is-good"
+                          : "is-warning"
+                    }>
+                      {(digitalAnalysis.analysis_evidence.instagram_screenshots_summary?.sensitive_flagged_count || 0) > 0
+                        ? "Contenuti sensibili rilevati"
+                        : (digitalAnalysis.analysis_evidence.instagram_screenshots_summary?.count || 0) > 0
+                          ? "Nessun contenuto sensibile rilevato"
+                          : "Non caricati"}
+                    </strong>
+                  </div>
                 </div>
-              </div>
+              </article>
             )}
-
-            {/* Card 3: findings */}
-            <div className="digital-card digital-card--main">
-              <h3 className="digital-card-title">Risultati & coach tips</h3>
-              <p className="digital-card-subtitle">Le aree più rilevanti per aumentare la coerenza</p>
-
-              <div className="digital-fields" style={{ gap: 12 }}>
-                {(displayedDigitalAnalysis?.findings || []).map((finding, index) => (
-                  <div
-                    className={`cv-detail-card ${finding.status === "warning" ? "warning" : "success"}`}
-                    key={`${finding.title}-${index}`}
-                  >
-                    <h4>{finding.title}</h4>
-                    <p>{finding.description}</p>
-                    {finding.coach_tip && (
-                      <div className="coach-tip">
-                        <strong>Il consiglio del coach</strong>
-                        <p>{finding.coach_tip}</p>
-                      </div>
-                    )}
-                  </div>
-                ))}
-
-                {["provider_not_configured", "provider_unavailable"].includes(
-                  digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
-                ) && (
-                  <div className="cv-analysis-card linkedin-basic-card" style={{ borderRadius: 14 }}>
-                    <h3 style={{ margin: "0 0 10px", fontSize: 18 }}>Analisi visuale da configurare</h3>
-                    <p style={{ margin: 0, color: "#6d7784", fontWeight: 800, lineHeight: 1.5, fontSize: 13 }}>
-                      Per analizzare gratuitamente le immagini in locale, installa Ollama, esegui
-                      <strong> ollama pull moondream</strong> e assicurati che il servizio Ollama sia avviato.
-                    </p>
-                    {digitalAnalysis?.analysis_evidence?.visual_media_analysis?.message && (
-                      <p style={{ margin: "8px 0 0", color: "#6d7784", fontWeight: 800, lineHeight: 1.5, fontSize: 13 }}>
-                        {digitalAnalysis.analysis_evidence.visual_media_analysis.message}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {connectedDigitalProfiles.length > 0 && (
-                  <div className="cv-analysis-card" style={{ borderRadius: 14 }}>
-                    <h3 style={{ margin: "0 0 10px", fontSize: 18 }}>Profili collegati</h3>
-                    <div className="source-list" style={{ justifyContent: "flex-start" }}>
-                      {connectedDigitalProfiles.map((source) => (
-                        <a
-                          href={source.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          key={getCanonicalProfileKey(source.url)}
-                        >
-                          {source.title || source.url}
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
           </div>
 
-          <button className="digital-cta-button" onClick={() => transitionToStep("home")}>
-            Torna alla home
+          <section className="digital-results-panel digital-findings-panel">
+            <h3>Risultati &amp; coach tips</h3>
+            <p>Le aree più rilevanti per aumentare la coerenza</p>
+            <div className="digital-findings-list">
+              {(displayedDigitalAnalysis?.findings || []).map((finding, index) => {
+                const meta = getDigitalFindingMeta(finding);
+                return (
+                  <article className={`digital-finding digital-finding--${meta.tone}`} key={`${finding.title}-${index}`}>
+                    <header>
+                      <h4><span />{getDigitalFindingTitle(finding.title)}</h4>
+                      <span className="digital-status-pill">{meta.label}</span>
+                    </header>
+                    <div className="digital-finding-body">
+                      <p>{finding.description}</p>
+                      {finding.coach_tip && (
+                        <div className="digital-coach-tip">
+                          <span aria-hidden="true" />
+                          <div>
+                            <strong>Consiglio del coach</strong>
+                            <p>{finding.coach_tip}</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+
+              {["provider_not_configured", "provider_unavailable"].includes(
+                digitalAnalysis?.analysis_evidence?.visual_media_analysis?.status
+              ) && (
+                <article className="digital-finding digital-finding--warning">
+                  <header>
+                    <h4><span />Analisi visuale da configurare</h4>
+                    <span className="digital-status-pill">Da migliorare</span>
+                  </header>
+                  <div className="digital-finding-body">
+                    <p>
+                      Per analizzare le immagini in locale, installa Ollama, esegui
+                      <strong> ollama pull moondream</strong> e assicurati che il servizio sia avviato.
+                    </p>
+                  </div>
+                </article>
+              )}
+            </div>
+          </section>
+
+          {connectedDigitalProfiles.length > 0 && (
+            <section className="digital-results-panel digital-connected-panel">
+              <h3>Profili collegati</h3>
+              <div>
+                {connectedDigitalProfiles.map((source) => (
+                  <a
+                    href={source.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    key={getCanonicalProfileKey(source.url)}
+                  >
+                    {source.title || source.url}
+                  </a>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <button className="digital-results-home-button" onClick={() => transitionToStep("home")}>
+            Torna alla home ↗
           </button>
         </section>
       )}

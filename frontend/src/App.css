@@ -732,6 +732,74 @@ textarea {
   font-weight: 800;
 }
 
+.screenshot-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.screenshot-selection-item {
+  position: relative;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid #d8e8f5;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.screenshot-selection-item img {
+  width: 100%;
+  height: 84px;
+  display: block;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.screenshot-selection-item button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #b42318;
+  color: #ffffff;
+  font-size: 18px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.screenshot-selection-item span {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  color: #526579;
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.digital-analyze-screenshots-button {
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-radius: 12px;
+  background: linear-gradient(120deg, #139ff2 0%, #0f76bb 100%);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.digital-analyze-screenshots-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 .digital-card--main,
 .digital-card--screens {
   position: relative;
@@ -6382,6 +6450,378 @@ textarea {
 
   .choice-grid.three-columns {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ===== Digital coherence results ===== */
+
+.page-cv-analysis {
+  background:
+    radial-gradient(circle at 14% 8%, rgba(85, 200, 255, 0.18), transparent 28%),
+    linear-gradient(180deg, #eef6ff 0%, #f4f7fb 42%, #f7f9fc 100%);
+}
+
+.page-cv-analysis .app-shell,
+.page-cv-analysis .main-content {
+  background: transparent;
+}
+
+.page-cv-analysis .digital-results-page {
+  width: min(100%, 1120px);
+  padding: 42px 18px 30px;
+  color: #263548;
+}
+
+.digital-results-heading {
+  margin: 0 auto 34px;
+  text-align: center;
+}
+
+.digital-results-heading > span {
+  display: block;
+  margin-bottom: 8px;
+  color: #0f76bb;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.digital-results-heading h2 {
+  margin: 0;
+  color: #17395d;
+  font-size: clamp(26px, 4vw, 38px);
+  line-height: 1.1;
+  letter-spacing: -0.035em;
+}
+
+.digital-results-heading p {
+  max-width: 630px;
+  margin: 10px auto 0;
+  color: #6d7784;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.digital-results-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+
+.digital-results-panel {
+  border: 1px solid #d8e1ea;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #263548;
+  box-shadow: 0 16px 38px rgba(15, 76, 129, 0.08);
+}
+
+.digital-results-panel > h3,
+.digital-score-panel > h3 {
+  margin: 0;
+  color: #0f76bb;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.digital-score-panel {
+  min-height: 500px;
+  padding: 36px 34px;
+  text-align: center;
+}
+
+.digital-score-panel > h3 {
+  text-align: left;
+}
+
+.digital-results-score {
+  width: 126px;
+  height: 126px;
+  margin: 35px auto 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+
+.digital-results-score span {
+  color: #17395d;
+  font-size: 29px;
+  font-weight: 500;
+}
+
+.digital-score-panel h4 {
+  margin: 0 0 14px;
+  color: #263548;
+  font-size: 19px;
+  font-weight: 500;
+}
+
+.digital-score-panel p {
+  max-width: 440px;
+  margin: 0 auto;
+  color: #6d7784;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.digital-evidence-panel {
+  min-height: 500px;
+  padding: 36px 32px 24px;
+}
+
+.digital-evidence-table {
+  margin-top: 18px;
+}
+
+.digital-evidence-table > div {
+  display: grid;
+  grid-template-columns: 145px minmax(0, 1fr);
+  gap: 18px;
+  padding: 14px 0;
+  border-bottom: 1px solid #e1e8ef;
+}
+
+.digital-evidence-table > div:last-child {
+  border-bottom: 0;
+}
+
+.digital-evidence-table span {
+  color: #34495e;
+  font-size: 14px;
+}
+
+.digital-evidence-table strong {
+  color: #6d7784;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.digital-evidence-table strong.is-good {
+  color: #16866f;
+}
+
+.digital-evidence-table strong.is-warning {
+  color: #a66300;
+}
+
+.digital-evidence-table strong.is-bad {
+  color: #b42318;
+}
+
+.digital-findings-panel {
+  margin-top: 24px;
+  padding: 30px 32px 34px;
+}
+
+.digital-findings-panel > h3 {
+  color: #263548;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.digital-findings-panel > p {
+  margin: 8px 0 24px;
+  color: #6d7784;
+  font-size: 14px;
+}
+
+.digital-findings-list {
+  display: grid;
+  gap: 15px;
+}
+
+.digital-finding {
+  overflow: hidden;
+  border: 1px solid #d8e1ea;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.digital-finding header {
+  min-height: 52px;
+  padding: 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #e1e8ef;
+  background: #f8fbff;
+}
+
+.digital-finding h4 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #263548;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.digital-finding h4 > span {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #f2a21b;
+}
+
+.digital-finding--danger h4 > span {
+  background: #df4d4d;
+}
+
+.digital-finding--success h4 > span {
+  background: #139ff2;
+}
+
+.digital-status-pill {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border: 1px solid #efbd64;
+  border-radius: 999px;
+  background: #fff3dc;
+  color: #9b5a00;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.digital-finding--danger .digital-status-pill {
+  border-color: #ffb2b2;
+  background: #ffe8e8;
+  color: #b72929;
+}
+
+.digital-finding--success .digital-status-pill {
+  border-color: #9ed8f6;
+  background: #eaf7ff;
+  color: #0f76bb;
+}
+
+.digital-finding-body {
+  padding: 17px 18px 18px;
+}
+
+.digital-finding-body > p {
+  margin: 0;
+  color: #596675;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.digital-coach-tip {
+  margin-top: 12px;
+  padding: 13px 15px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  border-radius: 9px;
+  border: 1px solid #cbe7f8;
+  background: #eef8ff;
+}
+
+.digital-coach-tip > span {
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: #139ff2;
+}
+
+.digital-coach-tip strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #0f76bb;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.digital-coach-tip p {
+  margin: 0;
+  color: #36546d;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.digital-connected-panel {
+  margin-top: 24px;
+  padding: 24px 26px;
+  border-color: #9ed8f6;
+}
+
+.digital-connected-panel > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.digital-connected-panel a {
+  min-width: 180px;
+  padding: 8px 18px;
+  border: 1px solid #9ed8f6;
+  border-radius: 999px;
+  background: #eaf7ff;
+  color: #0f76bb;
+  font-size: 13px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.digital-results-home-button {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 22px;
+  border: 0;
+  border-radius: 9px;
+  background: linear-gradient(120deg, #139ff2 0%, #0f76bb 100%);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(15, 118, 187, 0.22);
+}
+
+.digital-results-home-button:hover {
+  background: linear-gradient(120deg, #0f8edb 0%, #0b659f 100%);
+  color: #ffffff;
+}
+
+@media (max-width: 760px) {
+  .page-cv-analysis .digital-results-page {
+    padding: 28px 14px 24px;
+  }
+
+  .digital-results-overview {
+    grid-template-columns: 1fr;
+  }
+
+  .digital-score-panel,
+  .digital-evidence-panel {
+    min-height: 0;
+    padding: 26px 22px;
+  }
+
+  .digital-findings-panel {
+    padding: 24px 16px;
+  }
+
+  .digital-evidence-table > div {
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .digital-finding header {
+    align-items: flex-start;
+    padding: 14px;
   }
 }
 

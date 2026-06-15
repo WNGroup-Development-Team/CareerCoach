@@ -101,26 +101,47 @@ class CvScoringTests(unittest.TestCase):
         self.assertEqual(normalized["role_match_score"], fallback["role_match_score"])
         self.assertEqual(normalized["completeness_score"], fallback["completeness_score"])
 
-    def test_digital_score_uses_verified_evidence_and_penalties(self):
+    def test_digital_score_is_zero_without_required_links(self):
         evidence = {
             "can_compare_with_cv": True,
             "cv_profile_loaded": True,
             "linkedin_export_verified": True,
-            "linkedin_public_verified": False,
-            "linkedin_official_verified": False,
-            "other_profile_identity": {"status": "unverified"},
-            "verified_profile_count": 1,
-            "social_text_analyses": {
-                "instagram": {"evaluation": {"status": "aligned"}},
-            },
-            "visual_score_adjustment": -12,
         }
 
-        self.assertEqual(compute_digital_presence_score(evidence), 29)
-        self.assertEqual(
-            compute_digital_presence_score({**evidence, "can_compare_with_cv": False}),
-            0,
-        )
+        self.assertEqual(compute_digital_presence_score(evidence), 0)
+
+    def test_partial_digital_inputs_raise_score_proportionally(self):
+        base = {
+            "cv_profile_loaded": True,
+            "linkedin_public_link_present": True,
+            "linkedin_link_provided": True,
+            "linkedin_public_verified": True,
+            "linkedin_export_verified": False,
+            "linkedin_official_verified": False,
+            "cv_linkedin_name_match": {"status": "matched"},
+            "screenshots_summary": {"valid_uploaded": False},
+        }
+
+        linkedin_only = compute_digital_presence_score(base)
+        both_links = compute_digital_presence_score({
+            **base,
+            "instagram_link_provided": True,
+            "instagram_slug_verification": {"matched": True},
+            "instagram_visibility": {"status": "public"},
+        })
+
+        self.assertGreater(linkedin_only, 0)
+        self.assertGreater(both_links, linkedin_only)
+
+    def test_github_link_contributes_to_partial_score(self):
+        score = compute_digital_presence_score({
+            "cv_profile_loaded": True,
+            "github_link_provided": True,
+            "cv_github_name_match": {"status": "matched"},
+            "screenshots_summary": {"valid_uploaded": False},
+        })
+
+        self.assertGreater(score, 0)
 
 
 if __name__ == "__main__":

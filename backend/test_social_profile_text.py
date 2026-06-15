@@ -129,6 +129,7 @@ class SocialProfileTextTests(unittest.TestCase):
 
     def test_name_match_summary_lists_each_platform_explicitly(self):
         evidence = {
+            "instagram_link_provided": True,
             "cv_linkedin_name_match": {
                 "status": "matched",
                 "detected_name": "Silvia Mucci",
@@ -144,6 +145,93 @@ class SocialProfileTextTests(unittest.TestCase):
 
         self.assertIn("Nome CV ↔ LinkedIn: coerente.", summary)
         self.assertIn("Nome CV ↔ Instagram: coerente.", summary)
+
+    def test_name_match_summary_omits_instagram_when_not_provided(self):
+        summary = main.describe_cv_profile_name_matches({
+            "cv_linkedin_name_match": {"status": "unverified"},
+            "instagram_slug_verification": {
+                "matched": False,
+                "message": "Link o handle Instagram non presente.",
+            },
+        })
+
+        self.assertNotIn("Instagram", summary)
+
+    def test_instagram_slug_requires_name_and_surname(self):
+        matched = main.verify_instagram_slug(
+            {"name": "Silvia Mucci", "cv_text": ""},
+            "https://instagram.com/silvia.mucci/",
+        )
+        mismatch = main.verify_instagram_slug(
+            {"name": "Silvia Mucci", "cv_text": ""},
+            "https://instagram.com/travel_daily/",
+        )
+
+        self.assertTrue(matched["matched"])
+        self.assertFalse(mismatch["matched"])
+        self.assertIn("username riconoscibile", mismatch["coach_tip"])
+
+    def test_instagram_slug_accepts_flexible_personal_brand_variants(self):
+        valid_variants = [
+            "zerellaluca",
+            "zerella_luca",
+            "lzerella",
+            "luc.zerella",
+            "lu_zerella",
+            "lucazer",
+            "l.zer",
+            "luca__zerella",
+            "luca.zerella.official",
+            "iamlucazerella",
+            "real_lucazerella",
+            "lzerella00",
+            "luca98zerella",
+            "lucazerella_26",
+            "l_zerella_99",
+            "luquid_zerella",
+        ]
+
+        for username in valid_variants:
+            with self.subTest(username=username):
+                result = main.verify_instagram_slug(
+                    {"name": "Luca Zerella", "cv_text": ""},
+                    f"https://instagram.com/{username}/",
+                )
+                self.assertTrue(result["matched"], result)
+                self.assertGreaterEqual(result["confidence"], 0.6)
+
+    def test_instagram_slug_rejects_abstract_nickname(self):
+        result = main.verify_instagram_slug(
+            {"name": "Luca Zerella", "cv_text": ""},
+            "https://instagram.com/darkknight_99/",
+        )
+
+        self.assertFalse(result["matched"])
+        self.assertEqual(result["method"], "no_identity_signal")
+
+    def test_linkedin_cv_coherence_compares_skills_roles_and_dates(self):
+        result = main.evaluate_linkedin_cv_coherence(
+            "Data Analyst dal 2023. Competenze: Python, SQL e Power BI.",
+            "Data Analyst | 2023 - presente | Python, SQL, Power BI",
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertGreater(result["score_adjustment"], 0)
+        self.assertEqual(result["matched_years"], ["2023"])
+
+    def test_safe_screenshots_are_explicitly_summarized(self):
+        summary = main.summarize_screenshot_evidence({
+            "social_screenshot_batches": [{
+                "valid": True,
+                "profile_type": "instagram",
+                "analyzed_count": 2,
+                "flagged_count": 0,
+                "sensitive_flagged_count": 0,
+            }],
+        })
+
+        self.assertTrue(summary["safe_content"])
+        self.assertEqual(summary["count"], 2)
 
 
 if __name__ == "__main__":
