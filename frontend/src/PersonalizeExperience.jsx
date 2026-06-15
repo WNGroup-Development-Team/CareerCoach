@@ -123,16 +123,6 @@ export default function PersonalizeExperience({
 
           <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
-          <label htmlFor="personalize-company">Azienda</label>
-          <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
-            <BuildingIcon />
-            <input
-              id="personalize-company"
-              value={company}
-              onChange={(event) => onChange("company", event.target.value)}
-              placeholder="es. Google, TechFlow"
-            />
-          </div>
           {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
           <p className="field-hint">
             Puoi cercare anche solo per ruolo. Se inserisci anche un'azienda, controlleremo che sia valida.
@@ -148,6 +138,18 @@ export default function PersonalizeExperience({
               placeholder="Es. UX Designer, Data Analyst, Software Engineer"
             />
           </div>
+
+          <label htmlFor="personalize-company">Azienda</label>
+          <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
+            <BuildingIcon />
+            <input
+              id="personalize-company"
+              value={company}
+              onChange={(event) => onChange("company", event.target.value)}
+              placeholder="es. Google, TechFlow"
+            />
+          </div>
+          
           {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
           {validation.message && (
             <p className={`job-validation-message ${validation.status}`}>

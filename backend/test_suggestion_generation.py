@@ -18,6 +18,7 @@ from main import (
     deterministic_section_consolidation,
     extract_clean_skill_items,
     format_skill_list_like_original,
+    filter_confirmed_skill_suggestions,
     infer_skill_library_from_role,
     infer_role_family,
     sanitize_cv_additional_data,
@@ -49,6 +50,68 @@ class TestSuggestionGeneration(unittest.TestCase):
             skill_semantically_present("Team working", "Collaborazione in team")
         )
 
+    def test_translated_and_similar_skills_are_semantic_duplicates(self):
+        self.assertTrue(
+            skill_semantically_present(
+                "SOFT SKILLS\nAttention to detail, time management",
+                "Attenzione ai dettagli",
+            )
+        )
+        self.assertTrue(
+            skill_semantically_present(
+                "HARD SKILLS\nREST API, source control",
+                "API REST",
+            )
+        )
+        self.assertTrue(
+            skill_semantically_present(
+                "HARD SKILLS\nREST API, source control",
+                "Controllo di versione",
+            )
+        )
+
+    def test_project_manager_coordination_is_classified_as_soft_skill(self):
+        result = build_role_skill_suggestions("", "Project Manager")
+        coordination = next(
+            item for item in result["confirmation_items"]
+            if item["name"] == "Coordinamento team"
+        )
+        self.assertEqual(coordination["category"], "soft_skill")
+        self.assertEqual(coordination["target_section"], "SOFT SKILLS")
+        self.assertGreaterEqual(
+            sum(item["category"] == "soft_skill" for item in result["confirmation_items"]),
+            3,
+        )
+
+    def test_only_explicit_allowed_and_absent_skill_confirmations_survive(self):
+        allowed = build_role_skill_suggestions(
+            "HARD SKILLS\nPython programming",
+            "Data Analyst",
+        )["confirmation_items"]
+        power_bi = next(item for item in allowed if item["name"] == "Power BI")
+        accepted = {
+            **power_bi,
+            "status": "confirmed",
+        }
+
+        filtered = filter_confirmed_skill_suggestions(
+            "HARD SKILLS\nPython programming",
+            [
+                accepted,
+                {**accepted, "id": "manual-skill", "name": "Rust"},
+                {**accepted, "category": "soft_skill"},
+                {**accepted, "status": "pending"},
+                {
+                    **accepted,
+                    "id": "fake-python",
+                    "name": "Python",
+                },
+            ],
+            allowed,
+        )
+
+        self.assertEqual(filtered, [accepted])
+
     def test_skill_suggestions_do_not_include_keyword_cards(self):
         result = build_role_skill_suggestions(
             "HARD SKILLS\nExcel",
@@ -62,6 +125,30 @@ class TestSuggestionGeneration(unittest.TestCase):
                 "hard_skill", "soft_skill", "tool", "language",
             }
             for item in result["confirmation_items"]
+        ))
+
+    @patch("services.cv_optimizer.safe_cv_guard.build_structured_cv_suggestions")
+    def test_generic_coach_flow_does_not_offer_skill_or_keyword_additions(self, build_suggestions):
+        build_suggestions.return_value = [{
+            "id": "skill-bypass",
+            "type": "actionableEdit",
+            "category": "skills",
+            "section": "HARD SKILLS",
+            "title": "Aggiungi Power BI",
+            "description": "Aggiunge una skill mancante.",
+            "reason": "Richiesta dal ruolo.",
+            "original_text": "Python, SQL",
+            "proposed_text": "Python, SQL, Power BI",
+            "keywords_added": ["Power BI"],
+        }]
+        suggestions = build_coach_suggestions_from_evaluation({
+            "cv_text": "HARD SKILLS\nPython, SQL",
+            "target": {"role": "Data Analyst"},
+        })
+
+        self.assertTrue(all(
+            item.get("category") not in {"skills", "soft_skills", "ats_keywords"}
+            for item in suggestions
         ))
 
     def test_structured_cv_engine_merges_additional_experience_and_project_notes(self):
@@ -469,6 +556,10 @@ class TestSuggestionGeneration(unittest.TestCase):
         self.assertEqual(
             canonical_skill_identity("Team Working"),
             canonical_skill_identity("Collaborazione"),
+        )
+        self.assertEqual(
+            canonical_skill_identity("Version control"),
+            canonical_skill_identity("Controllo di versione"),
         )
 
     def test_deterministic_skill_consolidation_removes_synonym_duplicates(self):
