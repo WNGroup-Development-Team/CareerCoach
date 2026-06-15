@@ -1,5 +1,6 @@
 ﻿import React, { useEffect, useRef, useState } from "react";
 import "./App.css";
+/* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps, react-hooks/immutability */
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
 import PersonalizeExperience from "./PersonalizeExperience";
@@ -136,12 +137,6 @@ const previewSuggestionText = (value = "", expanded = false) => {
   }
   return `${text.slice(0, 300).trim()}...`;
 };
-
-const splitTagList = (value = "") =>
-  String(value || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 
 const USELESS_KEYWORD_LABELS = new Set([
   "game",
@@ -569,14 +564,6 @@ function normalizeDigitalAnalysis(analysis) {
   };
 }
 
-function getProfilePath(value = "") {
-  try {
-    return new URL(normalizeProfileUrl(value)).pathname.replace(/^\/|\/$/g, "").toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
 function getCanonicalProfileKey(value = "") {
   try {
     const url = new URL(normalizeProfileUrl(value));
@@ -766,15 +753,6 @@ function ProfileIcon() {
   );
 }
 
-function PencilIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 20h4.2L19.4 8.8a2 2 0 0 0 0-2.8L18 4.6a2 2 0 0 0-2.8 0L4 15.8V20Z" />
-      <path d="M14 6l4 4" />
-    </svg>
-  );
-}
-
 function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -933,7 +911,7 @@ function App() {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
 
-  const [answerMode, setAnswerMode] = useState("text");
+  const [, setAnswerMode] = useState("text");
   const [isListening, setIsListening] = useState(false);
   const [speechMetrics, setSpeechMetrics] = useState(null);
 
@@ -972,7 +950,7 @@ function App() {
         utter.rate = 0.95; // Velocità naturale
         utter.onend = () => setIsSpeaking(false);
         window.speechSynthesis.speak(utter);
-      } catch (e) {
+      } catch {
         setIsSpeaking(false);
       }
 
@@ -1174,13 +1152,6 @@ function App() {
         setLoading(false);
       }
     }
-  };
-
-  const updateProfile = (field, value) => {
-    setProfile({
-      ...profile,
-      [field]: value,
-    });
   };
 
   const resetError = () => {
@@ -1649,61 +1620,6 @@ function App() {
       setProfileImageMessage(message);
     } finally {
       setProfileImageSaving(false);
-    }
-  };
-
-  const deleteCv = async () => {
-    resetError();
-
-    if (!profile.cv_filename) {
-      setError("Non c'e nessun CV da eliminare.");
-      return;
-    }
-
-    const confirmed = window.confirm(
-      "Vuoi eliminare il CV caricato? Potrai caricarne uno nuovo dal profilo."
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/cv`, {
-        method: "DELETE",
-      }, 15000);
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(typeof data.detail === "string" ? data.detail : "Errore nell'eliminazione del CV.");
-        return;
-      }
-
-      setProfile((current) => ({
-        ...current,
-        ...data.user,
-        cv_uploaded: false,
-        cv_filename: "",
-        cv_text: "",
-      }));
-      setCvFile(null);
-      setCvPreview(null);
-      setDigitalAnalysis(null);
-      setCvOptimizationAnalysis(null);
-      setOptimizedCv(null);
-      setOptimizedCvWarnings([]);
-      setSelectedCoachSuggestions({});
-      setCvAdaptationAnswers({});
-      setCvAdditionalData(getEmptyCvAdditionalData());
-      setConfirmedSkillDetails({});
-      setExpandedCoachSuggestionText({});
-    } catch (err) {
-      console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -2529,21 +2445,6 @@ function App() {
     }));
   };
 
-  const updateCvAdaptationAnswer = (index, value) => {
-    setCvAdditionalDataError("");
-    setCvFieldErrors((current) => ({
-      ...current,
-      adaptation: {
-        ...current.adaptation,
-        [index]: "",
-      },
-    }));
-    setCvAdaptationAnswers((current) => ({
-      ...current,
-      [index]: value,
-    }));
-  };
-
   const loadOptimizedCvsList = async (targetUserId = userId) => {
     if (!targetUserId) {
       return;
@@ -2620,77 +2521,6 @@ function App() {
     }));
   };
 
-  const createProfile = async () => {
-    resetError();
-
-    if (!profile.name.trim()) {
-      setError("Inserisci il nome.");
-      return;
-    }
-
-    if (!profile.education.trim()) {
-      setError("Inserisci il percorso di studi.");
-      return;
-    }
-
-    if (!profile.target_role.trim()) {
-      setError("Inserisci il ruolo target.");
-      return;
-    }
-
-    if (!profile.sector.trim()) {
-      setError("Inserisci il settore.");
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const response = await fetchWithTimeout(`${API_URL}/users${userId ? `/${userId}` : ""}`, {
-        method: userId ? "PUT" : "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(profile)
-      }, 15000);
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(typeof data.detail === "string" ? data.detail : "Errore nella creazione del profilo.");
-        return;
-      }
-
-      const updatedUser = data.user;
-      if (updatedUser) {
-        setUserId(updatedUser.id);
-        setProfile({
-          name: updatedUser.name || "",
-          email: updatedUser.email || "",
-          phone: updatedUser.phone || "",
-          education: updatedUser.education || "",
-          target_role: updatedUser.target_role || "",
-          sector: updatedUser.sector || "",
-          experience_level: updatedUser.experience_level || "Junior",
-          interview_language: updatedUser.interview_language || "Italiano",
-        });
-      } else {
-        setUserId(data.user_id);
-      }
-      setStep("gym");
-    } catch (err) {
-      console.error(err);
-
-      if (err.name === "AbortError") {
-        setError("Il backend non risponde. Controlla che FastAPI sia avviato.");
-      } else {
-        setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const generateQuestion = async () => {
     resetError();
     setLoading(true);
@@ -2730,8 +2560,7 @@ function App() {
         45000
       );
 
-      let data = null;
-
+      let data;
       try {
         data = await response.json();
       } catch (jsonError) {
@@ -2913,35 +2742,6 @@ function App() {
     loadHistory(false);
   }, [step, userId]);
 
-  const loadProgress = async () => {
-    resetError();
-    setLoading(true);
-
-    try {
-      const response = await fetchWithTimeout(`${API_URL}/progress/${userId}`, {}, 15000);
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError("Errore nel caricamento dei progressi.");
-        console.log(data);
-        return;
-      }
-
-      setProgress(data);
-      setStep("progress");
-    } catch (err) {
-      console.error(err);
-
-      if (err.name === "AbortError") {
-        setError("Il caricamento dei progressi sta impiegando troppo tempo.");
-      } else {
-        setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const startVoiceAnswer = () => {
     resetError();
 
@@ -3088,12 +2888,6 @@ function App() {
     transitionToStep("personalize");
   };
 
-  const startInterviewPath = () => {
-    resetPersonalizationContext();
-    setPersonalizeIntent("interview");
-    transitionToStep("personalize");
-  };
-
   const updatePersonalizeForm = (field, value) => {
     setJobValidation({
       status: "idle",
@@ -3149,7 +2943,7 @@ function App() {
       return null;
     }
 
-    let data = null;
+    let data;
     try {
       data = await response.json();
     } catch (err) {
@@ -3207,7 +3001,7 @@ function App() {
       return;
     }
 
-    let validationResult = null;
+    let validationResult;
     try {
       validationResult = await validatePersonalizeForm();
       if (!validationResult) {
@@ -3285,7 +3079,6 @@ function App() {
 
   const canGoBack = userId && step !== "auth" && stepHistory.length > 0;
   const profileInitial = (profile.name || profile.email || "U").trim().charAt(0).toUpperCase();
-  const firstName = (profile.name || "Silvia").trim().split(/\s+/)[0];
   const displayedDigitalAnalysis = normalizeDigitalAnalysis(digitalAnalysis);
   const digitalCoherenceScore = displayedDigitalAnalysis?.score ?? 0;
   const isLinkedInConnected = profile.auth_provider === "linkedin";
@@ -3306,7 +3099,6 @@ function App() {
   const cvStrategyTargetRole = cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "ruolo target";
   const cvStrategyTargetCompany = cvOptimizationAnalysis?.target?.company || company || "azienda target";
   const cvStrategyOverallScore = cvOptimizationAnalysis?.overall_score || cvOptimizationAnalysis?.score || 0;
-  const cvStrategyScoreExplanation = cvOptimizationAnalysis?.score_explanation || null;
   const cvScoreComparison = cvOptimizationAnalysis?.score_comparison || optimizedCv?.score_comparison || null;
   const cvStrategyScoreItems = [
     { label: "Generale", value: cvStrategyOverallScore },
@@ -3316,10 +3108,6 @@ function App() {
     { label: "Azienda", value: cvOptimizationAnalysis?.company_fit_score || cvOptimizationAnalysis?.company_score || 0 },
     { label: "Completezza", value: cvOptimizationAnalysis?.completeness_score || 0 },
   ];
-  const cvAtsAnalysis = cvOptimizationAnalysis?.ats_analysis || {};
-  const cvAtsPresentKeywords = cvAtsAnalysis.present_keywords || cvAtsAnalysis.keywords_present || cvOptimizationAnalysis?.present_keywords || [];
-  const cvAtsMissingHardSkills = cvAtsAnalysis.missing_hard_skills || cvOptimizationAnalysis?.missing_hard_skills || [];
-  const cvAtsMissingSoftSkills = cvAtsAnalysis.missing_soft_skills || cvOptimizationAnalysis?.missing_soft_skills || [];
   const suggestedSkills = cvOptimizationAnalysis?.suggested_skills || {};
   const rawSkillConfirmationItems = [
     ...(suggestedSkills.confirmation_items || []),
@@ -3345,13 +3133,6 @@ function App() {
         user_example: saved.user_example || "",
       };
     });
-  const presentSkillItems = [
-    ...skillConfirmationItems.filter((item) => item.already_present),
-  ]
-    .filter(Boolean)
-    .filter((item, index, list) =>
-      list.findIndex((candidate) => candidate.name.toLowerCase() === item.name.toLowerCase()) === index
-    );
   const proposedSkillConfirmationItems = skillConfirmationItems.filter((item) => {
     const name = item.name.trim();
     const normalized = name.toLowerCase();
@@ -3565,30 +3346,6 @@ function App() {
     });
   };
 
-  const confirmedChangesSummary = {
-    profile: selectedCoachSuggestionItems.filter((item) => ["profile", "profilo"].includes(item.category) || normalizeSuggestionText(item.section).includes("profilo")),
-    skills: [
-      ...selectedCoachSuggestionItems.filter((item) => ["skills", "soft_skills"].includes(item.category) || normalizeSuggestionText(item.section).includes("skill") || normalizeSuggestionText(item.section).includes("competenze")),
-      ...acceptedSkillConfirmations,
-    ],
-    experience: selectedCoachSuggestionItems.filter((item) => ["experience", "experiences"].includes(item.category) || normalizeSuggestionText(item.section).includes("esperienz")),
-    education: selectedCoachSuggestionItems.filter((item) => item.category === "education" || normalizeSuggestionText(item.section).includes("formazione")),
-    projects: [
-      ...selectedCoachSuggestionItems.filter((item) => item.category === "project" || normalizeSuggestionText(item.section).includes("progett")),
-      ...(cvAdditionalData.additional_notes?.trim() ? [{
-        id: "additional-notes",
-        title: "Informazioni extra confermate",
-        detail: cvAdditionalData.additional_notes.trim(),
-      }] : []),
-      ...Object.entries(cvAdaptationAnswers)
-        .filter(([, answer]) => String(answer || "").trim())
-        .map(([index, answer]) => ({
-          id: `answer-${index}`,
-          title: cvOptimizationQuestions[Number(index)]?.category || "Risposta extra confermata",
-          detail: String(answer).trim(),
-      })),
-    ],
-  };
   const cvSummaryAcceptedSkillGroups = {
     hard: [
       ...acceptedSkillConfirmations.filter((item) => !["soft_skill", "tool"].includes(item.category)).map((item) => item.name),
@@ -3640,9 +3397,6 @@ function App() {
   const cvSummaryApplicationStatus = cvSummaryReviewedSuggestionCount > 0
     ? `${cvSummaryAcceptedSuggestionCount} su ${cvSummaryReviewedSuggestionCount}`
     : "0 su 0";
-  const cvSummaryJobLink = personalizeForm.link.trim() || cvOptimizationAnalysis?.target?.link || cvOptimizationAnalysis?.job_link || "";
-const screenshotUploadBoxes = [];
-
   return (
     <div className={step === "auth" ? "page auth-page page-auth" : `page page-${step}`}>
       {step !== "auth" && (
@@ -4991,7 +4745,7 @@ const screenshotUploadBoxes = [];
               </div>
             </section>
 
-            {false && <section className="cv-review-card">
+            <section className="cv-review-card" hidden>
               <header className="cv-review-card-header">
                 <div className="cv-review-card-title">
                   <span className="cv-review-icon idea">✧</span>
@@ -5012,7 +4766,7 @@ const screenshotUploadBoxes = [];
                   ))}
                 </div>
               )}
-            </section>}
+            </section>
 
             <section className="cv-review-card">
               <header className="cv-review-card-header">

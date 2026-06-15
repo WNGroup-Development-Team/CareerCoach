@@ -80,6 +80,16 @@ def create_docx_with_table(name, email):
     return output.getvalue()
 
 
+def create_docx_with_text(text_lines):
+    doc = Document()
+    for line in text_lines:
+        doc.add_paragraph(line)
+    output = io.BytesIO()
+    doc.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def create_docx_with_header(name, email):
     doc = Document()
     section = doc.sections[0]
@@ -258,12 +268,20 @@ class CvValidationTests(unittest.TestCase):
         self.assertFalse(result["visual_validation"]["blocked"])
 
     def test_valid_cv_accepted_when_visual_service_down_for_txt(self):
-        text_bytes = b"Mario Bianchi\nEmail: mario.bianchi@example.com\nTelefono: +39 345 9876543\nEsperienze professionali\nFormazione\nCompetenze\nLingue\n"
+        text_bytes = create_docx_with_text([
+            "Mario Bianchi",
+            "Email: mario.bianchi@example.com",
+            "Telefono: +39 345 9876543",
+            "Esperienze professionali",
+            "Formazione",
+            "Competenze",
+            "Lingue",
+        ])
 
         with patch("main.validate_cv_images", side_effect=requests.exceptions.ConnectionError(
             "HTTPConnectionPool(host='127.0.0.1', port=11434): Max retries exceeded with url: /api/chat"
         )):
-            result = main.validate_cv_content("cv.txt", text_bytes, "text/plain")
+            result = main.validate_cv_content("cv.docx", text_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
         self.assertTrue(result["is_cv"])
         self.assertIn("controllo automatico delle immagini non e disponibile", result["reason"].lower())
@@ -271,7 +289,11 @@ class CvValidationTests(unittest.TestCase):
         self.assertFalse(result["visual_validation"]["blocked"])
 
     def test_file_without_text_and_structure_is_rejected(self):
-        result = main.validate_cv_content("not_a_cv.txt", b"just a note without curriculum structure", "text/plain")
+        result = main.validate_cv_content(
+            "not_a_cv.docx",
+            create_docx_with_text(["just a note without curriculum structure"]),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
 
         self.assertFalse(result["is_cv"])
         self.assertIn("non contiene abbastanza elementi tipici", result["reason"].lower())
@@ -284,7 +306,7 @@ class CvValidationTests(unittest.TestCase):
         )
 
         self.assertTrue(result["matches_user"])
-        self.assertIn("rossi luca", result["detected_name"].lower())
+        self.assertEqual(result["detected_name"].lower(), "luca rossi")
 
     def test_images_unverifiable_produce_warning_not_error(self):
         text_bytes = b"Anna Verdi\nEmail: anna.verdi@example.com\nTelefono: +39 333 4445556\nFormazione\nEsperienze professionali\nCompetenze\nLingue\n"
@@ -300,9 +322,17 @@ class CvValidationTests(unittest.TestCase):
 
     def test_valid_cv_without_images_is_accepted(self):
         result = main.validate_cv_content(
-            "cv.txt",
-            b"Giorgia Neri\nEmail: giorgia.neri@example.com\nTelefono: +39 345 1112223\nEsperienze professionali\nFormazione\nCompetenze\nLingue\n",
-            "text/plain",
+            "cv.docx",
+            create_docx_with_text([
+                "Giorgia Neri",
+                "Email: giorgia.neri@example.com",
+                "Telefono: +39 345 1112223",
+                "Esperienze professionali",
+                "Formazione",
+                "Competenze",
+                "Lingue",
+            ]),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
         self.assertTrue(result["is_cv"])
@@ -341,13 +371,18 @@ class CvValidationTests(unittest.TestCase):
         )
 
         self.assertFalse(result["matches_user"])
-        self.assertIn("nome presente nel cv non corrisponde", result["message"].lower())
+        self.assertIn("appartenere a un'altra persona", result["message"].lower())
 
     def test_cv_text_with_disallowed_content_is_rejected(self):
         result = main.validate_cv_content(
-            "cv.txt",
-            b"Laura Gialli\nEmail: laura.gialli@example.com\nCompetenze\nProgetto su droga e violenza\n",
-            "text/plain",
+            "cv.docx",
+            create_docx_with_text([
+                "Laura Gialli",
+                "Email: laura.gialli@example.com",
+                "Competenze",
+                "Progetto su droga e violenza",
+            ]),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
 
         self.assertFalse(result["is_cv"])

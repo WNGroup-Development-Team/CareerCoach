@@ -21,6 +21,8 @@ from main import (
     filter_confirmed_skill_suggestions,
     infer_skill_library_from_role,
     infer_role_family,
+    ROLE_KEYWORD_GROUPS,
+    ROLE_SKILL_LIBRARY,
     sanitize_cv_additional_data,
     clean_job_role_title,
     skill_semantically_present,
@@ -700,6 +702,30 @@ class TestSuggestionGeneration(unittest.TestCase):
         print(f"  Found expected terms: {found}")
         self.assertGreater(len(found), 0, 
                           "Should include expected Data Analyst terms")
+
+    def test_all_defined_role_libraries_generate_hard_and_soft_skill_confirmations(self):
+        cv_text = "Esperienze professionali\nProgetti\nFormazione"
+
+        for role in ROLE_SKILL_LIBRARY:
+            with self.subTest(role=role):
+                result = build_role_skill_suggestions(cv_text, role)
+                hard_skills = [
+                    item for item in result["confirmation_items"]
+                    if item.get("category") == "hard_skill"
+                ]
+                soft_skills = [
+                    item for item in result["confirmation_items"]
+                    if item.get("category") == "soft_skill"
+                ]
+
+                self.assertEqual(result["role_family"], role)
+                self.assertGreater(len(hard_skills), 0, f"{role} should propose hard skills")
+                self.assertGreater(len(soft_skills), 0, f"{role} should propose soft skills")
+
+    def test_keyword_role_families_are_backed_by_skill_libraries(self):
+        missing_libraries = sorted(set(ROLE_KEYWORD_GROUPS) - set(ROLE_SKILL_LIBRARY))
+
+        self.assertEqual(missing_libraries, [])
 
 
 if __name__ == "__main__":
