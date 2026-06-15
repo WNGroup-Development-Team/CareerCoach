@@ -9570,6 +9570,516 @@ ROLE_SKILL_LIBRARY = {
 }
 
 
+# --- SEZIONE 1 ---
+ROLE_SKILL_LIBRARY.update({
+    "cloud_engineer": {
+        "hard_skills": ["Cloud infrastructure", "Infrastructure as Code", "Kubernetes", "Terraform", "Networking cloud", "Monitoring", "High availability", "Security hardening", "Cost optimization"],
+        "soft_skills": ["Problem solving", "Pensiero sistemico", "Precisione", "Collaborazione interfunzionale", "Gestione delle priorita"],
+        "programming_languages": ["Python", "Bash", "YAML"],
+        "tools": ["AWS", "Azure", "Google Cloud", "Terraform", "Kubernetes", "Docker", "Helm", "Prometheus"],
+    },
+    "cloud_architect": {
+        "hard_skills": ["Cloud architecture", "Landing zone design", "Identity and access management", "Networking ibrido", "Disaster recovery", "Governance cloud", "FinOps", "Solution design", "Migration strategy"],
+        "soft_skills": ["Pensiero strategico", "Leadership tecnica", "Comunicazione con stakeholder", "Decision making", "Visione d'insieme"],
+        "programming_languages": ["Python", "Bash", "YAML"],
+        "tools": ["AWS", "Azure", "Google Cloud", "Terraform", "CloudFormation", "Kubernetes", "Well-Architected Framework", "Lucidchart"],
+    },
+    "devops_engineer": {
+        "hard_skills": ["CI/CD", "Infrastructure as Code", "Containerization", "Release automation", "Configuration management", "Observability", "Version control workflow", "Scripting", "Infrastructure monitoring"],
+        "soft_skills": ["Problem solving", "Precisione", "Collaborazione", "Gestione incident", "Pensiero sistematico"],
+        "programming_languages": ["Bash", "Python", "YAML"],
+        "tools": ["Jenkins", "GitHub Actions", "GitLab CI", "Docker", "Kubernetes", "Terraform", "Ansible", "Prometheus"],
+    },
+    "site_reliability_engineer": {
+        "hard_skills": ["SRE practices", "Incident management", "Monitoring and alerting", "Capacity planning", "Service level objectives", "Postmortem analysis", "Reliability engineering", "Performance tuning"],
+        "soft_skills": ["Calma sotto pressione", "Problem solving", "Pensiero analitico", "Collaborazione", "Responsabilita operativa"],
+        "programming_languages": ["Python", "Go", "Bash"],
+        "tools": ["Kubernetes", "Prometheus", "Grafana", "PagerDuty", "ELK Stack", "Jaeger", "Terraform"],
+    },
+    "platform_engineer": {
+        "hard_skills": ["Platform engineering", "Developer experience", "Internal developer platforms", "CI/CD pipelines", "Kubernetes administration", "Service provisioning", "Automation", "Observability", "Security controls"],
+        "soft_skills": ["Pensiero sistemico", "Collaborazione", "Problem solving", "Leadership tecnica", "Orientamento al servizio"],
+        "programming_languages": ["Python", "Go", "Bash"],
+        "tools": ["Kubernetes", "Argo CD", "Terraform", "Backstage", "Helm", "Docker", "GitHub Actions", "Prometheus"],
+    },
+    "kubernetes_specialist": {
+        "hard_skills": ["Kubernetes administration", "Cluster hardening", "Helm charts", "Networking Kubernetes", "Pod security", "Workload orchestration", "Backup and recovery", "Autoscaling"],
+        "soft_skills": ["Precisione", "Problem solving", "Pensiero sistemico", "Autonomia", "Collaborazione"],
+        "programming_languages": ["YAML", "Bash", "Python"],
+        "tools": ["Kubernetes", "Helm", "kubectl", "Rancher", "Argo CD", "Prometheus", "Grafana", "Istio"],
+    },
+    "devsecops_engineer": {
+        "hard_skills": ["Secure CI/CD", "Threat modeling", "Container security", "Secrets management", "Vulnerability management", "Policy as code", "Security automation", "IAM", "Compliance by design"],
+        "soft_skills": ["Rigore metodologico", "Problem solving", "Pensiero critico", "Collaborazione", "Gestione del rischio"],
+        "programming_languages": ["Python", "Bash", "YAML"],
+        "tools": ["Snyk", "Trivy", "HashiCorp Vault", "OWASP ZAP", "GitHub Actions", "Terraform", "Kubernetes", "SonarQube"],
+    },
+    "ml_engineer": {
+        "hard_skills": ["Machine learning pipelines", "Model deployment", "Feature engineering", "Model monitoring", "Experiment tracking", "Data preprocessing", "Model optimization", "MLOps basics"],
+        "soft_skills": ["Problem solving", "Pensiero analitico", "Collaborazione", "Precisione", "Curiosita tecnica"],
+        "programming_languages": ["Python", "SQL"],
+        "tools": ["scikit-learn", "PyTorch", "TensorFlow", "MLflow", "Docker", "Kubernetes", "Airflow", "Jupyter Notebook"],
+    },
+    "deep_learning_engineer": {
+        "hard_skills": ["Neural networks", "Computer vision models", "Sequence modeling", "Model fine-tuning", "GPU training", "Hyperparameter tuning", "Transfer learning", "Model evaluation"],
+        "soft_skills": ["Rigore metodologico", "Curiosita intellettuale", "Problem solving", "Precisione", "Resilienza"],
+        "programming_languages": ["Python", "CUDA", "SQL"],
+        "tools": ["PyTorch", "TensorFlow", "Keras", "Jupyter Notebook", "Weights & Biases", "MLflow", "NVIDIA CUDA", "Docker"],
+    },
+    "ai_researcher": {
+        "hard_skills": ["Research design", "Experimental methodology", "Model evaluation", "Scientific writing", "Statistical analysis", "Benchmarking", "Ablation studies", "Literature review"],
+        "soft_skills": ["Curiosita intellettuale", "Rigore metodologico", "Pensiero critico", "Autonomia", "Comunicazione scientifica"],
+        "programming_languages": ["Python", "R", "SQL"],
+        "tools": ["PyTorch", "Jupyter Notebook", "LaTeX", "Weights & Biases", "Hugging Face", "Git", "Zotero"],
+    },
+    "mlops_engineer": {
+        "hard_skills": ["Model lifecycle management", "CI/CD for ML", "Model serving", "Data versioning", "Monitoring dei modelli", "Pipeline orchestration", "Feature store", "Automation"],
+        "soft_skills": ["Problem solving", "Pensiero sistemico", "Collaborazione", "Precisione", "Gestione delle priorita"],
+        "programming_languages": ["Python", "Bash", "SQL"],
+        "tools": ["MLflow", "Kubeflow", "Airflow", "Docker", "Kubernetes", "Terraform", "DVC", "GitHub Actions"],
+    },
+    "ai_product_manager": {
+        "hard_skills": ["Product strategy", "AI roadmap", "Requirements analysis", "User research", "Prioritization framework", "Go-to-market planning", "Experiment design", "Metrics definition"],
+        "soft_skills": ["Leadership", "Comunicazione", "Gestione stakeholder", "Pensiero strategico", "Gestione priorita"],
+        "programming_languages": [],
+        "tools": ["Jira", "Confluence", "Figma", "Aha!", "Productboard", "Amplitude", "Miro", "Notion"],
+    },
+    "responsible_ai_specialist": {
+        "hard_skills": ["AI governance", "Bias assessment", "Model explainability", "Risk assessment", "Privacy by design", "Policy compliance", "Human oversight", "Model documentation"],
+        "soft_skills": ["Integrita professionale", "Pensiero critico", "Rigore metodologico", "Comunicazione", "Sensibilita etica"],
+        "programming_languages": ["Python", "SQL"],
+        "tools": ["Hugging Face", "SHAP", "LIME", "TensorFlow", "PyTorch", "MLflow", "OneTrust", "Jupyter Notebook"],
+    },
+    "computer_vision_engineer": {
+        "hard_skills": ["Image classification", "Object detection", "Segmentation", "Feature extraction", "Model training", "Annotation pipelines", "Edge deployment", "Performance evaluation"],
+        "soft_skills": ["Precisione", "Problem solving", "Curiosita tecnica", "Collaborazione", "Pensiero analitico"],
+        "programming_languages": ["Python", "C++"],
+        "tools": ["OpenCV", "PyTorch", "TensorFlow", "Detectron2", "MMDetection", "Label Studio", "Jupyter Notebook", "Docker"],
+    },
+    "image_processing_specialist": {
+        "hard_skills": ["Image enhancement", "Filtering", "Segmentation", "Feature detection", "Noise reduction", "Color correction", "Image analysis", "Computer vision preprocessing"],
+        "soft_skills": ["Precisione", "Problem solving", "Pensiero analitico", "Collaborazione", "Rigore"],
+        "programming_languages": ["Python", "MATLAB", "C++"],
+        "tools": ["OpenCV", "MATLAB", "ImageJ", "Python", "NumPy", "SciPy", "Jupyter Notebook"],
+    },
+    "robotics_perception_engineer": {
+        "hard_skills": ["Sensor fusion", "SLAM", "Object tracking", "3D perception", "Point cloud processing", "Localization", "Kalman filtering", "Perception stack integration"],
+        "soft_skills": ["Problem solving", "Pensiero sistemico", "Precisione", "Collaborazione multidisciplinare", "Adattabilita"],
+        "programming_languages": ["Python", "C++"],
+        "tools": ["ROS", "OpenCV", "PCL", "Gazebo", "RViz", "TensorRT", "Docker"],
+    },
+    "autonomous_systems_engineer": {
+        "hard_skills": ["Autonomous navigation", "Path planning", "Control systems", "Sensor integration", "Perception algorithms", "Simulation testing", "Real-time constraints", "Functional safety"],
+        "soft_skills": ["Pensiero sistemico", "Problem solving", "Precisione", "Responsabilita", "Collaborazione"],
+        "programming_languages": ["Python", "C++", "MATLAB"],
+        "tools": ["ROS", "Gazebo", "CARLA", "MATLAB Simulink", "Docker", "NVIDIA Isaac", "Git"],
+    },
+    "nlp_engineer": {
+        "hard_skills": ["Text preprocessing", "Information extraction", "Named entity recognition", "Text classification", "Model fine-tuning", "Evaluation metrics", "Prompt engineering", "Linguistic annotation"],
+        "soft_skills": ["Curiosita intellettuale", "Problem solving", "Precisione", "Collaborazione", "Pensiero analitico"],
+        "programming_languages": ["Python", "SQL"],
+        "tools": ["spaCy", "Hugging Face", "PyTorch", "TensorFlow", "NLTK", "Jupyter Notebook", "MLflow"],
+    },
+    "llm_engineer": {
+        "hard_skills": ["Prompt engineering", "RAG pipelines", "LLM fine-tuning", "Vector search", "Evaluation of LLM outputs", "Context window optimization", "Guardrails", "Tool calling"],
+        "soft_skills": ["Problem solving", "Pensiero sistemico", "Curiosita tecnica", "Precisione", "Collaborazione"],
+        "programming_languages": ["Python", "SQL"],
+        "tools": ["LangChain", "LlamaIndex", "Hugging Face", "OpenAI API", "FAISS", "Pinecone", "Docker", "MLflow"],
+    },
+    "conversational_ai_engineer": {
+        "hard_skills": ["Dialog management", "Intent classification", "Conversation design", "RAG integration", "Multimodal assistants", "NLU", "Conversation testing", "Fallback handling"],
+        "soft_skills": ["Empatia", "Comunicazione", "Problem solving", "Collaborazione", "Orientamento all utente"],
+        "programming_languages": ["Python", "JavaScript"],
+        "tools": ["Dialogflow", "Rasa", "Botpress", "OpenAI API", "LangChain", "Figma", "Jira"],
+    },
+    "speech_recognition_engineer": {
+        "hard_skills": ["Acoustic modeling", "Speech-to-text", "Language modeling", "Audio preprocessing", "Forced alignment", "WER evaluation", "Streaming inference", "Noise robustness"],
+        "soft_skills": ["Precisione", "Curiosita tecnica", "Problem solving", "Pensiero analitico", "Persistenza"],
+        "programming_languages": ["Python", "C++"],
+        "tools": ["PyTorch", "Kaldi", "Whisper", "Hugging Face", "Librosa", "Jupyter Notebook", "Docker"],
+    },
+    "data_engineer": {
+        "hard_skills": ["Data pipeline design", "ETL/ELT", "Data modeling", "Data warehousing", "Orchestration", "Data quality", "Batch processing", "Streaming ingestion"],
+        "soft_skills": ["Pensiero sistemico", "Precisione", "Problem solving", "Collaborazione", "Gestione delle priorita"],
+        "programming_languages": ["Python", "SQL", "Scala"],
+        "tools": ["Airflow", "Spark", "dbt", "Snowflake", "BigQuery", "Kafka", "Databricks", "Docker"],
+    },
+    "big_data_engineer": {
+        "hard_skills": ["Distributed computing", "Spark tuning", "Data lake architecture", "Stream processing", "Large-scale ETL", "Partitioning strategy", "Performance optimization", "Data governance"],
+        "soft_skills": ["Pensiero sistemico", "Problem solving", "Precisione", "Collaborazione", "Capacita decisionale"],
+        "programming_languages": ["Python", "SQL", "Scala"],
+        "tools": ["Apache Spark", "Hadoop", "Kafka", "Databricks", "Hive", "Airflow", "S3", "Delta Lake"],
+    },
+    "streaming_data_engineer": {
+        "hard_skills": ["Event-driven architecture", "Real-time processing", "Kafka topics", "Stream transformation", "Low-latency pipelines", "Schema evolution", "Data observability", "Fault tolerance"],
+        "soft_skills": ["Problem solving", "Precisione", "Collaborazione", "Pensiero sistemico", "Gestione del tempo"],
+        "programming_languages": ["Python", "Scala", "SQL"],
+        "tools": ["Kafka", "Flink", "Spark Structured Streaming", "Kinesis", "Databricks", "Airflow", "Docker"],
+    },
+    "analytics_engineer": {
+        "hard_skills": ["Semantic layer modeling", "dbt modeling", "Data transformation", "Metric definition", "BI layer optimization", "SQL optimization", "Data documentation", "Analytics engineering"],
+        "soft_skills": ["Precisione", "Pensiero analitico", "Collaborazione", "Problem solving", "Orientamento al dato"],
+        "programming_languages": ["SQL", "Python"],
+        "tools": ["dbt", "BigQuery", "Snowflake", "Looker", "Power BI", "Tableau", "Git", "Airflow"],
+    },
+    "cybersecurity_analyst": {
+        "hard_skills": ["Threat analysis", "Security monitoring", "Incident response", "Vulnerability assessment", "SIEM analysis", "Log review", "Malware triage", "Access control"],
+        "soft_skills": ["Pensiero critico", "Precisione", "Calma sotto pressione", "Collaborazione", "Integrita professionale"],
+        "programming_languages": ["Python", "Bash", "SQL"],
+        "tools": ["Splunk", "Microsoft Sentinel", "QRadar", "Wireshark", "Nmap", "Burp Suite", "CrowdStrike"],
+    },
+    "penetration_tester": {
+        "hard_skills": ["Penetration testing", "Web application testing", "Network exploitation", "Privilege escalation", "Reporting tecnico", "Social engineering assessment", "Exploit validation", "Remediation guidance"],
+        "soft_skills": ["Curiosita tecnica", "Precisione", "Pensiero critico", "Riservatezza", "Problem solving"],
+        "programming_languages": ["Python", "Bash", "JavaScript"],
+        "tools": ["Kali Linux", "Burp Suite", "Metasploit", "Nmap", "OWASP ZAP", "Wireshark", "Nessus"],
+    },
+    "security_architect": {
+        "hard_skills": ["Security architecture", "Zero Trust", "IAM design", "Network segmentation", "Threat modeling", "Security controls", "Cloud security", "Compliance mapping"],
+        "soft_skills": ["Pensiero strategico", "Leadership tecnica", "Comunicazione con stakeholder", "Gestione del rischio", "Decision making"],
+        "programming_languages": ["Python", "Bash", "YAML"],
+        "tools": ["Microsoft Defender", "Palo Alto", "Okta", "Terraform", "Kubernetes", "OneTrust", "Splunk"],
+    },
+    "soc_analyst": {
+        "hard_skills": ["Security event monitoring", "Alert triage", "Incident escalation", "Threat intelligence", "Log correlation", "Use case tuning", "IOC analysis", "Forensic basics"],
+        "soft_skills": ["Calma sotto pressione", "Precisione", "Problem solving", "Collaborazione", "Prontezza operativa"],
+        "programming_languages": ["Python", "Bash"],
+        "tools": ["Splunk", "Microsoft Sentinel", "QRadar", "TheHive", "Wireshark", "VirusTotal", "MISP"],
+    },
+    "embedded_systems_engineer": {
+        "hard_skills": ["Embedded C", "Real-time programming", "Microcontroller programming", "Peripheral integration", "RTOS", "Debugging su hardware", "Protocol integration", "Low-power design"],
+        "soft_skills": ["Precisione", "Problem solving", "Pensiero sistemico", "Pazienza", "Collaborazione"],
+        "programming_languages": ["C", "C++", "Assembly"],
+        "tools": ["STM32CubeIDE", "Keil", "IAR Embedded Workbench", "Oscilloscope", "Logic analyzer", "FreeRTOS", "Git"],
+    },
+    "iot_engineer": {
+        "hard_skills": ["IoT architecture", "Sensor integration", "Edge computing", "MQTT", "Device provisioning", "Connectivity protocols", "Remote monitoring", "Data ingestion"],
+        "soft_skills": ["Pensiero sistemico", "Problem solving", "Precisione", "Collaborazione", "Gestione delle priorita"],
+        "programming_languages": ["C", "C++", "Python"],
+        "tools": ["AWS IoT", "Azure IoT Hub", "MQTT", "Node-RED", "Raspberry Pi", "Arduino IDE", "Docker"],
+    },
+    "firmware_engineer": {
+        "hard_skills": ["Firmware development", "Bare-metal programming", "Hardware debugging", "Device drivers", "Communication protocols", "Memory optimization", "Interrupt handling", "Bootloader integration"],
+        "soft_skills": ["Precisione", "Problem solving", "Persistenza", "Pensiero analitico", "Collaborazione"],
+        "programming_languages": ["C", "C++", "Assembly"],
+        "tools": ["STM32CubeIDE", "Keil", "JTAG debugger", "Oscilloscope", "IAR Embedded Workbench", "Git", "FreeRTOS"],
+    },
+    "real_time_systems_engineer": {
+        "hard_skills": ["Real-time systems", "Deterministic scheduling", "RTOS", "Latency analysis", "Concurrency control", "Safety-critical design", "Performance profiling", "Deadline management"],
+        "soft_skills": ["Precisione", "Pensiero sistemico", "Problem solving", "Responsabilita", "Collaborazione"],
+        "programming_languages": ["C", "C++", "Ada"],
+        "tools": ["FreeRTOS", "QNX", "VxWorks", "Tracealyzer", "MATLAB Simulink", "Git", "Jenkins"],
+    },
+    "network_engineer": {
+        "hard_skills": ["Routing and switching", "Network troubleshooting", "LAN/WAN design", "Firewall configuration", "VPN setup", "Network monitoring", "Subnetting", "TCP/IP"],
+        "soft_skills": ["Problem solving", "Precisione", "Pensiero analitico", "Collaborazione", "Calma sotto pressione"],
+        "programming_languages": ["Python", "Bash"],
+        "tools": ["Cisco IOS", "Juniper", "Wireshark", "SolarWinds", "NetBox", "pfSense", "Nmap"],
+    },
+    "network_architect": {
+        "hard_skills": ["Network architecture", "WAN optimization", "SD-WAN", "Network segmentation", "High availability", "Capacity planning", "Security networking", "Hybrid cloud networking"],
+        "soft_skills": ["Pensiero strategico", "Leadership tecnica", "Comunicazione con stakeholder", "Problem solving", "Decision making"],
+        "programming_languages": ["Python", "Bash"],
+        "tools": ["Cisco DNA Center", "Juniper", "SolarWinds", "NetBox", "Aruba Central", "Palo Alto", "Visio"],
+    },
+    "wireless_engineer": {
+        "hard_skills": ["Wireless planning", "RF engineering", "Site survey", "Wi-Fi optimization", "Spectrum analysis", "Antenna design", "Coverage analysis", "Interference mitigation"],
+        "soft_skills": ["Precisione", "Problem solving", "Pensiero analitico", "Collaborazione", "Capacita di diagnosi"],
+        "programming_languages": ["Python", "MATLAB"],
+        "tools": ["Ekahau", "AirMagnet", "Wireshark", "Cisco Wireless", "NetSpot", "Spectrum analyzer", "Visio"],
+    },
+    "operations_manager": {
+        "hard_skills": ["Operations planning", "Process management", "KPI management", "Budget monitoring", "Resource allocation", "Continuous improvement", "Capacity planning", "Workflow optimization"],
+        "soft_skills": ["Leadership", "Comunicazione", "Gestione priorita", "Decision making", "Negoziazione"],
+        "programming_languages": [],
+        "tools": ["Excel avanzato", "Power BI", "SAP", "Asana", "Monday.com", "Notion", "Trello"],
+    },
+    "lean_manager": {
+        "hard_skills": ["Lean manufacturing", "Kaizen", "Value stream mapping", "Waste reduction", "Root cause analysis", "Standard work", "Continuous improvement", "A3 problem solving"],
+        "soft_skills": ["Pensiero sistemico", "Leadership", "Coinvolgimento team", "Problem solving", "Orientamento al miglioramento"],
+        "programming_languages": [],
+        "tools": ["Minitab", "Visio", "Excel avanzato", "Power BI", "5S boards", "A3 templates", "SAP"],
+    },
+    "quality_manager": {
+        "hard_skills": ["Quality management system", "ISO 9001", "Nonconformity management", "Audit di qualita", "CAPA", "Root cause analysis", "Process validation", "Supplier quality"],
+        "soft_skills": ["Precisione", "Leadership", "Comunicazione", "Problem solving", "Gestione delle priorita"],
+        "programming_languages": [],
+        "tools": ["SAP QM", "Minitab", "QMS software", "Excel avanzato", "Power BI", "Jira", "Confluence"],
+    },
+    "process_engineer": {
+        "hard_skills": ["Process design", "Process optimization", "Root cause analysis", "FMEA", "SPC", "Process simulation", "Yield improvement", "Control plans"],
+        "soft_skills": ["Pensiero sistemico", "Precisione", "Problem solving", "Collaborazione", "Orientamento al miglioramento"],
+        "programming_languages": ["Python", "MATLAB"],
+        "tools": ["Aspen HYSYS", "Minitab", "Excel avanzato", "Power BI", "Visio", "AutoCAD", "SAP"],
+    },
+    "industrial engineer": {
+        "hard_skills": ["Industrial engineering", "Time and motion study", "Production planning", "Capacity analysis", "Lean methods", "Process optimization", "Layout design", "Cost reduction"],
+        "soft_skills": ["Pensiero sistemico", "Leadership operativa", "Problem solving", "Comunicazione interfunzionale", "Gestione priorita"],
+        "programming_languages": ["Python", "SQL", "MATLAB"],
+        "tools": ["Minitab", "SAP", "Power BI", "Excel avanzato", "Arena Simulation", "Visio", "AutoCAD"],
+    },
+    "supply_chain_analyst": {
+        "hard_skills": ["Demand forecasting", "Inventory analysis", "Supply planning", "Logistics analytics", "Supplier performance", "S&OP support", "Data analysis", "Cost analysis"],
+        "soft_skills": ["Pensiero analitico", "Comunicazione", "Collaborazione", "Gestione delle priorita", "Problem solving"],
+        "programming_languages": ["SQL", "Python"],
+        "tools": ["SAP", "Excel avanzato", "Power BI", "Tableau", "Oracle SCM Cloud", "Anaplan", "SQL Server"],
+    },
+    "logistics_manager": {
+        "hard_skills": ["Logistics management", "Transport planning", "Warehouse operations", "Distribution planning", "Route optimization", "Customs coordination", "Inventory control", "Service level management"],
+        "soft_skills": ["Leadership", "Negoziazione", "Gestione delle priorita", "Comunicazione", "Decision making"],
+        "programming_languages": [],
+        "tools": ["SAP TM", "WMS", "TMS", "Excel avanzato", "Power BI", "Oracle SCM Cloud", "Trello"],
+    },
+    "procurement_manager": {
+        "hard_skills": ["Strategic sourcing", "Supplier negotiation", "Procurement planning", "Contract management", "Spend analysis", "Vendor management", "Category management", "Procurement compliance"],
+        "soft_skills": ["Negoziazione", "Leadership", "Comunicazione", "Gestione delle priorita", "Orientamento al risultato"],
+        "programming_languages": [],
+        "tools": ["SAP Ariba", "Coupa", "Excel avanzato", "Power BI", "Oracle Procurement", "Jaggaer", "Concur"],
+    },
+    "erp_specialist": {
+        "hard_skills": ["ERP implementation", "Business process mapping", "Module configuration", "User support", "Data migration", "Integration testing", "Change management", "Process optimization"],
+        "soft_skills": ["Problem solving", "Comunicazione", "Supporto agli utenti", "Precisione", "Gestione del cambiamento"],
+        "programming_languages": ["SQL", "ABAP"],
+        "tools": ["SAP", "Oracle ERP Cloud", "Microsoft Dynamics 365", "NetSuite", "Jira", "Confluence", "Excel avanzato"],
+    },
+    "business_analyst": {
+        "hard_skills": ["Requirements gathering", "Process analysis", "Gap analysis", "Business case development", "UML", "Data analysis", "User story writing", "Workshop facilitation"],
+        "soft_skills": ["Comunicazione", "Pensiero analitico", "Gestione stakeholder", "Problem solving", "Facilitazione"],
+        "programming_languages": ["SQL", "Python"],
+        "tools": ["Jira", "Confluence", "Miro", "Excel avanzato", "Power BI", "Lucidchart", "Visio"],
+    },
+    "business_intelligence_analyst": {
+        "hard_skills": ["Dashboard design", "Data modeling", "KPI definition", "Reporting", "SQL analysis", "ETL support", "Data storytelling", "Performance monitoring"],
+        "soft_skills": ["Pensiero analitico", "Precisione", "Comunicazione", "Orientamento al dato", "Collaborazione"],
+        "programming_languages": ["SQL", "Python"],
+        "tools": ["Power BI", "Tableau", "Looker", "BigQuery", "Excel avanzato", "dbt", "Snowflake"],
+    },
+    "management_consultant": {
+        "hard_skills": ["Business analysis", "Strategy development", "Operating model design", "Market analysis", "Financial analysis", "Project delivery", "Stakeholder mapping", "Process improvement"],
+        "soft_skills": ["Comunicazione", "Leadership", "Pensiero strategico", "Gestione delle priorita", "Problem solving"],
+        "programming_languages": [],
+        "tools": ["Excel avanzato", "PowerPoint", "Power BI", "Miro", "Confluence", "Jira", "Tableau"],
+    },
+    "it_project_manager": {
+        "hard_skills": ["IT project planning", "Scope management", "Risk management", "Agile delivery", "Budget tracking", "Stakeholder coordination", "Release planning", "Vendor coordination"],
+        "soft_skills": ["Leadership", "Comunicazione", "Gestione priorita", "Negoziazione", "Decision making"],
+        "programming_languages": [],
+        "tools": ["Jira", "Confluence", "Microsoft Project", "Trello", "Asana", "Smartsheet", "Excel avanzato"],
+    },
+    "scrum_master": {
+        "hard_skills": ["Scrum facilitation", "Sprint planning", "Backlog refinement", "Retrospectives", "Impediment removal", "Agile coaching", "Velocity tracking", "Team metrics"],
+        "soft_skills": ["Facilitazione", "Leadership servente", "Comunicazione", "Gestione conflitti", "Coaching"],
+        "programming_languages": [],
+        "tools": ["Jira", "Confluence", "Miro", "Azure DevOps", "Trello", "Notion", "Slack"],
+    },
+    "product_owner": {
+        "hard_skills": ["Product backlog management", "User story prioritization", "Roadmap planning", "Acceptance criteria", "Stakeholder alignment", "Release planning", "Value definition", "Agile requirements"],
+        "soft_skills": ["Comunicazione", "Leadership", "Gestione priorita", "Negoziazione", "Pensiero strategico"],
+        "programming_languages": [],
+        "tools": ["Jira", "Confluence", "Productboard", "Aha!", "Miro", "Figma", "Notion"],
+    },
+    "change_manager": {
+        "hard_skills": ["Change impact analysis", "Change planning", "Stakeholder engagement", "Adoption tracking", "Training coordination", "Communication planning", "Resistance management", "Benefits realization"],
+        "soft_skills": ["Gestione del cambiamento", "Comunicazione", "Empatia", "Leadership", "Negoziazione"],
+        "programming_languages": [],
+        "tools": ["Prosci", "Miro", "Confluence", "PowerPoint", "Excel avanzato", "Jira", "SharePoint"],
+    },
+    "cost_controller": {
+        "hard_skills": ["Cost control", "Variance analysis", "Budget monitoring", "Forecasting", "Cost reporting", "Cost allocation", "Financial planning", "KPI analysis"],
+        "soft_skills": ["Precisione", "Pensiero analitico", "Gestione priorita", "Comunicazione", "Orientamento al risultato"],
+        "programming_languages": ["SQL", "VBA"],
+        "tools": ["SAP CO", "Excel avanzato", "Power BI", "Oracle Hyperion", "Tagetik", "Qlik Sense", "Tableau"],
+    },
+    "facility_manager": {
+        "hard_skills": ["Facility operations", "Space planning", "Vendor management", "Maintenance planning", "Health and safety", "Energy monitoring", "Budget control", "Space utilization"],
+        "soft_skills": ["Organizzazione", "Comunicazione", "Gestione priorita", "Problem solving", "Negoziazione"],
+        "programming_languages": [],
+        "tools": ["IWMS", "Excel avanzato", "SAP", "ServiceNow", "Planon", "AutoCAD", "Power BI"],
+    },
+    "maintenance_manager": {
+        "hard_skills": ["Preventive maintenance", "Corrective maintenance", "Asset management", "Maintenance planning", "Reliability improvement", "Spare parts management", "CMMS", "Safety compliance"],
+        "soft_skills": ["Leadership", "Problem solving", "Gestione priorita", "Comunicazione", "Decision making"],
+        "programming_languages": [],
+        "tools": ["SAP PM", "IBM Maximo", "CMMS", "Excel avanzato", "Power BI", "ServiceNow", "Minitab"],
+    },
+    "energy_manager": {
+        "hard_skills": ["Energy management", "Energy auditing", "Consumption analysis", "ISO 50001", "Efficiency projects", "Utility monitoring", "Carbon reporting", "Energy saving planning"],
+        "soft_skills": ["Pensiero analitico", "Orientamento alla sostenibilita", "Comunicazione", "Problem solving", "Gestione delle priorita"],
+        "programming_languages": ["Python", "SQL"],
+        "tools": ["SCADA", "Power BI", "Excel avanzato", "EnergyCAP", "ISO 50001 software", "SAP", "Tableau"],
+    },
+})
+
+# --- SEZIONE 2 ---
+ATS_HARD_SKILL_TERMS.extend([
+    "kubernetes", "terraform", "ci/cd", "iac", "infrastructure as code", "docker",
+    "helm", "prometheus", "grafana", "observability", "cloud architecture",
+    "landing zone", "finops", "sre", "incident management", "service level objectives",
+    "platform engineering", "devsecops", "threat modeling", "vulnerability management",
+    "machine learning pipelines", "model monitoring", "experiment tracking", "mlops",
+    "rag", "vector search", "prompt engineering", "llm fine-tuning", "computer vision",
+    "object detection", "segmentation", "sensor fusion", "slam", "speech recognition",
+    "data engineering", "etl/elt", "streaming ingestion", "kafka", "spark", "dbt",
+    "siem", "incident response", "pen testing", "iso 9001", "lean manufacturing",
+    "six sigma", "erp implementation", "s&op", "budget monitoring", "energy auditing",
+])
+
+# --- SEZIONE 3 ---
+ATS_SOFT_SKILL_TERMS.extend([
+    "leadership tecnica", "gestione del cambiamento", "pensiero sistemico", "rigore metodologico",
+    "curiosita intellettuale", "comunicazione con stakeholder", "gestione incident", "calma sotto pressione",
+    "responsabilita operativa", "orientamento al servizio", "adattabilita", "resilienza",
+    "visione d'insieme", "decision making", "facilitazione", "coaching", "leadership servente",
+    "gestione del rischio", "orientamento all utente", "empatia professionale", "pensiero strategico",
+    "orientamento al miglioramento", "coinvolgimento team", "responsabilita professionale",
+    "supporto agli utenti", "negoziazione", "comunicazione persuasiva",
+])
+
+# --- SEZIONE 4 ---
+ROLE_KEYWORD_GROUPS.update({
+    "cloud engineer": [
+        ("Kubernetes", ["kubernetes", "k8s"]),
+        ("Terraform", ["terraform", "infrastructure as code", "iac"]),
+        ("Docker", ["docker", "containerization", "containerizzazione"]),
+        ("AWS", ["aws", "amazon web services"]),
+        ("Azure", ["azure", "microsoft azure"]),
+        ("Google Cloud", ["google cloud", "gcp"]),
+        ("Prometheus", ["prometheus"]),
+        ("Grafana", ["grafana"]),
+        ("Observability", ["observability", "monitoring", "osservabilita"]),
+    ],
+    "platform engineer": [
+        ("Platform engineering", ["platform engineering"]),
+        ("Internal developer platform", ["internal developer platform", "idp"]),
+        ("Kubernetes", ["kubernetes", "k8s"]),
+        ("Terraform", ["terraform", "iac"]),
+        ("Argo CD", ["argo cd"]),
+        ("Backstage", ["backstage"]),
+        ("Developer experience", ["developer experience", "devex"]),
+    ],
+    "devops engineer": [
+        ("CI/CD", ["ci/cd", "continuous integration", "continuous delivery"]),
+        ("Jenkins", ["jenkins"]),
+        ("GitHub Actions", ["github actions"]),
+        ("GitLab CI", ["gitlab ci"]),
+        ("Docker", ["docker"]),
+        ("Kubernetes", ["kubernetes", "k8s"]),
+        ("Terraform", ["terraform", "iac"]),
+        ("Ansible", ["ansible"]),
+    ],
+    "site reliability engineer": [
+        ("SRE", ["sre", "site reliability"]),
+        ("Incident management", ["incident management", "incident response"]),
+        ("Service level objectives", ["slo", "service level objectives"]),
+        ("Prometheus", ["prometheus"]),
+        ("Grafana", ["grafana"]),
+        ("PagerDuty", ["pagerduty"]),
+        ("Postmortem", ["postmortem", "blameless postmortem"]),
+    ],
+    "ml engineer": [
+        ("Machine learning", ["machine learning", "ml"]),
+        ("Feature engineering", ["feature engineering"]),
+        ("Model deployment", ["model deployment", "serving"]),
+        ("MLflow", ["mlflow"]),
+        ("PyTorch", ["pytorch"]),
+        ("TensorFlow", ["tensorflow"]),
+        ("Kubernetes", ["kubernetes"]),
+    ],
+    "mlops engineer": [
+        ("MLOps", ["mlops"]),
+        ("MLflow", ["mlflow"]),
+        ("Kubeflow", ["kubeflow"]),
+        ("Airflow", ["airflow"]),
+        ("DVC", ["dvc", "data versioning"]),
+        ("Docker", ["docker"]),
+        ("Kubernetes", ["kubernetes"]),
+    ],
+    "computer vision engineer": [
+        ("OpenCV", ["opencv"]),
+        ("Object detection", ["object detection"]),
+        ("Segmentation", ["segmentation"]),
+        ("PyTorch", ["pytorch"]),
+        ("TensorFlow", ["tensorflow"]),
+        ("Label Studio", ["label studio"]),
+    ],
+    "nlp engineer": [
+        ("spaCy", ["spacy"]),
+        ("Hugging Face", ["hugging face", "transformers"]),
+        ("Text classification", ["text classification"]),
+        ("NER", ["named entity recognition", "ner"]),
+        ("Prompt engineering", ["prompt engineering"]),
+        ("RAG", ["rag", "retrieval augmented generation"]),
+    ],
+    "data engineer": [
+        ("Airflow", ["airflow"]),
+        ("Spark", ["spark", "apache spark"]),
+        ("dbt", ["dbt"]),
+        ("Kafka", ["kafka"]),
+        ("Snowflake", ["snowflake"]),
+        ("BigQuery", ["bigquery"]),
+    ],
+    "cybersecurity analyst": [
+        ("SIEM", ["siem"]),
+        ("Splunk", ["splunk"]),
+        ("Microsoft Sentinel", ["microsoft sentinel"]),
+        ("Incident response", ["incident response"]),
+        ("Vulnerability assessment", ["vulnerability assessment"]),
+        ("Wireshark", ["wireshark"]),
+    ],
+    "embedded systems engineer": [
+        ("Embedded C", ["embedded c", "c"]),
+        ("RTOS", ["rtos"]),
+        ("Microcontroller", ["microcontroller", "microcontrollore"]),
+        ("FreeRTOS", ["freertos"]),
+        ("JTAG", ["jtag"]),
+        ("Oscilloscope", ["oscilloscope"]),
+    ],
+    "network engineer": [
+        ("Routing", ["routing"]),
+        ("Switching", ["switching"]),
+        ("Firewall", ["firewall"]),
+        ("VPN", ["vpn"]),
+        ("Wireshark", ["wireshark"]),
+        ("Subnetting", ["subnetting"]),
+    ],
+    "operations manager": [
+        ("Operations management", ["operations management", "gestione operations"]),
+        ("KPI", ["kpi"]),
+        ("Capacity planning", ["capacity planning"]),
+        ("Resource allocation", ["resource allocation"]),
+        ("Process improvement", ["continuous improvement", "miglioramento continuo"]),
+    ],
+    "industrial engineer": [
+        ("Lean manufacturing", ["lean manufacturing"]),
+        ("Six Sigma", ["six sigma"]),
+        ("Capacity planning", ["capacity planning"]),
+        ("Process optimization", ["process optimization"]),
+        ("Minitab", ["minitab"]),
+        ("Value stream mapping", ["value stream mapping"]),
+    ],
+    "business intelligence analyst": [
+        ("Power BI", ["power bi"]),
+        ("Tableau", ["tableau"]),
+        ("Looker", ["looker"]),
+        ("Data modeling", ["data modeling"]),
+        ("KPI", ["kpi"]),
+        ("dbt", ["dbt"]),
+    ],
+});
+
+# --- SEZIONE 5 ---
+CLOUD_ENGINEER_KEYWORDS_TO_CONFIRM = ["Kubernetes", "Terraform", "Docker", "AWS", "Azure", "Google Cloud", "Prometheus", "Grafana"]
+DEVOPS_ENGINEER_KEYWORDS_TO_CONFIRM = ["CI/CD", "Jenkins", "GitHub Actions", "GitLab CI", "Docker", "Kubernetes", "Terraform", "Ansible"]
+SITE_RELIABILITY_ENGINEER_KEYWORDS_TO_CONFIRM = ["SRE", "Incident management", "Service level objectives", "Prometheus", "Grafana", "PagerDuty", "Postmortem"]
+ML_ENGINEER_KEYWORDS_TO_CONFIRM = ["Machine learning", "Feature engineering", "Model deployment", "MLflow", "PyTorch", "TensorFlow", "Kubernetes"]
+MLOPS_ENGINEER_KEYWORDS_TO_CONFIRM = ["MLOps", "MLflow", "Kubeflow", "Airflow", "DVC", "Docker", "Kubernetes"]
+COMPUTER_VISION_ENGINEER_KEYWORDS_TO_CONFIRM = ["OpenCV", "Object detection", "Segmentation", "PyTorch", "TensorFlow", "Label Studio"]
+NLP_ENGINEER_KEYWORDS_TO_CONFIRM = ["spaCy", "Hugging Face", "Text classification", "NER", "Prompt engineering", "RAG"]
+DATA_ENGINEER_KEYWORDS_TO_CONFIRM = ["Airflow", "Spark", "dbt", "Kafka", "Snowflake", "BigQuery"]
+CYBERSECURITY_ANALYST_KEYWORDS_TO_CONFIRM = ["SIEM", "Splunk", "Microsoft Sentinel", "Incident response", "Vulnerability assessment", "Wireshark"]
+EMBEDDED_SYSTEMS_ENGINEER_KEYWORDS_TO_CONFIRM = ["Embedded C", "RTOS", "Microcontroller", "FreeRTOS", "JTAG", "Oscilloscope"]
+
+
 def keyword_group_present(cv_plain: str, variants: List[str]) -> bool:
     padded = f" {cv_plain} "
     for variant in variants:
