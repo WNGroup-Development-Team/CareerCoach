@@ -872,15 +872,27 @@ def fetch_oauth_profile(provider: str, code: str) -> Dict:
 
     token_data = token_response.json()
 
+    tokendata = token_response.json()
+    accesstoken = tokendata.get("access_token")
+    if not accesstoken:
+        raise HTTPException(status_code=400, detail=f"Token OAuth non ricevuto dal provider.")
+
+# Recupera il profilo utente    
+    userinforesponse = requests.get(
+        config["userinfo_url"],
+        headers={"Authorization": f"Bearer {accesstoken}"},
+        timeout=15,
+)   
+    if userinforesponse.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Impossibile recuperare il profilo da {provider}.")
+
+    profile = userinforesponse.json()
+
     email = profile.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="Il provider non ha restituito un indirizzo email.")
 
-    name = (
-        profile.get("name")
-        or " ".join(part for part in [profile.get("given_name"), profile.get("family_name")] if part).strip()
-        or email.split("@")[0]
-    )
+    name = " ".join(part for part in [profile.get("given_name"), profile.get("family_name")] if part and part.strip()) or email.split("@")[0]
 
     return {
         "provider_user_id": str(profile.get("sub") or profile.get("id") or email),
@@ -891,9 +903,8 @@ def fetch_oauth_profile(provider: str, code: str) -> Dict:
             "picture": profile.get("picture"),
             "locale": profile.get("locale"),
             "email_verified": bool(profile.get("email_verified")),
-        },
+      },
     }
-
 
 def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
     oauth_profile_json = json.dumps(profile.get("oauth_profile") or {}, ensure_ascii=False)
