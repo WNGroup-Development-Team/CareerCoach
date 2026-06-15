@@ -3,7 +3,6 @@ import "./App.css";
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
 import PersonalizeExperience from "./PersonalizeExperience";
-import TagInput from "./TagInput";
 import {
   SparkleIcon,
   LinkedInIcon,
@@ -37,12 +36,9 @@ const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
 const CV_ADDITIONAL_DATA_FIELDS = [
   { key: "experiences", label: "Esperienze da valorizzare" },
-  { key: "technical_skills", label: "Competenze tecniche aggiuntive" },
-  { key: "soft_skills", label: "Soft skills rilevanti" },
   { key: "projects", label: "Progetti importanti" },
   { key: "measurable_results", label: "Risultati misurabili ottenuti" },
   { key: "certifications", label: "Certificazioni o corsi" },
-  { key: "tools", label: "Strumenti e tecnologie utilizzate" },
   { key: "company_role_notes", label: "Informazioni specifiche per azienda e ruolo" },
   { key: "additional_notes", label: "Note aggiuntive per l'ottimizzazione" },
 ];
@@ -60,6 +56,26 @@ const CV_COACH_CATEGORY_LABELS = {
   missing_info: "Informazioni mancanti da confermare",
   sections: "Sezioni poco chiare o poco efficaci",
 };
+
+const getDefaultProfile = () => ({
+  name: "",
+  email: "",
+  phone: "",
+  education: "",
+  target_role: "",
+  sector: "",
+  experience_level: "Junior",
+  interview_language: "Italiano",
+  cv_filename: "",
+  cv_uploaded: false,
+  cv_text: "",
+  linkedin_url: "",
+  linkedin_profile_filename: "",
+  linkedin_profile_uploaded: false,
+  portfolio_url: "",
+  instagram_handle: "",
+  auth_provider: "",
+});
 
 const getEmptyCvAdditionalData = () =>
   CV_ADDITIONAL_DATA_FIELDS.reduce((fields, item) => ({
@@ -127,6 +143,67 @@ const splitTagList = (value = "") =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const USELESS_KEYWORD_LABELS = new Set([
+  "game",
+  "design",
+  "management",
+  "business",
+  "project",
+  "projects",
+  "team",
+  "analysis",
+  "developer",
+  "engineer",
+  "manager",
+  "skill",
+  "skills",
+  "software",
+  "data",
+]);
+
+const filterUsefulKeywords = (values = []) =>
+  (Array.isArray(values) ? values : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const normalized = item.toLowerCase();
+      return normalized.length >= 3 && !USELESS_KEYWORD_LABELS.has(normalized);
+    })
+    .filter((item, index, list) =>
+      list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
+    );
+
+const getApiErrorDetail = (data, fallback = "Si è verificato un errore.") =>
+  typeof data?.detail === "string"
+    ? data.detail
+    : data?.detail?.message
+      || data?.detail?.reason
+      || data?.detail?.error
+      || (data?.detail ? JSON.stringify(data.detail) : null)
+      || fallback;
+
+const getFriendlyApiErrorMessage = (message, status = 0) => {
+  const detail = String(message || "").trim();
+  if (!detail) {
+    return "Si è verificato un errore.";
+  }
+
+  if (status === 401 || /sessione mancante/i.test(detail)) {
+    return "La sessione non è più valida. Accedi di nuovo per continuare.";
+  }
+  if (status === 403 || /sessione non autorizzata/i.test(detail)) {
+    return "Questo contenuto appartiene a un altro account oppure la sessione non è più autorizzata. Accedi di nuovo.";
+  }
+  if (/sembra appartenere a un'altra persona/i.test(detail)) {
+    return `${detail} Per proseguire carica il CV corretto o aggiorna il profilo con il nome giusto.`;
+  }
+  if (/non coincide in modo chiaro con quello del profilo/i.test(detail)) {
+    return `${detail} Se il CV è tuo, controlla nome e cognome indicati nel profilo prima di continuare.`;
+  }
+
+  return detail;
+};
+
 const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => {
   if (!item) {
     return null;
@@ -152,7 +229,7 @@ const normalizeCoachSuggestion = (item, index, fallbackCategory = "phrases") => 
     proposed_text: item.proposed_text || item.replacement || "",
     reason: item.reason || item.description || "",
     supported_by_cv: item.supported_by_cv !== false,
-    keywords_added: Array.isArray(item.keywords_added) ? item.keywords_added : [],
+    keywords_added: filterUsefulKeywords(item.keywords_added),
     requires_confirmation: Boolean(item.requires_confirmation),
   };
 };
@@ -354,6 +431,13 @@ const wait = (duration) =>
 
 async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   const controller = new AbortController();
+  const headers = new Headers(options.headers || {});
+  const storedToken =
+    typeof window !== "undefined" ? localStorage.getItem(AUTH_TOKEN_KEY) || "" : "";
+
+  if (storedToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${storedToken}`);
+  }
 
   const timeoutId = setTimeout(() => {
     controller.abort();
@@ -362,6 +446,7 @@ async function fetchWithTimeout(url, options = {}, timeout = 30000) {
   try {
     const response = await fetch(url, {
       ...options,
+      headers,
       signal: controller.signal,
     });
 
@@ -764,25 +849,7 @@ function App() {
     newPassword: ""
   });
 
-  const [profile, setProfile] = useState({
-    name: "",
-    email: "",
-    phone: "",
-    education: "",
-    target_role: "",
-    sector: "",
-    experience_level: "Junior",
-    interview_language: "Italiano",
-    cv_filename: "",
-    cv_uploaded: false,
-    cv_text: "",
-    linkedin_url: "",
-    linkedin_profile_filename: "",
-    linkedin_profile_uploaded: false,
-    portfolio_url: "",
-    instagram_handle: "",
-    auth_provider: "",
-  });
+  const [profile, setProfile] = useState(getDefaultProfile);
 
   const [cvFile, setCvFile] = useState(null);
   const [cvPreview, setCvPreview] = useState(null);
@@ -1024,7 +1091,7 @@ function App() {
         const data = await response.json();
 
         if (!response.ok) {
-          setError(typeof data.detail === "string" ? data.detail : "CV non trovato.");
+          handleApiFailure(response, data, "CV non trovato.");
           return;
         }
 
@@ -1120,6 +1187,34 @@ function App() {
     setError("");
     setAuthMessage("");
     setPreviewLink("");
+  };
+
+  const resetClientSession = (message = "") => {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    setAuthToken("");
+    setUserId(null);
+    setProfile(getDefaultProfile());
+    setDigitalPresence({ linkedin_url: "", portfolio_url: "", instagram_handle: "" });
+    setDigitalAnalysis(null);
+    setCvPreview(null);
+    setOptimizedCvsList([]);
+    setQuestions([]);
+    setAllFeedbacks([]);
+    setHistory([]);
+    setProgress(null);
+    window.history.replaceState({ careerCoachStep: "auth" }, "", window.location.pathname);
+    setStep("auth");
+    setError(message || "La sessione non è più valida. Accedi di nuovo per continuare.");
+  };
+
+  const handleApiFailure = (response, data, fallback = "Operazione non completata.") => {
+    const detail = getFriendlyApiErrorMessage(getApiErrorDetail(data, fallback), response?.status || 0);
+    if (response?.status === 401 || response?.status === 403) {
+      resetClientSession(detail);
+      return true;
+    }
+    setError(detail);
+    return true;
   };
 
   const transitionToStep = (nextStep) => {
@@ -1219,10 +1314,7 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-        setAuthToken("");
-        setUserId(null);
-        setStep("auth");
+        resetClientSession(getFriendlyApiErrorMessage(getApiErrorDetail(data, "Sessione non valida."), response.status));
         return;
       }
 
@@ -2175,14 +2267,7 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
-        const detail = typeof data.detail === "string"
-          ? data.detail
-          : data.detail?.message
-            || data.detail?.reason
-            || data.detail?.error
-            || (data.detail ? JSON.stringify(data.detail) : null)
-            || "Errore nell'analisi del CV.";
-        setError(detail);
+        handleApiFailure(response, data, "Errore nell'analisi del CV.");
         return;
       }
 
@@ -2468,6 +2553,8 @@ function App() {
       const data = await response.json();
       if (response.ok) {
         setOptimizedCvsList(data.optimized_cvs || []);
+      } else if (response.status === 401 || response.status === 403) {
+        handleApiFailure(response, data, "Non riesco a recuperare i CV ottimizzati.");
       }
     } catch (err) {
       console.error(err);
@@ -2486,7 +2573,8 @@ function App() {
       if (response.ok) {
         await loadOptimizedCvsList(userId);
       } else {
-        setError("Non e stato possibile eliminare il CV ottimizzato.");
+        const data = await response.json().catch(() => ({}));
+        handleApiFailure(response, data, "Non e stato possibile eliminare il CV ottimizzato.");
       }
     } catch (err) {
       console.error(err);
@@ -4271,6 +4359,9 @@ const screenshotUploadBoxes = [];
             <div className="digital-card digital-card--main">
               <h3 className="digital-card-title">Score di coerenza</h3>
               <p className="digital-card-subtitle">Quanto il tuo CV “parla” lo stesso linguaggio della tua presenza online</p>
+              <p className="digital-field-hint" style={{ marginTop: 0 }}>
+                Questo punteggio riguarda solo la presenza digitale. Il punteggio CV resta separato nella fase di ottimizzazione del curriculum.
+              </p>
 
               <div
                 className="digital-analysis-score"
@@ -4291,7 +4382,7 @@ const screenshotUploadBoxes = [];
               </h4>
               <p style={{ margin: 0, color: "#6d7784", fontWeight: 800, lineHeight: 1.45, fontSize: 13 }}>
                 {displayedDigitalAnalysis?.summary ||
-                  "Abbiamo confrontato CV, LinkedIn e i profili inseriti per stimare l'impatto sul tuo profilo professionale."}
+                  "Abbiamo confrontato solo i profili digitali inseriti per stimare l'impatto sulla presenza professionale."}
               </p>
             </div>
 
@@ -4453,6 +4544,26 @@ const screenshotUploadBoxes = [];
             </p>
           </div>
 
+          {cvOptimizationAnalysis?.identity_check?.matches_user == null
+            && cvOptimizationAnalysis?.identity_check?.message ? (
+              <div className="cv-strategy-item warning" style={{ marginBottom: 18 }}>
+                <span aria-hidden="true">!</span>
+                <div>
+                  <strong>Controllo nome CV</strong>
+                  <p>{cvOptimizationAnalysis.identity_check.message}</p>
+                  {cvOptimizationAnalysis?.identity_check?.detected_name ? (
+                    <small>
+                      Nome rilevato nel CV: {cvOptimizationAnalysis.identity_check.detected_name}. Se il documento è corretto puoi continuare, ma conviene verificare che il profilo e il CV riportino lo stesso nominativo.
+                    </small>
+                  ) : (
+                    <small>
+                      Non sono riuscito a leggere il nominativo in modo affidabile: controlla che nel CV compaiano nome e cognome corretti.
+                    </small>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
           <div className="cv-strategy-section">
             <div
               className="scores-grid cv-job-scores"
@@ -4590,14 +4701,14 @@ const screenshotUploadBoxes = [];
           <div className="cv-strategy-heading">
             <h2>
               {[
-                "Valuta skill e keyword",
+                "Valuta skill suggerite",
                 "Modifiche accettate",
                 "Genera CV ottimizzato",
               ][cvOptimizationStage]}
             </h2>
             <p>
               {[
-                "Conferma solo le competenze che possiedi davvero. Puoi aggiungere un esempio per renderle più credibili.",
+                "Conferma solo le competenze che possiedi davvero. Puoi aggiungere un contesto reale per renderle più credibili.",
                 "Controlla le modifiche e completa qui le informazioni che saranno integrate nel nuovo CV.",
                 "Genera il nuovo documento mantenendo stile e struttura del CV originale, ampliandolo solo quando necessario.",
               ][cvOptimizationStage]}
@@ -4738,7 +4849,7 @@ const screenshotUploadBoxes = [];
                 onClick={() => setCvOptimizationStage(1)}
                 disabled={!allCoachSuggestionsReviewed}
               >
-                {allCoachSuggestionsReviewed ? "Continua con skill e keyword" : "Valuta tutti i suggerimenti per continuare"}
+                {allCoachSuggestionsReviewed ? "Continua con le skill suggerite" : "Valuta tutti i suggerimenti per continuare"}
               </button>
 
               <button
@@ -4784,14 +4895,14 @@ const screenshotUploadBoxes = [];
                         </small>
 
                         <label className="cv-additional-field">
-                          <span>Dove l'hai usata? (facoltativo)</span>
+                          <span>Contesto reale d'uso (facoltativo)</span>
                           <textarea
                             value={item.user_example}
                             onChange={(event) => updateSkillConfirmationDetail(item.id, event.target.value)}
                             placeholder={
                               item.category === "soft_skill"
-                                ? "Facoltativo: descrivi una situazione reale in cui hai dimostrato questa competenza..."
-                                : "Facoltativo: descrivi dove hai usato questa competenza tecnica..."
+                                ? "Descrivi una situazione reale in cui hai dimostrato questa competenza, senza inventare nuove skill..."
+                                : "Descrivi un progetto, corso o esperienza reale in cui hai usato questa competenza..."
                             }
                             rows={2}
                           />
@@ -4949,7 +5060,7 @@ const screenshotUploadBoxes = [];
               </header>
               <div className="cv-review-extra-editor">
                 <p className="cv-strategy-note">
-                  Aggiungi solo informazioni vere: verranno riscritte e inserite nelle sezioni più adatte del CV, senza creare doppioni.
+                  Aggiungi solo informazioni vere e utili: verranno riscritte e inserite nelle sezioni più adatte del CV, senza creare doppioni.
                 </p>
 
                 {CV_ADDITIONAL_DATA_FIELDS
@@ -5105,7 +5216,6 @@ const screenshotUploadBoxes = [];
                       {[
                         ["Generale", "overall_score"],
                         ["ATS", "ats_score"],
-                        ["Competenze", "keyword_score"],
                         ["Ruolo", "role_match_score"],
                         ["Completezza", "completeness_score"],
                       ].map(([label, key]) => {
@@ -5145,6 +5255,16 @@ const screenshotUploadBoxes = [];
                 </div>
               </div>
             )}
+
+            <div className="cv-ready-checks">
+              <CheckCircleIcon size={20} />
+              <div>
+                <strong>Controllo finale consigliato</strong>
+                <p>
+                  Il CV è stato ottimizzato. Stile e formattazione non sono garantiti al 100%: ti consigliamo di controllare il file finale prima di inviarlo.
+                </p>
+              </div>
+            </div>
 
             {optimizedCv?.file_base64 ? (
               <a
