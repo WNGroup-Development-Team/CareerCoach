@@ -9317,7 +9317,7 @@ def validate_job_input(
         not is_low_quality_text(company, min_chars=3, min_words=1)
         and validate_role_plausibility(role)["is_valid"]
     )
-    
+
     link_validation = validate_job_link(link, company, role)
     has_valid_link = link_validation["is_valid"] and bool(link.strip())
 
@@ -12497,6 +12497,49 @@ def normalize_accepted_coach_suggestions(value: Any) -> List[Dict]:
     return accepted[:30]
 
 
+def build_accepted_suggestions_from_confirmed_skills(
+    cv_text: str,
+    user_additional_data: Optional[Dict[str, Any]],
+    role: str = "",
+) -> List[Dict]:
+    suggestions: List[Dict] = []
+    for instruction in build_confirmed_skill_rewrite_instructions(
+        cv_text,
+        user_additional_data or {},
+        role,
+    ):
+        section = str(instruction.section or "").strip()
+        proposed_text = str(instruction.replacement or "").strip()
+        if not section or not proposed_text:
+            continue
+        title = "Skill confermata"
+        description = str(instruction.reason or "Skill confermata dall'utente").strip()
+        suggestion = {
+            "id": str(instruction.source_id or "").strip()
+            or re.sub(
+                r"[^a-z0-9]+",
+                "-",
+                normalize_plain_text(f"{section}-{proposed_text}")[:90],
+            ).strip("-"),
+            "type": "actionableEdit",
+            "category": "soft_skills" if normalize_plain_text(section) == "soft skills" else "skills",
+            "category_label": "Soft Skills" if normalize_plain_text(section) == "soft skills" else "Competenze",
+            "title": title,
+            "message": description,
+            "description": description,
+            "action": "append" if not str(instruction.original or "").strip() else "replace",
+            "section": section,
+            "original_text": str(instruction.original or "").strip(),
+            "proposed_text": proposed_text,
+            "requires_confirmation": False,
+            "supported_by_cv": True,
+            "keywords_added": [],
+            "source_id": str(instruction.source_id or "").strip(),
+        }
+        suggestions.append(suggestion)
+    return suggestions[:30]
+
+
 def build_fallback_cv_job_evaluation(
     cv_text: str,
     company: str,
@@ -12993,6 +13036,24 @@ def optimize_user_cv(
         if str(suggestion_id).strip()
     ]
     confirmed_skills = user_additional_data.get("confirmed_skills", []) if isinstance(user_additional_data.get("confirmed_skills"), list) else []
+    confirmed_skill_suggestions = build_accepted_suggestions_from_confirmed_skills(
+        cv_text,
+        user_additional_data,
+        role_context,
+    )
+    if confirmed_skill_suggestions:
+        seen_suggestion_ids = {
+            str(item.get("id") or "").strip()
+            for item in accepted_suggestions
+            if isinstance(item, dict)
+        }
+        for suggestion in confirmed_skill_suggestions:
+            suggestion_id = str(suggestion.get("id") or "").strip()
+            if suggestion_id and suggestion_id in seen_suggestion_ids:
+                continue
+            accepted_suggestions.append(suggestion)
+            if suggestion_id:
+                seen_suggestion_ids.add(suggestion_id)
     selected_ids = {
         str(suggestion_id).strip()
         for suggestion_id in ((data.selected_suggestion_ids or []) + (data.acceptedSuggestionIds or []))

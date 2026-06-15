@@ -1494,7 +1494,7 @@ Dati aggiuntivi utente:
             return "failed"
         if instruction.action == "append":
             if target in {"hard_skills", "soft_skills", "competenze"}:
-                return self._merge_skill_lines_into_existing_section(
+                return self._rewrite_skill_section_canonically(
                     matching,
                     replacement_lines,
                 )
@@ -1659,6 +1659,72 @@ Dati aggiuntivi utente:
         if ";" in text:
             return "; "
         return ", "
+
+    def _rewrite_skill_section_canonically(
+        self,
+        matching_contexts: List[ParagraphContext],
+        replacement_lines: List[str],
+    ) -> str:
+        if not matching_contexts:
+            return "failed"
+
+        anchor = self._best_skill_anchor_paragraph(matching_contexts)
+        if anchor is None:
+            return "failed"
+
+        existing_items: List[str] = []
+        for context in matching_contexts:
+            existing_items.extend(self._split_skill_items(context.paragraph.text or ""))
+
+        new_items: List[str] = []
+        for line in replacement_lines:
+            new_items.extend(self._split_skill_items(line))
+
+        canonical_items = self._dedupe_skill_items(existing_items + new_items)
+        separator = self._skill_separator(anchor.text or "")
+        canonical_text = separator.join(canonical_items)
+        self._replace_paragraph_preserving_style(anchor, canonical_text)
+        self._remove_duplicate_skill_paragraphs(matching_contexts, anchor)
+        return "applied"
+
+    def _split_skill_items(self, text: str) -> List[str]:
+        raw_items = re.split(r"[,;|·•\n]+", text or "")
+        items: List[str] = []
+        for item in raw_items:
+            clean = re.sub(r"\s+", " ", item).strip(" \t\r\n-–—•·;:,.")
+            if clean:
+                items.append(clean)
+        return items
+
+    def _dedupe_skill_items(self, items: List[str]) -> List[str]:
+        deduped: List[str] = []
+        seen = set()
+        for item in items:
+            normalized = re.sub(r"\s+", " ", normalize_text(item)).strip(" \t\r\n-–—•·;:,.")
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(re.sub(r"\s+", " ", item).strip())
+        return deduped
+
+    def _best_skill_anchor_paragraph(self, matching_contexts: List[ParagraphContext]):
+        preferred = [
+            context
+            for context in matching_contexts
+            if not self._paragraph_hosts_textbox(context.paragraph)
+            and not self._paragraph_is_in_table(context.paragraph)
+        ]
+        if preferred:
+            return preferred[-1].paragraph
+        return matching_contexts[-1].paragraph if matching_contexts else None
+
+    def _remove_duplicate_skill_paragraphs(self, matching_contexts: List[ParagraphContext], anchor_paragraph) -> None:
+        anchor_id = id(getattr(anchor_paragraph, "_p", anchor_paragraph))
+        for context in matching_contexts:
+            paragraph = context.paragraph
+            if id(paragraph._p) == anchor_id:
+                continue
+            self._replace_paragraph_preserving_style(paragraph, "")
 
     def _rewrite_section_block(
         self,
