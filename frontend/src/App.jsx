@@ -48,7 +48,6 @@ const CV_COACH_CATEGORY_LABELS = {
   experience: "Esperienze da riscrivere meglio",
   phrases: "Frasi da migliorare",
   skills: "Competenze da evidenziare",
-  ats_keywords: "Parole chiave ATS da inserire",
   education: "Formazione",
   project: "Progetti",
   extra_page: "Pagina aggiuntiva",
@@ -161,29 +160,90 @@ const normalizeConfirmationName = (value) => {
   return value?.name || value?.label || value?.keyword || value?.title || "";
 };
 
+const canonicalizeSkillName = (value = "") => {
+  const normalized = String(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9+#.]+/g, " ")
+    .replace(/\b(programming|programmazione|language|linguaggio|framework|tool|strumento|skills?|competenze?)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const aliases = {
+    "team working": "collaborazione",
+    teamwork: "collaborazione",
+    collaboration: "collaborazione",
+    "collaborazione in team": "collaborazione",
+    "lavoro in team": "collaborazione",
+    "lavoro di squadra": "collaborazione",
+    "risoluzione dei problemi": "problem solving",
+    "gestione delle priorita": "gestione priorita",
+    "priority management": "gestione priorita",
+    communication: "comunicazione",
+    organization: "organizzazione",
+    "attention to detail": "attenzione ai dettagli",
+    "analytical thinking": "pensiero analitico",
+    "data analysis": "analisi dati",
+    "data analytics": "analisi dati",
+    "analisi dei dati": "analisi dati",
+    "data visualisation": "data visualization",
+    "visualizzazione dati": "data visualization",
+    "visualizzazione dei dati": "data visualization",
+    "version control": "controllo versione",
+    "controllo di versione": "controllo versione",
+    "rest api": "api rest",
+    "restful api": "api rest",
+    powerbi: "power bi",
+  };
+  return aliases[normalized] || normalized;
+};
+
+const isSkillSemanticallyPresent = (cvText = "", skillName = "") => {
+  const identity = canonicalizeSkillName(skillName);
+  if (!identity) {
+    return true;
+  }
+  const normalizedCv = String(cvText)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const knownVariants = {
+    collaborazione: ["team working", "teamwork", "collaboration", "collaborazione in team", "lavoro in team", "lavoro di squadra"],
+    "problem solving": ["problem solving", "risoluzione dei problemi"],
+    "gestione priorita": ["gestione priorita", "gestione delle priorita", "priority management"],
+    "attenzione ai dettagli": ["attenzione ai dettagli", "attention to detail"],
+    "pensiero analitico": ["pensiero analitico", "analytical thinking"],
+    "analisi dati": ["analisi dati", "analisi dei dati", "data analysis", "data analytics"],
+    "data visualization": ["data visualization", "data visualisation", "visualizzazione dati", "visualizzazione dei dati"],
+    "controllo versione": ["controllo versione", "controllo di versione", "version control"],
+    "api rest": ["api rest", "rest api", "restful api"],
+  };
+  return [identity, ...(knownVariants[identity] || [])].some((variant) => {
+    const escaped = variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(normalizedCv);
+  });
+};
+
 const normalizeSkillConfirmationItem = (value, index, fallback = {}) => {
   const name = normalizeConfirmationName(value).trim();
   if (!name) {
     return null;
   }
-  const isKeyword = fallback.type === "keywordConfirmation";
-  const category = value?.category || fallback.category || (isKeyword ? "keyword" : "hard_skill");
+  const category = value?.category || fallback.category || "hard_skill";
   const alreadyPresent = value?.already_present !== undefined
     ? Boolean(value.already_present)
     : value?.status === "present" || Boolean(fallback.already_present);
-  const id = String(value?.id || `${isKeyword ? "keyword" : "skill"}-${category}-${name}-${index}`)
+  const id = String(value?.id || `skill-${category}-${name}-${index}`)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
 
   return {
     id,
-    type: value?.type || fallback.type || (isKeyword ? "keywordConfirmation" : "skillConfirmation"),
+    type: value?.type || fallback.type || "skillConfirmation",
     name,
     category,
-    reason: value?.reason || fallback.reason || (isKeyword
-      ? "Keyword specifica utile per rendere il CV piu coerente con ruolo e annuncio."
-      : "Competenza utile per questa candidatura, da inserire solo se reale o gia supportata dal CV."),
+    reason: value?.reason || fallback.reason || "Competenza utile per questa candidatura, da inserire solo se reale e non già presente nel CV.",
     already_present: alreadyPresent,
     requires_confirmation: Boolean(value?.requires_confirmation ?? !alreadyPresent),
     status: "pending",
@@ -198,7 +258,6 @@ const getConfirmationCategoryLabel = (category = "") => {
     soft_skill: "Soft skill",
     tool: "Strumento",
     language: "Linguaggio",
-    keyword: "Keyword ATS",
   };
   return labels[category] || String(category || "Suggerimento").replaceAll("_", " ");
 };
@@ -238,7 +297,6 @@ const getCoachSuggestionsFromAnalysis = (analysis) => {
   const generated = [
     ...(analysis.weaknesses || []).map((item) => ({ item, category: "phrases" })),
     ...(analysis.relevant_skills_found || []).map((item) => ({ item: { title: item, description: "Rendi questa competenza piu visibile dove e gia supportata dal CV." }, category: "skills" })),
-    ...((analysis.missing_keywords || analysis.ats_analysis?.missing_keywords || analysis.ats_analysis?.keywords_missing || []).map((item) => ({ item: { title: item, description: "Keyword richiesta dal target: inseriscila solo se coerente con il CV o confermata.", requires_confirmation: true }, category: "ats_keywords" }))),
     ...(analysis.relevant_experiences || []).map((item) => ({ item, category: "experiences" })),
     ...(analysis.missing_skills_for_role || []).map((item) => ({ item: { title: item, description: "Informazione da aggiungere solo se confermata con un esempio reale.", requires_confirmation: true }, category: "missing_info" })),
     ...((analysis.sections_to_improve || analysis.ats_analysis?.sections_to_improve || []).map((item) => ({ item, category: "sections" }))),
@@ -730,11 +788,14 @@ function App() {
   const chatContainerRef = useRef(null);
   const answerRef = useRef(null);
   const profileImageInputRef = useRef(null);
+  const screenshotAnalysisQueueRef = useRef([]);
+  const screenshotAnalysisRunningRef = useRef(false);
   const [linkedinUploadMessage, setLinkedinUploadMessage] = useState("");
   const [socialScreenshotMessages, setSocialScreenshotMessages] = useState({});
   const [screenshotAnalysisProgress, setScreenshotAnalysisProgress] = useState({
     active: false,
     fileCount: 0,
+    queuedCount: 0,
     elapsedSeconds: 0,
     profileType: "",
   });
@@ -781,7 +842,7 @@ function App() {
   const [interviewType, setInterviewType] = useState("conoscitive_motivazionali");
   const [difficulty, setDifficulty] = useState("intermedio");
 
-  const [company, setCompany] = useState("Generica");
+  const [company, setCompany] = useState("Azienda Generica");
   const [personalizeIntent, setPersonalizeIntent] = useState("interview");
   const [personalizeForm, setPersonalizeForm] = useState({
     goal: "",
@@ -1126,7 +1187,7 @@ function App() {
       sector: "",
       link: "",
     });
-    setCompany("Generica");
+    setCompany("Azienda Generica");
     setCvOptimizationAnalysis(null);
     setOptimizedCv(null);
     setOptimizedCvWarnings([]);
@@ -1423,7 +1484,16 @@ function App() {
           },
           body: JSON.stringify({ image_data_url: imageDataUrl }),
         }, 15000);
-        const data = await response.json();
+        const responseText = await response.text();
+        let data = {};
+        try {
+          data = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          if (!response.ok) {
+            throw new Error("Errore del server durante il salvataggio della foto profilo.");
+          }
+          throw new Error("Il server ha restituito una risposta non valida.");
+        }
         if (!response.ok) {
           throw new Error(data.detail || "Impossibile salvare la foto profilo.");
         }
@@ -1461,7 +1531,16 @@ function App() {
           Authorization: `Bearer ${authToken}`,
         },
       }, 15000);
-      const data = await response.json();
+      const responseText = await response.text();
+      let data = {};
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        if (!response.ok) {
+          throw new Error("Errore del server durante la rimozione della foto profilo.");
+        }
+        throw new Error("Il server ha restituito una risposta non valida.");
+      }
       if (!response.ok) {
         throw new Error(data.detail || "Impossibile rimuovere la foto profilo.");
       }
@@ -1944,57 +2023,98 @@ function App() {
     }
   };
 
-  const analyzeSocialScreenshots = async (profileType, files) => {
+  const processSocialScreenshotQueue = async () => {
+    if (screenshotAnalysisRunningRef.current) {
+      return;
+    }
+
+    screenshotAnalysisRunningRef.current = true;
+    while (screenshotAnalysisQueueRef.current.length) {
+      const batch = screenshotAnalysisQueueRef.current.shift();
+      const queuedCount = screenshotAnalysisQueueRef.current.reduce(
+        (total, queuedBatch) => total + queuedBatch.files.length,
+        0
+      );
+      setScreenshotAnalysisProgress({
+        active: true,
+        fileCount: batch.files.length,
+        queuedCount,
+        elapsedSeconds: 0,
+        profileType: batch.profileType,
+      });
+
+      try {
+        const formData = new FormData();
+        formData.append("profile_type", batch.profileType);
+        formData.append("instagram_handle", batch.instagramHandle);
+        batch.files.forEach((file) => formData.append("files", file));
+        const response = await fetchWithTimeout(`${API_URL}/users/${userId}/social-screenshots`, {
+          method: "POST",
+          body: formData,
+        }, 300000);
+        const data = await response.json();
+        if (!response.ok) {
+          setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi degli screenshot.");
+          continue;
+        }
+
+        setProfile((current) => ({ ...current, ...data.user }));
+        setDigitalAnalysis(normalizeDigitalAnalysis(data.analysis || data.user?.digital_analysis || null));
+        setSocialScreenshotMessages((current) => ({
+          ...current,
+          [batch.profileType]: data.message || "Screenshot analizzati.",
+        }));
+      } catch (err) {
+        console.error(err);
+        setError(
+          err?.name === "AbortError"
+            ? "L'analisi locale degli screenshot sta richiedendo troppo tempo. Prova con meno immagini."
+            : "Errore di connessione durante l'analisi degli screenshot. Controlla che FastAPI e Ollama siano avviati."
+        );
+      }
+    }
+
+    screenshotAnalysisRunningRef.current = false;
+    setScreenshotAnalysisProgress({
+      active: false,
+      fileCount: 0,
+      queuedCount: 0,
+      elapsedSeconds: 0,
+      profileType: "",
+    });
+  };
+
+  const analyzeSocialScreenshots = (profileType, files) => {
     resetError();
-    setSocialScreenshotMessages((current) => ({ ...current, [profileType]: "" }));
 
     const selectedFiles = Array.from(files || []);
     if (!selectedFiles.length) {
       return;
     }
 
-    setScreenshotAnalysisProgress({
-      active: true,
-      fileCount: selectedFiles.length,
-      elapsedSeconds: 0,
+    screenshotAnalysisQueueRef.current.push({
       profileType,
+      files: selectedFiles,
+      instagramHandle: digitalPresence.instagram_handle.trim(),
     });
-    try {
-      const formData = new FormData();
-      formData.append("profile_type", profileType);
-      formData.append("instagram_handle", digitalPresence.instagram_handle.trim());
-      selectedFiles.forEach((file) => formData.append("files", file));
-      const response = await fetchWithTimeout(`${API_URL}/users/${userId}/social-screenshots`, {
-        method: "POST",
-        body: formData,
-      }, 300000);
-      const data = await response.json();
-      if (!response.ok) {
-        setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi degli screenshot.");
-        return;
-      }
-
-      setProfile((current) => ({ ...current, ...data.user }));
-      setDigitalAnalysis(normalizeDigitalAnalysis(data.analysis || data.user?.digital_analysis || null));
-      setSocialScreenshotMessages((current) => ({
-        ...current,
-        [profileType]: data.message || "Screenshot analizzati.",
-      }));
-    } catch (err) {
-      console.error(err);
-      setError(
-        err?.name === "AbortError"
-          ? "L'analisi locale degli screenshot sta richiedendo troppo tempo. Prova con meno immagini."
-          : "Errore di connessione durante l'analisi degli screenshot. Controlla che FastAPI e Ollama siano avviati."
-      );
-    } finally {
-      setScreenshotAnalysisProgress({
-        active: false,
-        fileCount: 0,
-        elapsedSeconds: 0,
-        profileType: "",
-      });
-    }
+    const queuedCount = screenshotAnalysisQueueRef.current.reduce(
+      (total, batch) => total + batch.files.length,
+      0
+    );
+    setScreenshotAnalysisProgress((current) => ({
+      ...current,
+      active: true,
+      queuedCount: screenshotAnalysisRunningRef.current
+        ? current.queuedCount + selectedFiles.length
+        : Math.max(0, queuedCount - selectedFiles.length),
+    }));
+    setSocialScreenshotMessages((current) => ({
+      ...current,
+      [profileType]: screenshotAnalysisRunningRef.current
+        ? `${selectedFiles.length} ${selectedFiles.length === 1 ? "immagine aggiunta" : "immagini aggiunte"} alla coda.`
+        : "",
+    }));
+    processSocialScreenshotQueue();
   };
 
   const analyzeCvOptimization = async (profileOverride = profile, fileOverride = null) => {
@@ -2484,7 +2604,7 @@ function App() {
     setCurrentQuestionIndex(0);
     setAllFeedbacks([]);
 
-    const selectedCompany = personalizeForm.company.trim() || company || "Generica";
+    const selectedCompany = personalizeForm.company.trim() || company || "Azienda Generica";
     const selectedRole = personalizeForm.role.trim() || profile.target_role || "";
 
     try {
@@ -2839,7 +2959,7 @@ function App() {
       sector: "",
       link: "",
     });
-    setCompany("Generica");
+    setCompany("Azienda Generica");
     setJobValidation({
       status: "idle",
       errors: {},
@@ -2996,7 +3116,7 @@ function App() {
       return;
     }
 
-    const nextCompany = personalizeForm.company.trim() || "Generica";
+    const nextCompany = personalizeForm.company.trim() || "Azienda Generica";
     const nextRole = personalizeForm.role.trim();
 
     if (personalizeIntent === "cv" && !nextRole) {
@@ -3074,7 +3194,6 @@ function App() {
   const cvStrategyScoreItems = [
     { label: "Generale", value: cvStrategyOverallScore },
     { label: "ATS simulato", value: cvOptimizationAnalysis?.ats_score || cvOptimizationAnalysis?.ats_analysis?.ats_score || 0 },
-    { label: "Keyword", value: cvOptimizationAnalysis?.keyword_score || cvOptimizationAnalysis?.ats_analysis?.keyword_score || 0 },
     { label: "Formato", value: cvOptimizationAnalysis?.format_score || cvOptimizationAnalysis?.ats_analysis?.format_score || 0 },
     { label: "Ruolo", value: cvOptimizationAnalysis?.job_match_score || cvOptimizationAnalysis?.role_match_score || cvOptimizationAnalysis?.role_score || 0 },
     { label: "Azienda", value: cvOptimizationAnalysis?.company_fit_score || cvOptimizationAnalysis?.company_score || 0 },
@@ -3087,11 +3206,6 @@ function App() {
   const suggestedSkills = cvOptimizationAnalysis?.suggested_skills || {};
   const rawSkillConfirmationItems = [
     ...(suggestedSkills.confirmation_items || []),
-    ...(suggestedSkills.to_confirm || []).map((skill, index) => normalizeSkillConfirmationItem(skill, index, {
-      type: "skillConfirmation",
-      category: "hard_skill",
-      target_section: "HARD SKILLS",
-    })),
   ]
     .filter(Boolean)
     .filter((item) =>
@@ -3102,8 +3216,9 @@ function App() {
   const skillConfirmationItems = rawSkillConfirmationItems
     .map((item, index) => normalizeSkillConfirmationItem(item, index))
     .filter(Boolean)
+    .filter((item) => !isSkillSemanticallyPresent(profile.cv_text || cvPreview?.text || "", item.name))
     .filter((item, index, list) =>
-      list.findIndex((candidate) => candidate.name.toLowerCase() === item.name.toLowerCase()) === index
+      list.findIndex((candidate) => canonicalizeSkillName(candidate.name) === canonicalizeSkillName(item.name)) === index
     )
     .map((item) => {
       const saved = confirmedSkillDetails[item.id] || {};
@@ -3143,7 +3258,7 @@ function App() {
   const latestOptimizedCv = optimizedCvsList[0] || null;
   const hasMeaningfulProfileValue = (value) => {
     const normalized = String(value || "").trim().toLowerCase();
-    return Boolean(normalized && !["da definire", "generica", "settore"].includes(normalized));
+    return Boolean(normalized && !["da definire", "Azienda Generica", "settore"].includes(normalized));
   };
   const preferredCompanies = [
     personalizeForm.company,
@@ -3152,7 +3267,7 @@ function App() {
     ...optimizedCvsList.map((item) => item.target_company),
   ]
     .map((item) => String(item || "").trim())
-    .filter((item) => item && item.toLowerCase() !== "generica")
+    .filter((item) => item && item.toLowerCase() !== "Azienda Generica")
     .filter((item, index, list) =>
       list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
     );
@@ -3194,18 +3309,18 @@ function App() {
   const previousInterviewTargetsFromHistory = history
     .filter((item) => item.company || item.role)
     .map((item) => ({
-      company: item.company || "Generica",
+      company: item.company || "Azienda Generica",
       role: item.role || "Ruolo da definire",
-      id: `${(item.company || "Generica").trim().toLowerCase()}::${(item.role || "").trim().toLowerCase()}`,
+      id: `${(item.company || "Azienda Generica").trim().toLowerCase()}::${(item.role || "").trim().toLowerCase()}`,
     }))
     .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
 
   const previousInterviewTargetsFromOptimizedCv = optimizedCvsList
     .filter((item) => item.target_company || item.target_role)
     .map((item) => ({
-      company: item.target_company || "Generica",
+      company: item.target_company || "Azienda Generica",
       role: item.target_role || "Ruolo da definire",
-      id: `${(item.target_company || "Generica").trim().toLowerCase()}::${(item.target_role || "").trim().toLowerCase()}`,
+      id: `${(item.target_company || "Azienda Generica").trim().toLowerCase()}::${(item.target_role || "").trim().toLowerCase()}`,
     }))
     .filter((item, index, list) => list.findIndex((target) => target.id === item.id) === index);
 
@@ -3281,7 +3396,7 @@ function App() {
     if (!groups[sessionId]) {
       groups[sessionId] = {
         session_id: sessionId,
-        company: item.company || "Azienda generica",
+        company: item.company || "Azienda Generica",
         role: item.role || "Ruolo non specificato",
         interview_type: item.interview_type || "",
         difficulty: item.difficulty || "",
@@ -3336,7 +3451,7 @@ function App() {
   const confirmedChangesSummary = {
     profile: selectedCoachSuggestionItems.filter((item) => ["profile", "profilo"].includes(item.category) || normalizeSuggestionText(item.section).includes("profilo")),
     skills: [
-      ...selectedCoachSuggestionItems.filter((item) => ["skills", "ats_keywords", "soft_skills"].includes(item.category) || normalizeSuggestionText(item.section).includes("skill") || normalizeSuggestionText(item.section).includes("competenze")),
+      ...selectedCoachSuggestionItems.filter((item) => ["skills", "soft_skills"].includes(item.category) || normalizeSuggestionText(item.section).includes("skill") || normalizeSuggestionText(item.section).includes("competenze")),
       ...acceptedSkillConfirmations,
     ],
     experience: selectedCoachSuggestionItems.filter((item) => ["experience", "experiences"].includes(item.category) || normalizeSuggestionText(item.section).includes("esperienz")),
@@ -4050,17 +4165,16 @@ const screenshotUploadBoxes = [];
                     type="file"
                     accept="image/jpeg,image/png,image/webp"
                     multiple
-                    disabled={screenshotAnalysisProgress.active}
                     onChange={(event) => {
                       analyzeSocialScreenshots("instagram", event.target.files);
                       event.target.value = "";
                     }}
                   />
                   <label
-                    className={`digital-upload-button ${screenshotAnalysisProgress.active ? "disabled" : ""}`}
+                    className="digital-upload-button"
                     htmlFor="social-screenshot-files"
                   >
-                    {screenshotAnalysisProgress.active ? "Analisi in corso..." : "Scegli file"}
+                    {screenshotAnalysisProgress.active ? "Aggiungi altri file" : "Scegli file"}
                   </label>
 
                   {screenshotAnalysisProgress.active && (
@@ -4072,6 +4186,12 @@ const screenshotUploadBoxes = [];
                           {screenshotAnalysisProgress.fileCount === 1 ? "immagine" : "immagini"}
                         </strong>
                         <p>Tempo trascorso: {screenshotAnalysisProgress.elapsedSeconds}s.</p>
+                        {screenshotAnalysisProgress.queuedCount > 0 && (
+                          <p>
+                            {screenshotAnalysisProgress.queuedCount}{" "}
+                            {screenshotAnalysisProgress.queuedCount === 1 ? "immagine in attesa" : "immagini in attesa"}.
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -4525,7 +4645,7 @@ const screenshotUploadBoxes = [];
                               </button>
                             )}
                             {suggestion.keywords_added.length > 0 && (
-                              <small><b>Keyword valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
+                              <small><b>Competenze valorizzate:</b> {suggestion.keywords_added.join(", ")}</small>
                             )}
                             <small className={`suggestion-status-pill ${suggestionStatus}`}>
                               Stato: {isAccepted ? "accettato" : isRejected ? "rifiutato" : "in attesa"}
@@ -5475,7 +5595,7 @@ const screenshotUploadBoxes = [];
                 id="gym-company"
                 type="text"
                 value={personalizeForm.company}
-                placeholder={company || "Generica"}
+                placeholder={company || "Azienda Generica"}
                 onChange={(event) => updatePersonalizeForm("company", event.target.value)}
               />
             </div>
@@ -5901,7 +6021,7 @@ const screenshotUploadBoxes = [];
             {profile.target_role && profile.target_role !== "Da definire" && (
               <> per il ruolo di <strong>{profile.target_role}</strong></>
             )}
-            {company && company !== "Generica" && (
+            {company && company !== "Azienda Generica" && (
               <> in <strong>{company}</strong></>
             )}.
           </p>

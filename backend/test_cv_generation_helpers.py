@@ -82,6 +82,26 @@ class CvGenerationHelperTests(unittest.TestCase):
         self.assertEqual(sanitized, {})
         self.assertEqual(rejected, [])
 
+    def test_confirmed_skill_already_in_cv_is_not_inserted_again(self):
+        instructions = build_confirmed_skill_rewrite_instructions(
+            "HARD SKILLS\nPython programming\nSOFT SKILLS\nTeam working",
+            {
+                "confirmed_skills": [
+                    {
+                        "name": "Python",
+                        "category": "hard_skill",
+                    },
+                    {
+                        "name": "Collaborazione in team",
+                        "category": "soft_skill",
+                    },
+                ],
+            },
+            "Data Analyst",
+        )
+
+        self.assertEqual(instructions, [])
+
     @patch("main.build_professional_extra_text")
     def test_experience_box_builds_rewrite_instruction(self, build_text):
         build_text.return_value = "Data Engineer presso Poste Italiane, 2020-2024."
