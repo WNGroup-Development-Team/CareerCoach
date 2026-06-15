@@ -1,4 +1,4 @@
-﻿* {
+* {
   box-sizing: border-box;
 }
 
@@ -4165,7 +4165,7 @@ textarea {
   line-height: 1.35;
 }
 
-.personalize-sidebar-card ol {
+.personalize-sidebar-card ul {
   margin: 0;
   padding-left: 20px;
   color: #526173;

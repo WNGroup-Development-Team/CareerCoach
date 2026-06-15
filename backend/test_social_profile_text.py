@@ -134,25 +134,16 @@ class SocialProfileTextTests(unittest.TestCase):
                 "detected_name": "Silvia Mucci",
                 "profile_name_candidate": "Silvia Mucci",
             },
-            "cv_instagram_name_match": {
-                "status": "similar",
-                "detected_name": "Silvia Mucci",
-                "profile_name_candidate": "silviamucci",
-            },
-            "github_profile": {
-                "cv_name_match": {
-                    "status": "unverified",
-                    "detected_name": "Silvia Mucci",
-                    "profile_name_candidate": "",
-                },
+            "instagram_slug_verification": {
+                "matched": True,
+                "message": "Il nome e cognome corrispondono allo slug del link Instagram.",
             },
         }
 
         summary = main.describe_cv_profile_name_matches(evidence)
 
         self.assertIn("Nome CV ↔ LinkedIn: coerente.", summary)
-        self.assertIn("Nome CV ↔ Instagram: parzialmente coerente.", summary)
-        self.assertIn("Nome CV ↔ GitHub: non verificabile", summary)
+        self.assertIn("Nome CV ↔ Instagram: coerente.", summary)
 
 
 if __name__ == "__main__":

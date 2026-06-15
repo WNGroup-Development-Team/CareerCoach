@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import "./App.css";
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps, react-hooks/immutability */
 
@@ -3084,17 +3084,14 @@ function App() {
   const isLinkedInConnected = profile.auth_provider === "linkedin";
   const hasAnyDigitalProfile = Boolean(
     digitalPresence.linkedin_url.trim() ||
-    digitalPresence.portfolio_url.trim() ||
     digitalPresence.instagram_handle.trim()
   );
   const canAnalyzeDigitalPresence = isLinkedInConnected || hasAnyDigitalProfile;
   const exactInstagramHandle = normalizeInstagramHandle(digitalPresence.instagram_handle || profile.instagram_handle || "");
   const linkedinProfileUrl = digitalPresence.linkedin_url || profile.linkedin_url || "";
-  const otherProfileUrl = digitalPresence.portfolio_url || profile.portfolio_url || "";
   const connectedDigitalProfiles = [
     linkedinProfileUrl ? { title: "Link LinkedIn pubblico", url: normalizeProfileUrl(linkedinProfileUrl) } : null,
     exactInstagramHandle ? { title: `Instagram @${exactInstagramHandle}`, url: `https://www.instagram.com/${exactInstagramHandle}/` } : null,
-    otherProfileUrl ? { title: "Link aggiuntivo", url: normalizeProfileUrl(otherProfileUrl) } : null,
   ].filter(Boolean);
   const cvStrategyTargetRole = cvOptimizationAnalysis?.target?.role || personalizeForm.role || profile.target_role || "ruolo target";
   const cvStrategyTargetCompany = cvOptimizationAnalysis?.target?.company || company || "azienda target";
@@ -3935,22 +3932,7 @@ function App() {
                   {linkedinUploadMessage && <p className="linkedin-upload-message">{linkedinUploadMessage}</p>}
                 </div>
 
-                <label className="digital-field-label">
-                  <span className="digital-field-icon" aria-hidden="true">
-                    <LinkIcon />
-                  </span>
-                  Link aggiuntivo <span className="optional-pill">opzionale</span>
-                </label>
-                <input
-                  className="digital-input"
-                  value={digitalPresence.portfolio_url}
-                  onChange={(event) => updateDigitalPresence("portfolio_url", event.target.value)}
-                  placeholder="https://..."
-                  autoComplete="off"
-                />
-                <p className="digital-field-hint">
-                  Portfolio, sito personale o altro profilo social. Se non accessibile, verrà segnalato nell'analisi.
-                </p>
+
 
                 <label className="digital-field-label">
                   <span className="digital-field-icon" aria-hidden="true">
@@ -4199,10 +4181,7 @@ function App() {
                     </p>
                   )}
 
-                  <p className="digital-field-hint" style={{ margin: 0 }}>
-                    <strong style={{ color: "#263548" }}>Link aggiuntivo:</strong>{" "}
-                    {digitalAnalysis.analysis_evidence.additional_link?.message || "—"}
-                  </p>
+
                 </div>
               </div>
             )}
