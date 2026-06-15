@@ -70,18 +70,17 @@ export default function PersonalizeExperience({
   const normalizedGoal = goal.trim();
   const normalizedCompany = company.trim();
   const normalizedRole = role.trim();
-  const hasQuickMethod = normalizedGoal.length > 19;
+  const hasQuickMethod = normalizedGoal.length >= 12;
   const hasPlausibleRole = isPlausibleRole(normalizedRole);
-  const hasSpecificDetails = normalizedCompany.length > 2 && hasPlausibleRole;
 
   const localErrors = {
-    description: hasQuickMethod || hasSpecificDetails ? "" : "Descrivi la candidatura o compila i dettagli specifici.",
+    description: hasQuickMethod || hasPlausibleRole
+      ? ""
+      : "Inserisci almeno un ruolo target oppure descrivi la candidatura nel metodo rapido.",
     company: hasQuickMethod || (!normalizedCompany || normalizedCompany.length > 2) ? "" : "Inserisci un nome azienda valido.",
-    role: requireRole && !hasPlausibleRole
-      ? "Inserisci un ruolo professionale specifico, ad esempio Data Analyst o Software Engineer."
-      : (!normalizedRole || hasPlausibleRole)
-        ? ""
-        : "Inserisci solo il titolo del ruolo, non una frase sul colloquio.",
+    role: (!normalizedRole || hasPlausibleRole)
+      ? ""
+      : "Inserisci solo il titolo del ruolo, non una frase sul colloquio.",
   };
 
   const fieldErrors = {
@@ -89,9 +88,7 @@ export default function PersonalizeExperience({
     ...(validation.errors || {}),
   };
 
-  const hasRequiredContext = requireRole
-    ? hasPlausibleRole && (hasQuickMethod || normalizedCompany.length > 2)
-    : hasQuickMethod || hasSpecificDetails;
+  const hasRequiredContext = hasQuickMethod || hasPlausibleRole;
   const hasLocalValidFields = hasRequiredContext && !localErrors.company && !localErrors.role;
   const canSubmit = hasLocalValidFields && !isValidating;
 
@@ -137,6 +134,9 @@ export default function PersonalizeExperience({
             />
           </div>
           {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
+          <p className="field-hint">
+            Puoi cercare anche solo per ruolo. Se inserisci anche un'azienda, controlleremo che sia valida.
+          </p>
 
           <label htmlFor="personalize-role">Ruolo</label>
           <div className={`personalize-field ${fieldErrors.role || fieldErrors.coherence ? "input-error" : ""}`}>
@@ -196,7 +196,7 @@ export default function PersonalizeExperience({
               <BuildingIcon />
               <span>
                 <small>Azienda</small>
-                <strong>{normalizedCompany || "Da definire"}</strong>
+                <strong>{normalizedCompany || "Opzionale"}</strong>
               </span>
             </div>
           </div>

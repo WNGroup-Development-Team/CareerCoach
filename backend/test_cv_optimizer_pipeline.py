@@ -6,6 +6,7 @@ from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 from docx.shared import Pt
+from docx.text.paragraph import Paragraph
 
 from main import (
     build_additional_rewrite_instructions,
@@ -797,11 +798,81 @@ class DocxPreserverLayoutTests(unittest.TestCase):
             and context.paragraph.text.strip()
             and context.paragraph.text.strip() != "HARD SKILLS"
         ]
-        self.assertIn("Python", hard_skill_text)
-        self.assertIn("SQL", hard_skill_text)
+        self.assertIn("Python, SQL", hard_skill_text)
         self.assertEqual(
             sum(1 for context in contexts if context.paragraph.text.strip() == "HARD SKILLS"),
             1,
+        )
+
+    def test_skill_append_adds_only_missing_values_to_existing_block(self):
+        document = Document()
+        document.add_paragraph("COMPETENZE TECNICHE")
+        document.add_paragraph("Python, SQL")
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [StructuredRewriteInstruction(
+                suggestion_id="missing-skills-only",
+                target_section="HARD SKILLS",
+                action="append",
+                old_text_hint="",
+                new_text="SQL, Power BI",
+                items=["SQL", "Power BI"],
+                reason="Skill confermate.",
+                confidence=1.0,
+            )],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+        self.assertEqual(texts, ["COMPETENZE TECNICHE", "Python, SQL, Power BI"])
+
+    def test_decorative_textbox_is_not_used_as_new_section_anchor(self):
+        document = Document()
+        document.add_paragraph("PROFILO")
+        document.add_paragraph("Profilo professionale.")
+        self._add_textbox(document, ["Elemento decorativo"])
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [StructuredRewriteInstruction(
+                suggestion_id="new-project",
+                target_section="PROGETTI",
+                action="append",
+                old_text_hint="",
+                new_text="Progetto confermato",
+                items=[],
+                reason="Contenuto confermato.",
+                confidence=1.0,
+            )],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        body_text = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+        textbox_text = [
+            Paragraph(paragraph, updated._body).text
+            for element in updated._element.xpath(".//w:txbxContent")
+            for paragraph in element
+            if paragraph.tag.endswith("}p")
+        ]
+        self.assertIn("PROGETTI", body_text)
+        self.assertIn("Progetto confermato", body_text)
+        self.assertEqual(textbox_text, ["Elemento decorativo"])
+
+    def test_removes_known_corrupted_word_without_deleting_real_content(self):
+        document = Document()
+        document.add_paragraph("PROFILO")
+        document.add_paragraph("Data Analyst Fhaurehds con esperienza in reporting.")
+
+        result = ResumeDocxOptimizationPipeline().apply_instructions_to_docx(
+            self._docx_bytes(document),
+            [],
+        )
+
+        updated = Document(io.BytesIO(result.file_bytes))
+        self.assertEqual(
+            updated.paragraphs[1].text,
+            "Data Analyst con esperienza in reporting.",
         )
 
     def test_inline_table_inherits_the_preceding_section(self):

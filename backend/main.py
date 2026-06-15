@@ -8044,6 +8044,76 @@ def validate_role_plausibility(role: Optional[str]) -> Dict:
     }
 
 
+QUICK_APPLICATION_INVALID_MESSAGE = (
+    "Il testo inserito non sembra una candidatura valida. Scrivi il ruolo a cui "
+    "stai puntando, ad esempio: 'Voglio candidarmi come Data Analyst'."
+)
+MISSING_TARGET_ROLE_MESSAGE = (
+    "Inserisci almeno un ruolo target, ad esempio 'Data Analyst', 'Project Manager' "
+    "o 'Computer Vision Engineer'. L'azienda e opzionale."
+)
+INVALID_COMPANY_MESSAGE = (
+    "L'azienda inserita non sembra valida. Puoi correggerla oppure procedere "
+    "indicando solo il ruolo."
+)
+
+
+def extract_quick_application_context(description: Optional[str]) -> Dict[str, Any]:
+    raw = re.sub(r"\s+", " ", str(description or "")).strip()
+    cleaned = normalize_plain_text(raw)
+    invalid_markers = {
+        "ignora le regole", "ignora le istruzioni", "prompt injection",
+        "inventa esperienze", "esperienze inventate", "fai finta",
+        "menti", "a caso", "ciao come stai", "che lavoro posso fare",
+        "mi trovi un lavoro", "cosa devo fare", "secondo te va bene",
+    }
+    offensive_markers = {
+        "cazzo", "merda", "stronzo", "stronza", "vaffanculo", "idiota",
+        "fuck", "shit",
+    }
+    if (
+        not raw
+        or is_low_quality_text(raw, min_chars=12, min_words=3)
+        or any(marker in cleaned for marker in invalid_markers | offensive_markers)
+        or "?" in raw
+    ):
+        return {"is_valid": False, "role": "", "company": "", "message": QUICK_APPLICATION_INVALID_MESSAGE}
+
+    role_patterns = [
+        r"(?i)\b(?:candidarmi|candidare|puntando|punto)\s+(?:come|a un ruolo da|a una posizione da)\s+(.+?)(?=\s+(?:presso|in|per)\s+[A-ZÀ-ÖØ-Þ]|\s*$)",
+        r"(?i)\b(?:ruolo|posizione)\s+(?:di|da)\s+(.+?)(?=\s+(?:presso|in)\s+[A-ZÀ-ÖØ-Þ]|\s*$)",
+        r"(?i)\bottimizza(?:re)?\s+(?:il\s+)?cv\s+per\s+(?:il\s+)?ruolo\s+di\s+(.+?)(?=\s+(?:presso|in)\s+[A-ZÀ-ÖØ-Þ]|\s*$)",
+    ]
+    company_patterns = [
+        r"(?i)\b(?:presso|in)\s+([A-ZÀ-ÖØ-Þ][\wÀ-ÿ&.'-]*(?:\s+[A-ZÀ-ÖØ-Þ][\wÀ-ÿ&.'-]*){0,4})\s*$",
+    ]
+
+    role = ""
+    for pattern in role_patterns:
+        match = re.search(pattern, raw)
+        if match:
+            role = clean_job_role_title(match.group(1).strip(" .,:;-"))
+            break
+    company = ""
+    for pattern in company_patterns:
+        match = re.search(pattern, raw)
+        if match:
+            company = match.group(1).strip(" .,:;-")
+            break
+
+    if company and role.lower().endswith(f" {company.lower()}"):
+        role = role[:-(len(company) + 1)].strip()
+    role_validation = validate_role_plausibility(role)
+    if not role or not role_validation["is_valid"]:
+        return {"is_valid": False, "role": "", "company": company, "message": QUICK_APPLICATION_INVALID_MESSAGE}
+    return {
+        "is_valid": True,
+        "role": role,
+        "company": company,
+        "message": "Metodo rapido valido.",
+    }
+
+
 def classify_company_sector(company: Optional[str], sector: Optional[str] = "") -> Optional[str]:
     cleaned_company = normalize_plain_text(company)
     cleaned_sector = normalize_plain_text(sector)
@@ -8176,7 +8246,18 @@ def verify_company_exists(company: str) -> Dict:
         }
 
     if not TAVILY_API_KEY:
-        plausible = cleaned in KNOWN_COMPANIES or bool(re.search(r"[a-z]{3,}", cleaned))
+        words = cleaned.split()
+        compact = re.sub(r"[^a-z]", "", cleaned)
+        plausible = (
+            cleaned in KNOWN_COMPANIES
+            or (
+                1 <= len(words) <= 6
+                and len(compact) >= 4
+                and len(re.findall(r"[aeiou]", compact)) >= 2
+                and not re.search(r"[bcdfghjklmnpqrstvwxyz]{7,}", compact)
+                and not is_low_quality_text(cleaned, min_chars=4, min_words=1)
+            )
+        )
         return {
             "exists": plausible,
             "confidence": 55 if plausible else 20,
@@ -8274,8 +8355,91 @@ def validate_job_input(
     sector: str = "",
     required_skills: str = "",
 ) -> Dict:
+    description = (description or "").strip()
+    company = (company or "").strip()
+    role = clean_job_role_title(role)
     errors = {}
     warnings = []
+    quick_context = extract_quick_application_context(description) if description else {
+        "is_valid": False,
+        "role": "",
+        "company": "",
+    }
+    if description and not quick_context["is_valid"]:
+        errors["description"] = QUICK_APPLICATION_INVALID_MESSAGE
+
+    effective_role = role or str(quick_context.get("role") or "").strip()
+    effective_company = company or str(quick_context.get("company") or "").strip()
+    role_validation = validate_role_plausibility(effective_role)
+    link_validation = validate_job_link(link, effective_company, effective_role)
+    has_valid_link = link_validation["is_valid"] and bool((link or "").strip())
+
+    if not role_validation["is_valid"] and not has_valid_link:
+        errors["role"] = MISSING_TARGET_ROLE_MESSAGE
+    elif effective_role and not role_validation["is_valid"]:
+        errors["role"] = role_validation["message"]
+
+    company_check = {
+        "exists": False,
+        "confidence": 0,
+        "sources": [],
+    }
+    if effective_company:
+        if is_low_quality_text(effective_company, min_chars=3, min_words=1):
+            errors["company"] = INVALID_COMPANY_MESSAGE
+        else:
+            company_check = verify_company_exists(effective_company)
+            if not company_check["exists"]:
+                errors["company"] = INVALID_COMPANY_MESSAGE
+
+    company_role_validation = validate_company_role_coherence(
+        effective_company,
+        effective_role,
+        sector,
+    )
+    if effective_company and effective_role and not company_role_validation["is_valid"]:
+        errors["coherence"] = company_role_validation["message"]
+    if not link_validation["is_valid"]:
+        errors["link"] = link_validation["message"]
+    if sector and is_low_quality_text(sector, min_chars=3, min_words=1):
+        errors["sector"] = "Il settore inserito non sembra coerente."
+
+    skills_valid, normalized_skills, skills_message = validate_required_skills(
+        required_skills,
+        effective_role,
+        description,
+    )
+    if not skills_valid:
+        errors["required_skills"] = skills_message
+
+    coherent, coherence_warnings = fields_are_coherent(
+        description,
+        effective_company,
+        effective_role,
+    )
+    if effective_company and effective_role and description and not coherent and "coherence" not in errors:
+        errors["coherence"] = "La descrizione non sembra coerente con azienda e ruolo indicati."
+    else:
+        warnings.extend(coherence_warnings)
+
+    is_valid = not errors
+    return {
+        "is_valid": is_valid,
+        "company_exists": bool(company_check["exists"]),
+        "role_is_plausible": role_validation["is_valid"],
+        "fields_are_coherent": coherent,
+        "link_is_valid": link_validation["is_valid"],
+        "errors": errors,
+        "warnings": warnings,
+        "sources": company_check.get("sources", []),
+        "normalized_link": link_validation.get("normalized_link", ""),
+        "required_skills": normalized_skills,
+        "normalized_role": effective_role,
+        "normalized_company": effective_company,
+        "quick_method_used": bool(description and quick_context["is_valid"]),
+        "message": "I dati inseriti sono validi." if is_valid else "Correggi i campi evidenziati prima di continuare.",
+    }
+
     has_description = not is_low_quality_text(description, min_chars=20, min_words=4)
     has_specific_details = (
         not is_low_quality_text(company, min_chars=3, min_words=1)
@@ -10714,6 +10878,8 @@ async def analyze_cv_for_job_endpoint(
     job_validation = validate_job_input(description, company, role, link, sector, required_skills)
     if not job_validation["is_valid"]:
         raise HTTPException(status_code=400, detail=job_validation)
+    role = job_validation.get("normalized_role") or role
+    company = job_validation.get("normalized_company") or company
 
     role_context = f"{role} ({role_level.strip()})" if role_level.strip() else role
     direct_job_link = job_validation.get("normalized_link") or link
@@ -10776,6 +10942,10 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
     sector = (data.sector or "").strip()
     required_skills = (data.required_skills or "").strip()
     job_validation = validate_job_input(description, company, role, link, sector, required_skills)
+    if not job_validation["is_valid"]:
+        raise HTTPException(status_code=400, detail=job_validation)
+    role = job_validation.get("normalized_role") or role
+    company = job_validation.get("normalized_company") or company
     if not job_validation["is_valid"]:
         warnings.append(job_validation.get("message") or "I dati del lavoro non sono completi o coerenti, ma l'analisi continuerà con i campi disponibili.")
 

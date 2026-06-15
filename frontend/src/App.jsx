@@ -3,6 +3,7 @@ import "./App.css";
 
 import logoCareerCoach from "./assets/career-coach-logo.png";
 import PersonalizeExperience from "./PersonalizeExperience";
+import TagInput from "./TagInput";
 import {
   SparkleIcon,
   LinkedInIcon,
@@ -36,9 +37,12 @@ const INTRO_SPLASH_DURATION_MS = 3000;
 const TRANSITION_DURATION_MS = 2000;
 const CV_ADDITIONAL_DATA_FIELDS = [
   { key: "experiences", label: "Esperienze da valorizzare" },
+  { key: "technical_skills", label: "Competenze tecniche aggiuntive" },
+  { key: "soft_skills", label: "Soft skills rilevanti" },
   { key: "projects", label: "Progetti importanti" },
   { key: "measurable_results", label: "Risultati misurabili ottenuti" },
   { key: "certifications", label: "Certificazioni o corsi" },
+  { key: "tools", label: "Strumenti e tecnologie utilizzate" },
   { key: "company_role_notes", label: "Informazioni specifiche per azienda e ruolo" },
   { key: "additional_notes", label: "Note aggiuntive per l'ottimizzazione" },
 ];
@@ -1997,7 +2001,7 @@ function App() {
     }
   };
 
-  const analyzeCvOptimization = async (profileOverride = profile, fileOverride = null) => {
+  const analyzeCvOptimization = async (profileOverride = profile, fileOverride = null, targetOverride = null) => {
     resetError();
     setOptimizedCv(null);
 
@@ -2012,8 +2016,8 @@ function App() {
     try {
       const requestPayload = {
         description: personalizeForm.goal.trim(),
-        company: personalizeForm.company.trim() || company,
-        role: personalizeForm.role.trim() || profileOverride.target_role || "",
+        company: targetOverride?.company ?? (personalizeForm.company.trim() || (company === "Generica" ? "" : company)),
+        role: targetOverride?.role ?? (personalizeForm.role.trim() || profileOverride.target_role || ""),
         role_level: personalizeForm.role_level.trim(),
         sector: personalizeForm.sector.trim() || profile.sector || "",
         link: personalizeForm.link.trim(),
@@ -2980,8 +2984,9 @@ function App() {
       return;
     }
 
+    let validationResult = null;
     try {
-      const validationResult = await validatePersonalizeForm();
+      validationResult = await validatePersonalizeForm();
       if (!validationResult) {
         return;
       }
@@ -2996,22 +3001,27 @@ function App() {
       return;
     }
 
-    const nextCompany = personalizeForm.company.trim() || "Generica";
-    const nextRole = personalizeForm.role.trim();
+    const nextCompany = validationResult.normalized_company || "";
+    const nextRole = validationResult.normalized_role || "";
 
     if (personalizeIntent === "cv" && !nextRole) {
       setJobValidation({
         status: "invalid",
         errors: {
-          role: "Inserisci un ruolo professionale specifico prima di analizzare il CV.",
+          role: "Inserisci almeno un ruolo target, ad esempio 'Data Analyst', 'Project Manager' o 'Computer Vision Engineer'. L'azienda è opzionale.",
         },
         warnings: [],
-        message: "Il ruolo è necessario per produrre un'ottimizzazione coerente.",
+        message: "Inserisci almeno un ruolo target. L'azienda è opzionale.",
       });
       return;
     }
 
-    setCompany(nextCompany);
+    setCompany(nextCompany || "Generica");
+    setPersonalizeForm((current) => ({
+      ...current,
+      role: nextRole,
+      company: nextCompany,
+    }));
 
     if (nextRole) {
       setProfile((current) => ({
@@ -3026,7 +3036,10 @@ function App() {
         return;
       }
 
-      await analyzeCvOptimization();
+      await analyzeCvOptimization(profile, null, {
+        role: nextRole,
+        company: nextCompany,
+      });
       return;
     }
 

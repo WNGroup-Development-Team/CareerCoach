@@ -1153,6 +1153,7 @@ Dati aggiuntivi utente:
             else:
                 failed_ids.append(instruction.suggestion_id)
 
+        self._clean_corrupted_document_text(document)
         self._synchronize_textbox_mirrors(textbox_mirror_groups)
         self._polish_document_typography(document)
         self._remove_oversized_table_row_minimums(document)
@@ -1325,6 +1326,9 @@ Dati aggiuntivi utente:
         contamination_warnings = self._skill_section_contamination_warnings(
             generated_file_bytes
         )
+        heading_warnings = self._duplicate_section_heading_warnings(
+            generated_file_bytes
+        )
         added_sections = self._unexpected_sections(normalized_original, normalized_final)
         content_warnings = self._final_content_warnings(final_text, original_text)
         status = "applied"
@@ -1357,6 +1361,8 @@ Dati aggiuntivi utente:
                     }
                 ],
             ]))
+        if heading_warnings:
+            status = "failed"
         if content_warnings and status == "applied":
             status = "partially_applied"
 
@@ -1366,6 +1372,7 @@ Dati aggiuntivi utente:
             "partially_applied": partial,
             "failed": failed,
             "duplicate_warnings": duplicate_warnings,
+            "heading_warnings": heading_warnings,
             "contamination_warnings": contamination_warnings,
             "content_warnings": content_warnings,
             "unexpected_sections": added_sections,
@@ -1472,7 +1479,13 @@ Dati aggiuntivi utente:
             print(f"DOCX APPLY - blocked wrong section injection: suggestion_id={instruction.suggestion_id}, target={instruction.target_section}")
             return "failed"
         contexts = self._paragraph_contexts(document)
-        matching = [context for context in contexts if context.section == target and self._is_editable_paragraph(context.paragraph)]
+        matching = [
+            context
+            for context in contexts
+            if context.section == target
+            and self._is_editable_paragraph(context.paragraph)
+            and self._is_safe_text_destination(context.paragraph)
+        ]
         if not matching:
             return self._insert_missing_section(document, instruction, sections_detected)
 
@@ -1480,6 +1493,11 @@ Dati aggiuntivi utente:
         if not replacement_lines:
             return "failed"
         if instruction.action == "append":
+            if target in {"hard_skills", "soft_skills", "competenze"}:
+                return self._merge_skill_lines_into_existing_section(
+                    matching,
+                    replacement_lines,
+                )
             self._append_to_existing_section(matching, replacement_lines)
             return "applied"
         if self._is_high_confidence_section_instruction(instruction):
@@ -1498,6 +1516,7 @@ Dati aggiuntivi utente:
                 context
                 for context in self._paragraph_contexts(document)
                 if context.section == target
+                and self._is_safe_text_destination(context.paragraph)
             ]
             if section_contexts:
                 replacement_lines = [
@@ -1516,6 +1535,21 @@ Dati aggiuntivi utente:
                 )
                 return "applied"
         heading = self._section_display_name(target)
+        shape_host = next(
+            (
+                paragraph
+                for paragraph in document.paragraphs
+                if self._paragraph_hosts_textbox(paragraph)
+            ),
+            None,
+        )
+        if shape_host is not None:
+            self._insert_section_block_before(
+                shape_host,
+                heading,
+                replacement,
+            )
+            return "applied"
         if not document.paragraphs:
             self._append_section_block(document, heading, replacement, None)
             return "applied"
@@ -1585,6 +1619,46 @@ Dati aggiuntivi utente:
             self._copy_paragraph_format(previous, new_paragraph)
             self._style_section_line(new_paragraph, section_name, line_index)
             previous = new_paragraph
+
+    def _merge_skill_lines_into_existing_section(
+        self,
+        matching_contexts: List[ParagraphContext],
+        replacement_lines: List[str],
+    ) -> str:
+        existing_text = "\n".join(
+            context.paragraph.text or ""
+            for context in matching_contexts
+        )
+        existing_keys = {
+            normalize_text(item)
+            for item in re.split(r"[,;|Â·\n]+", existing_text)
+            if normalize_text(item)
+        }
+        missing = [
+            item.strip()
+            for line in replacement_lines
+            for item in re.split(r"[,;|Â·\n]+", line)
+            if item.strip() and normalize_text(item) not in existing_keys
+        ]
+        if not missing:
+            return "applied"
+
+        anchor = matching_contexts[-1].paragraph
+        separator = self._skill_separator(anchor.text or "")
+        merged = (anchor.text or "").strip()
+        addition = separator.join(dict.fromkeys(missing))
+        merged = f"{merged}{separator if merged else ''}{addition}"
+        self._replace_paragraph_preserving_style(anchor, merged)
+        return "applied"
+
+    def _skill_separator(self, text: str) -> str:
+        if "Â·" in text:
+            return " Â· "
+        if "|" in text:
+            return " | "
+        if ";" in text:
+            return "; "
+        return ", "
 
     def _rewrite_section_block(
         self,
@@ -1673,6 +1747,29 @@ Dati aggiuntivi utente:
             self._style_section_line(content_paragraph, section_name, line_index)
             previous = content_paragraph
 
+    def _insert_section_block_before(
+        self,
+        anchor_paragraph,
+        heading: str,
+        replacement: str,
+    ) -> None:
+        from docx.text.paragraph import Paragraph
+
+        lines = [line.strip() for line in replacement.splitlines() if line.strip()]
+        elements = []
+        for text in [heading.upper(), *lines]:
+            new_p = OxmlElement("w:p")
+            anchor_paragraph._p.addprevious(new_p)
+            paragraph = Paragraph(new_p, anchor_paragraph._parent)
+            paragraph.text = text
+            elements.append(paragraph)
+        if not elements:
+            return
+        self._make_heading_like(elements[0])
+        section_name = canonical_section(heading)
+        for index, paragraph in enumerate(elements[1:]):
+            self._style_section_line(paragraph, section_name, index)
+
     def _style_section_line(self, paragraph, section_name: str, line_index: int) -> None:
         if canonical_section(section_name) != "progetti":
             return
@@ -1696,7 +1793,14 @@ Dati aggiuntivi utente:
             body_candidates = []
             for context in reversed(contexts):
                 if context.section == previous_section and (context.paragraph.text or '').strip():
-                    if not prefer_body or not self._paragraph_is_in_table(context.paragraph):
+                    if (
+                        not self._paragraph_is_in_textbox(context.paragraph)
+                        and not self._paragraph_hosts_textbox(context.paragraph)
+                        and (
+                            not prefer_body
+                            or not self._paragraph_is_in_table(context.paragraph)
+                        )
+                    ):
                         return context.paragraph
                     body_candidates.append(context.paragraph)
             if body_candidates:
@@ -1706,9 +1810,58 @@ Dati aggiuntivi utente:
                 if (context.paragraph.text or '').strip() and not self._paragraph_is_in_table(context.paragraph):
                     return context.paragraph
         for context in reversed(contexts):
-            if (context.paragraph.text or '').strip():
+            if (
+                (context.paragraph.text or '').strip()
+                and not self._paragraph_is_in_textbox(context.paragraph)
+                and not self._paragraph_hosts_textbox(context.paragraph)
+            ):
                 return context.paragraph
         return None
+
+    def _is_safe_text_destination(self, paragraph) -> bool:
+        if self._paragraph_hosts_textbox(paragraph):
+            return False
+        if not self._paragraph_is_in_textbox(paragraph):
+            return True
+        textbox = self._textbox_ancestor(paragraph)
+        if textbox is None:
+            return False
+        from docx.text.paragraph import Paragraph
+
+        texts = [
+            (Paragraph(child, paragraph._parent).text or "").strip()
+            for child in textbox
+            if child.tag.endswith("}p")
+        ]
+        return any(is_section_heading(text) for text in texts if text)
+
+    def _textbox_ancestor(self, paragraph):
+        marked_textbox = getattr(paragraph, "_careercoach_textbox", None)
+        if marked_textbox is not None:
+            return marked_textbox
+        element = getattr(paragraph, "_p", None)
+        if element is not None:
+            ancestors = element.xpath("ancestor::w:txbxContent")
+            if ancestors:
+                return ancestors[0]
+        while element is not None:
+            if element.tag.endswith("}txbxContent"):
+                return element
+            element = element.getparent()
+        return None
+
+    def _paragraph_is_in_textbox(self, paragraph) -> bool:
+        return bool(
+            getattr(paragraph, "_careercoach_in_textbox", False)
+            or self._textbox_ancestor(paragraph) is not None
+        )
+
+    def _paragraph_hosts_textbox(self, paragraph) -> bool:
+        element = getattr(paragraph, "_p", None)
+        return bool(
+            element is not None
+            and element.xpath(".//w:txbxContent")
+        )
 
     def _section_index(self, sections_detected: List[str], target: str) -> int:
         if target in sections_detected:
@@ -1801,6 +1954,55 @@ Dati aggiuntivi utente:
             if count > 2 and len(line) > 25:
                 warnings.append(line[:120])
         return warnings
+
+    def _duplicate_section_heading_warnings(self, file_bytes: bytes) -> List[str]:
+        from docx import Document
+
+        try:
+            document = Document(io.BytesIO(file_bytes))
+        except Exception:
+            return ["Impossibile verificare i titoli delle sezioni."]
+
+        counts: Dict[str, int] = {}
+        for context in self._paragraph_contexts(document):
+            text = (context.paragraph.text or "").strip()
+            if not is_section_heading(text):
+                continue
+            section = canonical_section(text)
+            if section:
+                counts[section] = counts.get(section, 0) + 1
+        return [
+            f"Titolo di sezione duplicato: {section}"
+            for section, count in counts.items()
+            if count > 1
+        ]
+
+    def _clean_corrupted_document_text(self, document) -> None:
+        for context in self._paragraph_contexts(document):
+            paragraph = context.paragraph
+            text = (paragraph.text or "").strip()
+            if not text or is_section_heading(text):
+                continue
+            cleaned = self._remove_obviously_corrupted_tokens(text)
+            if cleaned != text:
+                self._replace_paragraph_preserving_style(paragraph, cleaned)
+
+    def _remove_obviously_corrupted_tokens(self, text: str) -> str:
+        known_corrupted = {"fhaurehds"}
+        kept: List[str] = []
+        for token in (text or "").split():
+            bare = re.sub(r"^[^\w]+|[^\w]+$", "", token)
+            normalized = normalize_text(bare)
+            letters = re.sub(r"[^a-z]", "", normalized)
+            has_long_consonant_run = bool(
+                re.search(r"[bcdfghjklmnpqrstvwxyz]{6,}", letters)
+            )
+            if normalized in known_corrupted or (
+                len(letters) >= 9 and has_long_consonant_run
+            ):
+                continue
+            kept.append(token)
+        return re.sub(r"\s+", " ", " ".join(kept)).strip()
 
     def _unexpected_sections(self, original_text: str, final_text: str) -> List[str]:
         original_sections = set(self.parser.section_text_map(original_text).keys())
@@ -1949,6 +2151,8 @@ Dati aggiuntivi utente:
             current_section = "intestazione"
             for paragraph_element in paragraphs:
                 paragraph = Paragraph(paragraph_element, document._body)
+                paragraph._careercoach_in_textbox = True
+                paragraph._careercoach_textbox = textbox
                 text = (paragraph.text or "").strip()
                 if is_section_heading(text):
                     current_section = canonical_section(text)
