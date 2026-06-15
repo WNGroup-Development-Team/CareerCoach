@@ -9531,6 +9531,42 @@ ROLE_SKILL_LIBRARY = {
         "programming_languages": ["Python", "R", "SQL", "MATLAB"],
         "tools": ["Minitab", "Arena Simulation", "SAP", "Power BI", "Excel avanzato", "Microsoft Visio", "IBM CPLEX"],
     },
+    "marketing manager": {
+        "hard_skills": ["Strategia di marketing", "Market research", "Campaign management", "Brand positioning", "Go-to-market strategy", "Marketing analytics", "Budget marketing", "Customer segmentation"],
+        "soft_skills": ["Creativita strategica", "Leadership", "Comunicazione persuasiva", "Orientamento al cliente", "Pensiero analitico"],
+        "programming_languages": [],
+        "tools": ["Google Analytics", "HubSpot", "Salesforce", "Meta Ads Manager", "Google Ads", "Power BI", "Excel avanzato"],
+    },
+    "digital marketer": {
+        "hard_skills": ["Digital advertising", "SEO", "SEM", "Marketing automation", "Conversion rate optimization", "Email marketing", "Content performance analysis", "A/B testing"],
+        "soft_skills": ["Curiosita digitale", "Pensiero analitico", "Creativita", "Adattabilita", "Orientamento ai risultati"],
+        "programming_languages": [],
+        "tools": ["Google Ads", "Meta Ads Manager", "Google Analytics", "Search Console", "Mailchimp", "HubSpot", "SEMrush"],
+    },
+    "recruiter": {
+        "hard_skills": ["Talent acquisition", "Sourcing candidati", "Selezione del personale", "Interviste strutturate", "Screening CV", "Employer branding", "Candidate pipeline management", "ATS recruiting"],
+        "soft_skills": ["Ascolto attivo", "Comunicazione", "Empatia professionale", "Negoziazione", "Valutazione critica"],
+        "programming_languages": [],
+        "tools": ["LinkedIn Recruiter", "ATS", "Greenhouse", "Lever", "Workday", "Excel", "Google Workspace"],
+    },
+    "legal counsel": {
+        "hard_skills": ["Contrattualistica", "Diritto societario", "Legal research", "Compliance normativa", "Corporate governance", "Risk assessment legale", "Privacy e GDPR", "Negoziazione contrattuale"],
+        "soft_skills": ["Pensiero critico", "Precisione", "Riservatezza", "Comunicazione consulenziale", "Gestione delle priorita"],
+        "programming_languages": [],
+        "tools": ["Westlaw", "LexisNexis", "OneTrust", "DocuSign", "Microsoft Word", "SharePoint"],
+    },
+    "ux designer": {
+        "hard_skills": ["User research", "Interaction design", "Wireframing", "Usability testing", "Information architecture", "Prototipazione", "Design system", "User journey mapping"],
+        "soft_skills": ["Empatia utente", "Creativita", "Collaborazione", "Comunicazione visiva", "Pensiero critico"],
+        "programming_languages": [],
+        "tools": ["Figma", "Miro", "FigJam", "Adobe XD", "Maze", "Optimal Workshop", "Notion"],
+    },
+    "supply chain manager": {
+        "hard_skills": ["Supply chain planning", "Demand planning", "Gestione inventario", "S&OP", "Logistics management", "Procurement planning", "Supplier performance analysis", "Forecasting operativo"],
+        "soft_skills": ["Pensiero sistemico", "Negoziazione", "Problem solving operativo", "Comunicazione interfunzionale", "Gestione delle priorita"],
+        "programming_languages": ["SQL", "Python"],
+        "tools": ["SAP", "Oracle SCM Cloud", "Excel avanzato", "Power BI", "Microsoft Project", "Tableau"],
+    },
 }
 
 
@@ -9595,6 +9631,10 @@ def infer_role_family(role: str, description: str = "", required_skills: str = "
         return "data scientist"
     if any(term in target_plain for term in ["data analyst", "analista dati", "analisi dati", "data analysis", "business intelligence"]):
         return "data analyst"
+    for family in ROLE_SKILL_LIBRARY:
+        family_plain = normalize_plain_text(family)
+        if family_plain and family_plain in target_plain:
+            return family
     if any(term in target_plain for term in ["software engineer", "software developer", "sviluppatore"]):
         return "software engineer"
     if any(term in target_plain for term in ["frontend", "ui", "ux", "designer"]):
@@ -13745,7 +13785,8 @@ def search_interview_questions(data: SearchInterviewQuestionsRequest):
 # =========================
 
 @app.post("/generate-question")
-def generate_question(data: GenerateQuestionRequest):
+def generate_question(data: GenerateQuestionRequest, authorization: Optional[str] = Header(default=None)):
+    require_user_session(data.user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -14065,7 +14106,7 @@ La struttura deve essere ESATTAMENTE questa:
 # =========================
 
 @app.post("/evaluate-answer")
-def evaluate_answer(data: EvaluateAnswerRequest):
+def evaluate_answer(data: EvaluateAnswerRequest, authorization: Optional[str] = Header(default=None)):
     print("Endpoint /evaluate-answer chiamato.")
 
     conn = get_connection()
@@ -14117,6 +14158,8 @@ def evaluate_answer(data: EvaluateAnswerRequest):
         experience_level,
         interview_language
     ) = row
+
+    require_user_session(user_id, authorization)
 
     speech_metrics_json = get_speech_metrics_json(data.speech_metrics)
 
@@ -14560,7 +14603,7 @@ def get_progress(user_id: int, authorization: Optional[str] = Header(default=Non
 # =========================
 
 @app.get("/question-sources/{question_id}")
-def get_question_sources(question_id: int):
+def get_question_sources(question_id: int, authorization: Optional[str] = Header(default=None)):
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -14570,15 +14613,21 @@ def get_question_sources(question_id: int):
         ws.title,
         ws.url,
         ws.content,
-        ws.created_at
+        ws.created_at,
+        s.user_id
     FROM web_sources ws
     JOIN question_web_sources qws ON ws.id = qws.source_id
+    JOIN questions q ON q.id = qws.question_id
+    JOIN interview_sessions s ON s.id = q.session_id
     WHERE qws.question_id = ?
     ORDER BY ws.created_at DESC
     """, (question_id,))
 
     rows = cursor.fetchall()
     conn.close()
+
+    if rows:
+        require_user_session(rows[0][5], authorization)
 
     sources = []
 
@@ -14597,6 +14646,9 @@ def get_question_sources(question_id: int):
     }
 @app.post("/debug-cv-read")
 async def debug_cv_read(file: UploadFile = File(...)):
+    if not DEBUG_MODE:
+        raise HTTPException(status_code=404, detail="Endpoint debug non disponibile.")
+
     from io import BytesIO
     import fitz
     from pypdf import PdfReader

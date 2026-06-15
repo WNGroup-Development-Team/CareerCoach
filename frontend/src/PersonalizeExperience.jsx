@@ -43,28 +43,15 @@ function BriefcaseIcon() {
   );
 }
 
-function LinkIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M10 13a5 5 0 0 0 7.07 0l2-2a5 5 0 0 0-7.07-7.07l-1.14 1.14" />
-      <path d="M14 11a5 5 0 0 0-7.07 0l-2 2A5 5 0 0 0 12 20.07l1.14-1.14" />
-    </svg>
-  );
-}
-
 export default function PersonalizeExperience({
   company,
   goal,
-  link, // kept for backend compatibility (not used in UI anymore)
   onBack,
   onChange,
   onSubmit,
   role,
-  roleLevel, // kept for backend compatibility (not used in UI anymore)
-  sector = "",
   validation = { status: "idle", errors: {}, warnings: [], message: "" },
   isValidating = false,
-  requireRole = false,
   submitLabel = "Continua",
 }) {
   const normalizedGoal = goal.trim();
