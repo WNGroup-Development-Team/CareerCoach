@@ -2122,6 +2122,15 @@ Dati aggiuntivi utente:
                 pass
 
     def _replace_paragraph_preserving_style(self, paragraph, replacement: str) -> None:
+        # Svuota il testo dentro <w:hyperlink> per evitare che resti visibile
+        # accanto al testo riscritto (causava duplicazione del link LinkedIn).
+        try:
+            ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            for hyperlink in paragraph._p.iter(f"{ns_w}hyperlink"):
+                for t in hyperlink.iter(f"{ns_w}t"):
+                    t.text = ""
+        except Exception:
+            pass
         runs = list(paragraph.runs)
         if not runs:
             paragraph.text = replacement
