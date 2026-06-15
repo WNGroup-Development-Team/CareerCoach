@@ -178,11 +178,11 @@ export default function PersonalizeExperience({
           <div className="personalize-sidebar-card">
             <span className="personalize-sidebar-kicker">Come funziona</span>
             <h3>Più dettagli, migliore sarà il risultato</h3>
-            <ol>
+            <ul>
               <li>Indica un ruolo professionale specifico.</li>
               <li>Aggiungi l'azienda per rendere l'analisi più mirata.</li>
               <li>Usa la frase libera per raccontare il tuo obiettivo.</li>
-            </ol>
+            </ul>
           </div>
 
           <div className="personalize-sidebar-card personalize-live-summary">

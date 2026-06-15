@@ -4776,12 +4776,6 @@ const screenshotUploadBoxes = [];
                         <small>Skill {index + 1} di {proposedSkillConfirmationItems.length}</small>
                         <b>{item.name}</b>
                         <small><b>Categoria:</b> {getConfirmationCategoryLabel(item.category)}</small>
-                        <small><b>Perché è utile:</b> {item.reason}</small>
-                        <small>
-                          <b>Stato:</b> {item.already_present
-                            ? "Risulta già presente o supportata dal CV."
-                            : "Non risulta chiaramente presente nel CV."}
-                        </small>
 
                         <label className="cv-additional-field">
                           <span>Dove l'hai usata? (facoltativo)</span>
