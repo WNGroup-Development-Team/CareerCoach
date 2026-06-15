@@ -429,6 +429,7 @@ class DigitalPresenceUpdate(BaseModel):
     linkedin_url: Optional[str] = None
     portfolio_url: Optional[str] = None
     instagram_handle: Optional[str] = None
+    target_role: Optional[str] = None
     linkedin_connected: bool = False
 
 
@@ -1602,6 +1603,24 @@ def cv_content_fingerprint(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def cv_analysis_target_fingerprint(
+    role: str,
+    company: str = "",
+    description: str = "",
+    required_skills: str = "",
+) -> str:
+    normalized_company = normalize_plain_text(company)
+    if normalized_company in {"generica", "azienda generica", "non specificata"}:
+        normalized_company = ""
+    normalized = "|".join([
+        normalize_plain_text(role),
+        normalized_company,
+        normalize_plain_text(description),
+        normalize_plain_text(required_skills),
+    ])
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def normalize_for_cv_detection(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text.lower())
     normalized = "".join(char for char in normalized if not unicodedata.combining(char))
@@ -2005,25 +2024,24 @@ def compute_total_score(
 
 
 def compute_weighted_cv_job_score(payload: Dict[str, Any]) -> int:
-    role_match = clamp_score(payload.get("role_match_score", 0))
-    company_fit = clamp_score(payload.get("company_fit_score", 0))
-    completeness = clamp_score(payload.get("completeness_score", 0))
-    ats_score = clamp_score(payload.get("ats_score", 0))
-    format_score = clamp_score(payload.get("format_score", 0))
-    clarity = clamp_score(payload.get("clarity_score", 0))
-    professionalism = clamp_score(payload.get("professionalism_score", 0))
+    components = [
+        (clamp_score(payload.get("role_match_score", 0)), 0.30),
+        (clamp_score(payload.get("completeness_score", 0)), 0.20),
+        (clamp_score(payload.get("ats_score", 0)), 0.17),
+        (clamp_score(payload.get("keyword_score", payload.get("ats_score", 0))), 0.13),
+        (clamp_score(payload.get("format_score", 0)), 0.08),
+        (clamp_score(payload.get("clarity_score", 0)), 0.06),
+        (clamp_score(payload.get("professionalism_score", 0)), 0.06),
+    ]
+    if payload.get("company_provided"):
+        components.append((clamp_score(payload.get("company_fit_score", 0)), 0.10))
 
-    ats_quality = round((ats_score * 0.7) + (format_score * 0.3))
-
-    weighted = (
-        role_match * 0.34 +
-        company_fit * 0.10 +
-        completeness * 0.18 +
-        ats_quality * 0.20 +
-        clarity * 0.09 +
-        professionalism * 0.09
-    )
-    return clamp_score(round(weighted))
+    total_weight = sum(weight for _score, weight in components)
+    if total_weight <= 0:
+        return 0
+    return clamp_score(round(
+        sum(score * weight for score, weight in components) / total_weight
+    ))
 
 
 def build_cv_score_explanation(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2042,8 +2060,10 @@ def build_cv_score_explanation(payload: Dict[str, Any]) -> Dict[str, Any]:
         [
             ("Coerenza col ruolo", role_match),
             ("Struttura e completezza", completeness),
-            ("Compatibilità ATS", ats_quality),
-            ("Adattamento all'azienda", company_fit),
+            ("Compatibilità ATS", ats_score),
+            ("Copertura competenze", keyword_score),
+            ("Formato", format_score),
+            *(([("Adattamento all'azienda", company_fit)]) if payload.get("company_provided") else []),
             ("Chiarezza", clarity),
             ("Professionalità", professionalism),
         ],
@@ -2054,8 +2074,10 @@ def build_cv_score_explanation(payload: Dict[str, Any]) -> Dict[str, Any]:
         [
             ("Coerenza col ruolo", role_match),
             ("Struttura e completezza", completeness),
-            ("Compatibilità ATS", ats_quality),
-            ("Adattamento all'azienda", company_fit),
+            ("Compatibilità ATS", ats_score),
+            ("Copertura competenze", keyword_score),
+            ("Formato", format_score),
+            *(([("Adattamento all'azienda", company_fit)]) if payload.get("company_provided") else []),
             ("Chiarezza", clarity),
             ("Professionalità", professionalism),
         ],
@@ -2099,9 +2121,15 @@ def build_cv_score_explanation(payload: Dict[str, Any]) -> Dict[str, Any]:
         "explanation": [
             f"Il punteggio finale pesa soprattutto la coerenza col ruolo, la completezza e la qualità ATS, evitando di contare due volte keyword e struttura.",
             f"Coerenza col ruolo: {role_match}/100.",
-            f"Compatibilità ATS: {ats_quality}/100 (ATS {ats_score}/100, formato {format_score}/100).",
+            f"Compatibilità ATS: {ats_score}/100.",
+            f"Copertura competenze e termini target: {keyword_score}/100.",
+            f"Formato testuale e sezioni riconoscibili: {format_score}/100.",
             f"Completezza: {completeness}/100.",
-            f"Adattamento all'azienda: {company_fit}/100.",
+            *(
+                [f"Adattamento all'azienda: {company_fit}/100."]
+                if payload.get("company_provided")
+                else ["Adattamento all'azienda non incluso: azienda non specificata."]
+            ),
             f"Chiarezza: {clarity}/100, professionalità: {professionalism}/100.",
         ],
     }
@@ -4127,6 +4155,7 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     return {
         "cv_profile_loaded": bool(user.get("cv_text")),
         "cv_filename": user.get("cv_filename") or "",
+        "target_role": user.get("target_role") or "",
         "linkedin_identity": linkedin_identity,
         "linkedin_export_identity": linkedin_export_identity,
         "linkedin_public_identity": linkedin_public_identity,
@@ -4175,6 +4204,37 @@ def describe_linkedin_evidence(evidence: Dict) -> str:
     return " ".join(messages) or "LinkedIn non e stato collegato tramite link pubblico, PDF o OAuth."
 
 
+def compute_digital_presence_score(evidence: Dict[str, Any]) -> int:
+    if not evidence.get("can_compare_with_cv"):
+        return 0
+
+    score = 10 if evidence.get("cv_profile_loaded") else 0
+    if evidence.get("linkedin_export_verified"):
+        score += 42
+    elif evidence.get("linkedin_public_verified"):
+        score += 30
+    elif evidence.get("linkedin_official_verified"):
+        score += 10
+
+    if evidence.get("other_profile_identity", {}).get("status") == "matched":
+        score += 20
+
+    verified_count = int(evidence.get("verified_profile_count", 0) or 0)
+    if verified_count > 1:
+        score += min((verified_count - 1) * 6, 12)
+
+    social_text_analyses = evidence.get("social_text_analyses") or {}
+    for analysis in social_text_analyses.values():
+        status = str((analysis.get("evaluation") or {}).get("status") or "").lower()
+        if status == "aligned":
+            score += 6
+        elif status in {"misaligned", "warning"}:
+            score -= 6
+
+    score += int(evidence.get("visual_score_adjustment", 0) or 0)
+    return clamp_score(score)
+
+
 def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     has_linkedin = bool(user.get("linkedin_url"))
     has_linkedin_export = bool(user.get("linkedin_profile_text"))
@@ -4185,23 +4245,13 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
     has_public_instagram = has_public_instagram_metadata(sources)
     has_other_profile = bool(user.get("portfolio_url"))
     has_public_other_profile = has_public_other_profile_signals(sources)
-    has_cv_text = bool(user.get("cv_text"))
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
     instagram_verified = False
     other_profile_verified = other_profile_identity["status"] == "matched"
     linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
-    if not evidence["can_compare_with_cv"]:
-        score = 0
-    else:
-        score = 24 + (12 if has_cv_text else 0)
-        score += 18 if has_linkedin_export and evidence["linkedin_export_verified"] else 0
-        score += 18 if evidence["linkedin_public_verified"] else 0
-        score += 6 if evidence["linkedin_official_verified"] else 0
-        score += 10 if instagram_verified else 0
-        score += 8 if other_profile_verified else 0
-        score = clamp_score(score)
+    score = compute_digital_presence_score(evidence)
 
     return {
         "score": score,
@@ -4419,16 +4469,7 @@ Regole:
 
     try:
         result = extract_json(call_groq(prompt, temperature=0.25, max_tokens=1400))
-        ai_score = clamp_score(result.get("score", fallback["score"]))
-        score_cap = (
-            fallback["score"]
-            if evidence["linkedin_public_link_present"] and not evidence["linkedin_public_verified"]
-            else 95
-        )
-        if not evidence["can_compare_with_cv"]:
-            result["score"] = 0
-        else:
-            result["score"] = min(round((ai_score + fallback["score"]) / 2), score_cap)
+        result["score"] = compute_digital_presence_score(evidence)
         result["headline"] = result.get("headline") or fallback["headline"]
         result["summary"] = result.get("summary") or fallback["summary"]
         result["findings"] = result.get("findings") or fallback["findings"]
@@ -4504,14 +4545,30 @@ def build_fallback_cv_strategy(
     job_link: str,
     sources: List[Dict[str, str]]
 ) -> Dict:
-    has_cv_text = bool((user.get("cv_text") or "").strip())
-    has_role = bool(role and role != "Ruolo da definire")
-    has_company = bool(company and company != " Azienda Generica")
-    score = 52 + (18 if has_cv_text else 0) + (10 if has_role else 0) + (8 if has_company else 0) + (6 if sources else 0)
-    score = min(score, 84)
+    cv_text = (user.get("cv_text") or "").strip()
+    has_cv_text = bool(cv_text)
+    scorecard = build_deterministic_cv_scorecard(
+        cv_text,
+        company,
+        role,
+        goal,
+    )
 
     return {
-        "score": score,
+        "score": scorecard["overall_score"],
+        "overall_score": scorecard["overall_score"],
+        "ats_score": scorecard["ats_score"],
+        "keyword_score": scorecard["keyword_score"],
+        "format_score": scorecard["format_score"],
+        "role_match_score": scorecard["role_match_score"],
+        "company_fit_score": scorecard["company_fit_score"],
+        "company_provided": scorecard["company_provided"],
+        "completeness_score": scorecard["completeness_score"],
+        "clarity_score": scorecard["clarity_score"],
+        "professionalism_score": scorecard["professionalism_score"],
+        "ats_analysis": scorecard["ats_analysis"],
+        "score_explanation": scorecard["score_explanation"],
+        "scoring_context": scorecard["scoring_context"],
         "headline": "Analisi strategica pronta",
         "summary": (
             "Ho confrontato il CV disponibile con i dati della candidatura. "
@@ -4556,12 +4613,24 @@ def build_fallback_cv_strategy(
 
 
 def normalize_cv_strategy_result(result: Dict, fallback: Dict, sources: List[Dict[str, str]], target: Dict) -> Dict:
-    score = clamp_score(result.get("score", fallback["score"]))
     strengths = result.get("strengths") or fallback["strengths"]
     improvements = result.get("improvements") or fallback["improvements"]
 
     return {
-        "score": score,
+        "score": fallback["overall_score"],
+        "overall_score": fallback["overall_score"],
+        "ats_score": fallback["ats_score"],
+        "keyword_score": fallback["keyword_score"],
+        "format_score": fallback["format_score"],
+        "role_match_score": fallback["role_match_score"],
+        "company_fit_score": fallback["company_fit_score"],
+        "company_provided": fallback["company_provided"],
+        "completeness_score": fallback["completeness_score"],
+        "clarity_score": fallback["clarity_score"],
+        "professionalism_score": fallback["professionalism_score"],
+        "ats_analysis": fallback["ats_analysis"],
+        "score_explanation": fallback["score_explanation"],
+        "scoring_context": fallback["scoring_context"],
         "headline": result.get("headline") or fallback["headline"],
         "summary": result.get("summary") or fallback["summary"],
         "strengths": strengths[:6],
@@ -8895,69 +8964,188 @@ def filter_confirmed_skill_suggestions(
     return filtered
 
 
+def _cv_content_metrics(cv_text: str) -> Dict[str, Any]:
+    text = str(cv_text or "").strip()
+    plain = normalize_plain_text(text)
+    sections = extract_resume_sections(text)
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9+#.%-]+", text)
+    non_empty_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullet_lines = [
+        line for line in non_empty_lines
+        if re.match(r"^\s*(?:[-*•·▪◦]|\d+[.)])\s+", line)
+    ]
+    quantified_matches = re.findall(
+        r"(?:\b\d+(?:[.,]\d+)?\s*(?:%|k|m|ore|giorni|mesi|anni|utenti|clienti|progetti|record|righe|dataset)\b|\b(?:aument|ridott|migliorat|ottimizzat)[a-z]*\b[^.\n]{0,45}\b\d+)",
+        plain,
+    )
+    date_matches = re.findall(r"\b(?:19|20)\d{2}\b", plain)
+    action_verbs = {
+        "analizzato", "analisi", "sviluppato", "realizzato", "progettato",
+        "gestito", "coordinato", "ottimizzato", "implementato", "creato",
+        "monitorato", "automatizzato", "migliorato", "ridotto", "aumentato",
+        "developed", "designed", "implemented", "managed", "improved",
+    }
+    action_count = sum(plain.count(verb) for verb in action_verbs)
+    experience_text = sections.get("experience", "")
+    project_text = sections.get("projects", "")
+    profile_text = sections.get("profile", "")
+    hard_skills_text = sections.get("hard_skills", "")
+    soft_skills_text = sections.get("soft_skills", "")
+    return {
+        "text": text,
+        "plain": plain,
+        "sections": sections,
+        "word_count": len(words),
+        "line_count": len(non_empty_lines),
+        "bullet_count": len(bullet_lines),
+        "quantified_count": len(quantified_matches),
+        "date_count": len(date_matches),
+        "action_count": action_count,
+        "has_contact": bool(
+            re.search(r"[\w.+-]+@[\w.-]+\.\w+", text)
+            or re.search(r"\+?\d[\d\s().-]{7,}", text)
+        ),
+        "has_profile": len(profile_text.split()) >= 8,
+        "has_experience": len(experience_text.split()) >= 8,
+        "has_education": len(sections.get("education", "").split()) >= 3,
+        "has_hard_skills": len(hard_skills_text.split()) >= 1,
+        "has_soft_skills": len(soft_skills_text.split()) >= 1,
+        "has_languages": bool(sections.get("languages")) or any(
+            term in plain for term in ["inglese", "english", "francese", "francais", "spagnolo"]
+        ),
+        "has_projects": len(project_text.split()) >= 5,
+        "has_certifications": bool(sections.get("certifications")) or "certific" in plain,
+        "experience_quality": min(
+            1.0,
+            (len(experience_text.split()) / 120)
+            + (min(action_count, 5) * 0.08)
+            + (min(len(quantified_matches), 3) * 0.10),
+        ) if experience_text else 0.0,
+        "profile_quality": min(1.0, len(profile_text.split()) / 55) if profile_text else 0.0,
+    }
+
+
+def _target_skill_candidates(role: str, description: str, required_skills: str) -> Dict[str, List[str]]:
+    family = infer_role_family(role, description, required_skills)
+    library = ROLE_SKILL_LIBRARY.get(family) or infer_skill_library_from_role(role, description)
+    requested_hard, requested_soft = split_requested_skill_terms(role, description, required_skills)
+    requested_keywords = extract_requested_keywords(role, description, required_skills)
+
+    hard = [
+        *(library.get("hard_skills", []) if library else []),
+        *(library.get("programming_languages", []) if library else []),
+        *(library.get("tools", []) if library else []),
+        *requested_hard,
+    ]
+    soft = [
+        *(library.get("soft_skills", []) if library else []),
+        *requested_soft,
+    ]
+    generic = {
+        "data", "analyst", "analysis", "business", "project", "manager",
+        "engineer", "developer", "designer", "specialist", "team", "game",
+        "design", "role", "company",
+    }
+
+    def unique(values: List[Any]) -> List[str]:
+        result = []
+        seen = set()
+        for value in values:
+            text = str(value or "").strip()
+            identity = canonical_skill_identity(text)
+            if not identity or identity in generic or identity in seen or len(identity) < 3:
+                continue
+            seen.add(identity)
+            result.append(text)
+        return result
+
+    return {
+        "hard": unique(hard)[:18],
+        "soft": unique(soft)[:10],
+        "keywords": unique(requested_keywords)[:20],
+    }
+
+
+def _semantic_coverage(cv_text: str, candidates: List[str]) -> tuple[List[str], List[str], float]:
+    present = [skill for skill in candidates if skill_semantically_present(cv_text, skill)]
+    missing = [skill for skill in candidates if not skill_semantically_present(cv_text, skill)]
+    coverage = len(present) / len(candidates) if candidates else 0.0
+    return present, missing, coverage
+
+
 def compute_cv_completeness_score(cv_text: str, role: str = "", description: str = "", required_skills: str = "") -> int:
-    heuristic = analyze_cv_heuristics(cv_text)
-    detected = set(heuristic.get("detected_sections", []))
-    cv_plain = normalize_plain_text(cv_text)
-    sections = extract_resume_sections(cv_text)
-    score = 0
-    if re.search(r"[\w.+-]+@[\w.-]+\.\w+", cv_text or "") or re.search(r"\+?\d[\d\s().-]{7,}", cv_text or ""):
-        score += 15
-    if "formazione" in detected or sections.get("education"):
-        score += 15
-    if "esperienze professionali" in detected or sections.get("experience"):
-        score += 15
-    if "competenze" in detected or sections.get("hard_skills"):
-        score += 10
-    if "soft skills" in cv_plain or any(term in cv_plain for term in ATS_SOFT_SKILL_TERMS):
-        score += 5
-    if "lingue" in detected or "inglese" in cv_plain or "english" in cv_plain:
-        score += 5
-    if sections.get("profile"):
-        score += 10
-    if re.search(r"\b\d+[%+]?\b", cv_text or "") or any(term in cv_plain for term in ["accuratezza", "tempi di risposta", "metriche", "kpi"]):
-        score += 10
-    if any(term in cv_plain for term in ["progetto", "portfolio", "github"]):
-        score += 5
-    if any(term in cv_plain for term in ["certificazione", "certificazioni", "certificato", "certificati"]):
-        score += 5
-    if any(term in cv_plain for term in ATS_HARD_SKILL_TERMS):
-        score += 5
-    role_snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
-    if len(role_snapshot["present"]) >= 4:
-        score += 10
-    elif len(role_snapshot["present"]) >= 2:
-        score += 6
-    missing_optional_caps = 0
-    if not any(term in cv_plain for term in ["progetto", "portfolio", "github"]):
-        missing_optional_caps += 4
-    if not any(term in cv_plain for term in ["certificazione", "certificazioni", "certificato", "certificati"]):
-        missing_optional_caps += 4
-    if not (re.search(r"\b\d+[%+]?\b", cv_text or "") or any(term in cv_plain for term in ["accuratezza", "tempi di risposta", "metriche", "kpi"])):
-        missing_optional_caps += 6
-    return min(clamp_score(score), 100 - missing_optional_caps)
+    metrics = _cv_content_metrics(cv_text)
+    score = (
+        (12 if metrics["has_contact"] else 0)
+        + (10 * metrics["profile_quality"])
+        + (22 * metrics["experience_quality"])
+        + (12 if metrics["has_education"] else 0)
+        + (12 if metrics["has_hard_skills"] else 0)
+        + (6 if metrics["has_soft_skills"] else 0)
+        + (6 if metrics["has_languages"] else 0)
+        + (7 if metrics["has_projects"] else 0)
+        + (4 if metrics["has_certifications"] else 0)
+        + min(metrics["quantified_count"] * 3, 9)
+    )
+    length_factor = min(metrics["word_count"] / 450, 1)
+    score *= 0.72 + (0.28 * length_factor)
+    if metrics["word_count"] < 120:
+        score = min(score, 48)
+    if not metrics["has_experience"] and not metrics["has_projects"]:
+        score = min(score, 58)
+    return clamp_score(round(score))
 
 
 def compute_role_match_score(cv_text: str, role: str, description: str = "", required_skills: str = "") -> int:
-    snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
-    keyword_score = min(len(snapshot["present"]) * 6, 36)
-    sections = extract_resume_sections(cv_text)
-    education_score = 12 if sections.get("education") else 0
-    experience_score = 14 if sections.get("experience") else 0
-    profile_score = 8 if sections.get("profile") else 0
-    baseline = 18 if role.strip() else 10
-    return clamp_score(baseline + keyword_score + education_score + experience_score + profile_score)
+    if not str(role or "").strip():
+        return 0
+    metrics = _cv_content_metrics(cv_text)
+    candidates = _target_skill_candidates(role, description, required_skills)
+    hard_present, _hard_missing, hard_coverage = _semantic_coverage(cv_text, candidates["hard"])
+    soft_present, _soft_missing, soft_coverage = _semantic_coverage(cv_text, candidates["soft"])
+    target_tokens = tokenize_meaningful(f"{role} {description} {required_skills}")
+    cv_tokens = tokenize_meaningful(cv_text)
+    token_coverage = len(target_tokens & cv_tokens) / len(target_tokens) if target_tokens else 0
+    role_family = infer_role_family(role, description, required_skills)
+    profile_role_signal = (
+        role_family and role_family in normalize_plain_text(metrics["sections"].get("profile", ""))
+    )
+    evidence_score = min(
+        1.0,
+        (metrics["experience_quality"] * 0.55)
+        + (0.25 if metrics["has_projects"] else 0)
+        + (min(metrics["quantified_count"], 3) * 0.07),
+    )
+    score = (
+        (hard_coverage * 45)
+        + (soft_coverage * 10)
+        + (token_coverage * 20)
+        + (evidence_score * 20)
+        + (5 if profile_role_signal else 0)
+    )
+    if not hard_present:
+        score = min(score, 45)
+    if not metrics["has_experience"] and not metrics["has_projects"]:
+        score = min(score, 52)
+    return clamp_score(round(score))
 
 
 def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: str = "") -> Dict:
+    metrics = _cv_content_metrics(cv_text)
     heuristic = analyze_cv_heuristics(cv_text)
-    cv_plain = normalize_plain_text(cv_text)
-    requested_keywords = extract_requested_keywords(role, description, required_skills)
-    requested_hard_skills, requested_soft_skills = split_requested_skill_terms(role, description, required_skills)
-    keyword_match = MatchingEngine(normalize_plain_text).split_present_missing(cv_text, requested_keywords)
+    candidates = _target_skill_candidates(role, description, required_skills)
+    requested_keywords = candidates["keywords"]
+    hard_present, missing_hard_skills, hard_coverage = _semantic_coverage(cv_text, candidates["hard"])
+    soft_present, missing_soft_skills, soft_coverage = _semantic_coverage(cv_text, candidates["soft"])
+    keyword_present, keyword_missing, keyword_coverage = _semantic_coverage(cv_text, requested_keywords)
     role_snapshot = role_keyword_snapshot(cv_text, role, description, required_skills)
-    present_keywords = filter_cv_keyword_list([*keyword_match["present"], *role_snapshot["present"]])
-    missing_keywords = filter_cv_keyword_list(keyword_match["missing"])
+    present_keywords = filter_cv_keyword_list([
+        *keyword_present,
+        *hard_present,
+        *soft_present,
+        *role_snapshot["present"],
+    ])
+    missing_keywords = filter_cv_keyword_list(keyword_missing)
     role_fragments = {
         token for token in tokenize_meaningful(role)
         if len(token) <= 3 or token in {"specialist", "manager", "engineer", "developer", "designer", "analyst", "scientist", "consultant", "researcher", "assistant"}
@@ -8980,27 +9168,38 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
         if section not in detected_sections
     ]
 
-    keyword_denominator = max(len(filter_cv_keyword_list(requested_keywords)), len(present_keywords) + len(missing_keywords), 1)
-    keyword_coverage = len(present_keywords) / keyword_denominator
     section_score = (len(required_sections) - len(missing_sections)) / len(required_sections)
-    text_length_score = min(len(cv_text) / 3500, 1)
-    keyword_score = clamp_score(round(keyword_coverage * 100))
-    family = infer_role_family(role, description, required_skills)
-    if role_snapshot["present"]:
-        role_group_score = round((len(role_snapshot["present"]) / max(len(ROLE_KEYWORD_GROUPS.get(family, [])), 1)) * 100)
-        keyword_score = max(keyword_score, clamp_score(role_group_score))
-    format_score = clamp_score(round((section_score * 65) + (text_length_score * 25)))
-    ats_score = clamp_score(round((keyword_coverage * 38) + (section_score * 28) + (text_length_score * 14) + 6))
-    if keyword_score > ats_score:
-        ats_score = clamp_score(round((ats_score * 0.65) + (keyword_score * 0.35)))
-    missing_hard_skills = filter_cv_keyword_list([
-        skill for skill in requested_hard_skills
-        if normalize_plain_text(skill) not in cv_plain
-    ])
-    missing_soft_skills = filter_cv_keyword_list([
-        skill for skill in requested_soft_skills
-        if normalize_plain_text(skill) not in cv_plain
-    ])
+    target_coverage_parts = [
+        (hard_coverage, 0.60),
+        (soft_coverage, 0.15),
+    ]
+    if requested_keywords:
+        target_coverage_parts.append((keyword_coverage, 0.25))
+    coverage_weight = sum(weight for _coverage, weight in target_coverage_parts)
+    target_coverage = (
+        sum(coverage * weight for coverage, weight in target_coverage_parts) / coverage_weight
+        if coverage_weight else 0
+    )
+    keyword_score = clamp_score(round(target_coverage * 100))
+    length_score = min(metrics["word_count"] / 450, 1)
+    bullet_score = min(metrics["bullet_count"] / 8, 1)
+    format_score = clamp_score(round(
+        (section_score * 62)
+        + (length_score * 23)
+        + (bullet_score * 10)
+        + (5 if metrics["line_count"] >= 8 else 0)
+    ))
+    ats_score = clamp_score(round(
+        (target_coverage * 48)
+        + (section_score * 32)
+        + (length_score * 12)
+        + (bullet_score * 8)
+    ))
+    if metrics["word_count"] < 120:
+        ats_score = min(ats_score, 50)
+        format_score = min(format_score, 58)
+    missing_hard_skills = filter_cv_keyword_list(missing_hard_skills)
+    missing_soft_skills = filter_cv_keyword_list(missing_soft_skills)
 
     issues = []
     if missing_keywords:
@@ -9028,6 +9227,9 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
         "keyword_score": keyword_score,
         "format_score": format_score,
         "keyword_coverage": round(keyword_coverage, 2),
+        "hard_skill_coverage": round(hard_coverage, 2),
+        "soft_skill_coverage": round(soft_coverage, 2),
+        "target_coverage": round(target_coverage, 2),
         "keywords_present": present_keywords[:12],
         "keywords_missing": missing_keywords[:12],
         "present_keywords": present_keywords[:12],
@@ -9040,6 +9242,113 @@ def analyze_cv_ats(cv_text: str, role: str, description: str, required_skills: s
         "sections_to_improve": missing_sections,
         "issues": issues,
         "suggestions": suggestions[:6],
+    }
+
+
+def build_deterministic_cv_scorecard(
+    cv_text: str,
+    company: str,
+    role: str,
+    description: str = "",
+    required_skills: str = "",
+) -> Dict[str, Any]:
+    metrics = _cv_content_metrics(cv_text)
+    ats_analysis = analyze_cv_ats(cv_text, role, description, required_skills)
+    completeness = compute_cv_completeness_score(cv_text, role, description, required_skills)
+    role_match = compute_role_match_score(cv_text, role, description, required_skills)
+
+    average_line_length = (
+        len(metrics["text"]) / metrics["line_count"]
+        if metrics["line_count"] else 0
+    )
+    clarity = clamp_score(round(
+        24
+        + (min(metrics["bullet_count"], 8) * 4)
+        + (min(metrics["action_count"], 6) * 3)
+        + (12 if metrics["has_profile"] else 0)
+        + (8 if 20 <= average_line_length <= 140 else 0)
+        + (8 if metrics["word_count"] >= 180 else 0)
+    ))
+    professionalism = clamp_score(round(
+        22
+        + (12 if metrics["has_contact"] else 0)
+        + (14 * metrics["experience_quality"])
+        + (10 if metrics["has_education"] else 0)
+        + (10 if metrics["has_hard_skills"] else 0)
+        + min(metrics["quantified_count"] * 4, 12)
+        + min(metrics["date_count"] * 2, 8)
+    ))
+    if metrics["word_count"] < 120:
+        clarity = min(clarity, 48)
+        professionalism = min(professionalism, 50)
+
+    company_provided = bool(
+        str(company or "").strip()
+        and normalize_plain_text(company) not in {"generica", "azienda generica", "non specificata"}
+    )
+    if company_provided:
+        description_tokens = tokenize_meaningful(description)
+        cv_tokens = tokenize_meaningful(cv_text)
+        description_coverage = (
+            len(description_tokens & cv_tokens) / len(description_tokens)
+            if description_tokens else 0
+        )
+        company_fit = clamp_score(round(
+            (role_match * 0.55)
+            + (description_coverage * 35)
+            + (10 if normalize_plain_text(company) in metrics["plain"] else 0)
+        ))
+        if not description_tokens:
+            company_fit = clamp_score(round(role_match * 0.70))
+    else:
+        company_fit = 0
+
+    payload = {
+        "role_match_score": role_match,
+        "job_match_score": role_match,
+        "company_fit_score": company_fit,
+        "company_provided": company_provided,
+        "completeness_score": completeness,
+        "ats_score": ats_analysis["ats_score"],
+        "keyword_score": ats_analysis["keyword_score"],
+        "format_score": ats_analysis["format_score"],
+        "clarity_score": clarity,
+        "professionalism_score": professionalism,
+    }
+    payload["overall_score"] = compute_weighted_cv_job_score(payload)
+    payload["ats_analysis"] = ats_analysis
+    payload["score_explanation"] = build_cv_score_explanation(payload)
+    payload["scoring_context"] = {
+        "cv_fingerprint": cv_content_fingerprint(cv_text),
+        "target_fingerprint": cv_analysis_target_fingerprint(
+            role, company, description, required_skills
+        ),
+        "role": role,
+        "company": company,
+        "description": description,
+        "required_skills": required_skills,
+        "metrics": {
+            key: value
+            for key, value in metrics.items()
+            if key not in {"text", "plain", "sections"}
+        },
+    }
+    return payload
+
+
+def compare_cv_scorecards(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    score_fields = [
+        "overall_score", "ats_score", "keyword_score", "format_score",
+        "role_match_score", "company_fit_score", "completeness_score",
+        "clarity_score", "professionalism_score",
+    ]
+    return {
+        "before": {field: clamp_score(before.get(field, 0)) for field in score_fields},
+        "after": {field: clamp_score(after.get(field, 0)) for field in score_fields},
+        "delta": {
+            field: clamp_score(after.get(field, 0)) - clamp_score(before.get(field, 0))
+            for field in score_fields
+        },
     }
 
 
@@ -10477,34 +10786,20 @@ def build_fallback_cv_job_evaluation(
     cv_tokens = tokenize_meaningful(cv_text)
     role_tokens = tokenize_meaningful(role)
     description_tokens = tokenize_meaningful(description)
-    company_tokens = tokenize_meaningful(company)
-
-    company_hits = len(cv_tokens.intersection(company_tokens))
-    heuristic = analyze_cv_heuristics(cv_text)
-
-    completeness = compute_cv_completeness_score(cv_text, role, description, required_skills)
-    role_match = compute_role_match_score(cv_text, role, description, required_skills)
-    sector_hits = len(cv_tokens.intersection(description_tokens))
-    if company.strip() or description.strip():
-        company_fit = clamp_score(18 + min(company_hits * 10, 20) + min(sector_hits * 3, 24) + (6 if sources else 0))
-    else:
-        company_fit = 24
-    clarity = clamp_score(42 + min(len(cv_text) // 700, 14))
-    professionalism = clamp_score(46 + (8 if "contatti" in heuristic["detected_sections"] else 0))
+    scorecard = build_deterministic_cv_scorecard(
+        cv_text, company, role, description, required_skills
+    )
+    completeness = scorecard["completeness_score"]
+    role_match = scorecard["role_match_score"]
+    company_fit = scorecard["company_fit_score"]
+    clarity = scorecard["clarity_score"]
+    professionalism = scorecard["professionalism_score"]
 
     required_skill_tokens = tokenize_meaningful(required_skills)
     relevant_found = sorted(list(cv_tokens.intersection(role_tokens.union(description_tokens).union(required_skill_tokens))))[:8]
     missing = filter_cv_keyword_list(sorted(list((role_tokens.union(description_tokens).union(required_skill_tokens)) - cv_tokens)))[:8]
-    ats_analysis = analyze_cv_ats(cv_text, role, description, required_skills)
-    overall = compute_weighted_cv_job_score({
-        "role_match_score": role_match,
-        "company_fit_score": company_fit,
-        "completeness_score": completeness,
-        "ats_score": ats_analysis["ats_score"],
-        "format_score": ats_analysis["format_score"],
-        "clarity_score": clarity,
-        "professionalism_score": professionalism,
-    })
+    ats_analysis = scorecard["ats_analysis"]
+    overall = scorecard["overall_score"]
     suggested_skills = build_role_skill_suggestions(cv_text, role, description, required_skills)
     questions_for_user = generate_cv_optimization_questions(cv_text, {
         "weaknesses": [],
@@ -10532,6 +10827,7 @@ def build_fallback_cv_job_evaluation(
         "suggested_skills": suggested_skills,
         "role_match_score": role_match,
         "company_fit_score": company_fit,
+        "company_provided": scorecard["company_provided"],
         "clarity_score": clarity,
         "completeness_score": completeness,
         "professionalism_score": professionalism,
@@ -10558,8 +10854,9 @@ def build_fallback_cv_job_evaluation(
         "questions_for_user": questions_for_user,
         "cv_text": cv_text,
         "summary": "Il CV è valido ma va personalizzato su ruolo, azienda e parole chiave per essere competitivo.",
+        "scoring_context": scorecard["scoring_context"],
     }
-    evaluation["score_explanation"] = build_cv_score_explanation(evaluation)
+    evaluation["score_explanation"] = scorecard["score_explanation"]
     evaluation["coach_suggestions"] = []
     return evaluation
 
@@ -10571,40 +10868,19 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
         "overall_score", "ats_score", "role_match_score", "company_fit_score",
         "clarity_score", "completeness_score", "professionalism_score"
     ]:
-        normalized[key] = clamp_score(result.get(key, fallback[key]))
+        normalized[key] = clamp_score(fallback.get(key, 0))
 
     normalized["job_match_score"] = clamp_score(
-        result.get("job_match_score", fallback.get("job_match_score", normalized["role_match_score"]))
+        fallback.get("job_match_score", normalized["role_match_score"])
     )
     normalized["keyword_score"] = clamp_score(
-        result.get("keyword_score", fallback.get("keyword_score", normalized["ats_score"]))
+        fallback.get("keyword_score", normalized["ats_score"])
     )
     normalized["format_score"] = clamp_score(
-        result.get("format_score", fallback.get("format_score", normalized["completeness_score"]))
+        fallback.get("format_score", normalized["completeness_score"])
     )
-    normalized["completeness_score"] = min(
-        normalized["completeness_score"],
-        clamp_score(fallback.get("completeness_score", normalized["completeness_score"]) + 6),
-    )
-    if fallback.get("keyword_score", 0) > 0:
-        normalized["keyword_score"] = max(normalized["keyword_score"], clamp_score(fallback["keyword_score"] - 5))
-    if fallback.get("role_match_score", 0) > 0:
-        normalized["role_match_score"] = max(normalized["role_match_score"], clamp_score(fallback["role_match_score"] - 8))
-        normalized["job_match_score"] = max(normalized["job_match_score"], clamp_score(fallback.get("job_match_score", fallback["role_match_score"]) - 8))
-
-    normalized["overall_score"] = compute_weighted_cv_job_score({
-        "role_match_score": normalized["role_match_score"],
-        "company_fit_score": normalized["company_fit_score"],
-        "completeness_score": normalized["completeness_score"],
-        "ats_score": normalized["ats_score"],
-        "format_score": normalized["format_score"],
-        "clarity_score": normalized["clarity_score"],
-        "professionalism_score": normalized["professionalism_score"],
-    })
-    normalized["score_explanation"] = build_cv_score_explanation({
-        **normalized,
-        "keyword_score": result.get("keyword_score", fallback.get("keyword_score", normalized["ats_score"])),
-    })
+    normalized["company_provided"] = bool(fallback.get("company_provided"))
+    normalized["score_explanation"] = fallback.get("score_explanation") or build_cv_score_explanation(normalized)
 
     if "strengths" not in result and isinstance(result.get("strong_points"), list):
         result["strengths"] = result["strong_points"]
@@ -10624,8 +10900,9 @@ def normalize_cv_job_evaluation(result: Dict, fallback: Dict) -> Dict:
     normalized["summary"] = result.get("summary") or fallback["summary"]
     normalized["target"] = fallback.get("target", {})
     normalized["cv_text"] = fallback.get("cv_text", "")
+    normalized["scoring_context"] = fallback.get("scoring_context", {})
     normalized["suggested_skills"] = result.get("suggested_skills") if isinstance(result.get("suggested_skills"), dict) else fallback.get("suggested_skills", {})
-    normalized["ats_analysis"] = result.get("ats_analysis") if isinstance(result.get("ats_analysis"), dict) else fallback.get("ats_analysis", {})
+    normalized["ats_analysis"] = dict(fallback.get("ats_analysis", {}))
     normalized["ats_analysis"]["keyword_score"] = normalized["ats_analysis"].get("keyword_score", normalized["keyword_score"])
     normalized["ats_analysis"]["format_score"] = normalized["ats_analysis"].get("format_score", normalized["format_score"])
     normalized["ats_analysis"]["present_keywords"] = normalized["ats_analysis"].get(
@@ -10884,6 +11161,30 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
     role_context = f"{role} ({role_level})" if role_level else role
     goal = (job_data.get("description") or data.goal or "").strip()
     job_link = normalize_public_profile_url(data.job_link or job_data.get("link"))
+    required_skills = str(job_data.get("required_skills") or "").strip()
+    expected_target_fingerprint = cv_analysis_target_fingerprint(
+        role_context, company, goal, required_skills
+    )
+    evaluation_context = (
+        data.cv_evaluation.get("scoring_context", {})
+        if isinstance(data.cv_evaluation, dict)
+        else {}
+    )
+    analyzed_target_fingerprint = str(
+        evaluation_context.get("target_fingerprint") or ""
+    ).strip().lower()
+    if (
+        not analyzed_target_fingerprint
+        or not hmac.compare_digest(analyzed_target_fingerprint, expected_target_fingerprint)
+    ):
+        conn.close()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Ruolo, azienda o descrizione della candidatura sono cambiati dopo l'analisi. "
+                "Avvia una nuova analisi prima di ottimizzare il CV."
+            ),
+        )
     raw_additional_data = dict(data.user_additional_data or {})
     if data.additionalInfo:
         if isinstance(data.additionalInfo, dict):
@@ -10921,7 +11222,7 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         cv_text,
         role_context,
         goal,
-        str(job_data.get("required_skills") or ""),
+        required_skills,
     ).get("confirmation_items", [])
     confirmed_from_suggestions = filter_confirmed_skill_suggestions(
         cv_text,
@@ -11221,9 +11522,24 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             pdf_file = alternative
         elif alt_name.endswith(".docx"):
             docx_file = alternative
-    analysis_score = int((analysis or {}).get("overall_score") or (data.cv_evaluation or {}).get("overall_score") or 0) if isinstance(data.cv_evaluation, dict) or isinstance(analysis, dict) else 0
-    confirmed_score_bonus = min((applied_changes_count * 2) + len(confirmed_skills), 8)
-    analysis_score = clamp_score(analysis_score + confirmed_score_bonus) if applied_changes_count else analysis_score
+    scoring_required_skills = required_skills
+    initial_scorecard = build_deterministic_cv_scorecard(
+        cv_text,
+        company,
+        role_context,
+        goal,
+        scoring_required_skills,
+    )
+    optimized_score_text = final_cv_text or optimized_text
+    optimized_scorecard = build_deterministic_cv_scorecard(
+        optimized_score_text,
+        company,
+        role_context,
+        goal,
+        scoring_required_skills,
+    )
+    score_comparison = compare_cv_scorecards(initial_scorecard, optimized_scorecard)
+    analysis_score = optimized_scorecard["overall_score"]
     grouped_changes = rewrite_result.get("grouped_changes", {})
     skipped_change_details = []
     skipped_change_details.extend({"reason": warning} for warning in format_warnings)
@@ -11282,6 +11598,8 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
             "company": company,
             "analysis_score": analysis_score,
             "score": analysis_score,
+            "analysis": optimized_scorecard,
+            "score_comparison": score_comparison,
             "has_docx": bool(docx_file),
             "has_pdf": bool(pdf_file),
             "generation_status": "completed",
@@ -11293,6 +11611,8 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
         "optimizedCv": optimized_cv_payload,
         "candidate_sources": sources,
         "analysis": analysis,
+        "optimized_analysis": optimized_scorecard,
+        "score_comparison": score_comparison,
         "hallucination_warnings": hallucination_warnings,
         "format_warnings": format_warnings,
         "quality_review": quality_review,
@@ -12004,6 +12324,9 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
     public_user = user_to_response(existing_user)
     public_user["cv_text"] = recover_saved_cv_text(cursor, existing_user)
     public_user["linkedin_profile_text"] = existing_user[21] or ""
+    public_user["target_role"] = clean_job_role_title(
+        data.target_role or public_user.get("target_role")
+    )
     public_user["linkedin_url"] = normalize_linkedin_profile_url(data.linkedin_url)
     public_user["portfolio_url"] = (data.portfolio_url or "").strip()
     instagram_handle = normalize_instagram_handle(data.instagram_handle)
@@ -12016,6 +12339,10 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
     previous_evidence = previous_analysis.get("analysis_evidence", {})
     previous_profile_analyses = dict(previous_evidence.get("visual_media_analyses", {}))
     previous_text_analyses = dict(previous_evidence.get("social_text_analyses", {}))
+    same_target_role = (
+        normalize_plain_text(previous_evidence.get("target_role"))
+        == normalize_plain_text(public_user.get("target_role"))
+    )
     same_instagram_profile = (
         normalize_instagram_handle(existing_user[18])
         == normalize_instagram_handle(public_user["instagram_handle"])
@@ -12023,6 +12350,14 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
     if not same_instagram_profile:
         previous_profile_analyses.pop("instagram", None)
         previous_text_analyses.pop("instagram", None)
+    elif not same_target_role:
+        for profile_type, analysis in previous_text_analyses.items():
+            ocr = analysis.get("ocr") or {}
+            analysis["evaluation"] = evaluate_social_profile_text(
+                ocr.get("extracted_text", ""),
+                profile_type,
+                public_user,
+            )
     if previous_profile_analyses or previous_text_analyses:
         evidence = digital_analysis.setdefault("analysis_evidence", {})
         evidence["visual_media_analyses"] = previous_profile_analyses
@@ -12050,11 +12385,7 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
         )
         if previous_evidence.get("visual_media_analysis"):
             evidence["visual_media_analysis"] = previous_evidence["visual_media_analysis"]
-        if evidence.get("can_compare_with_cv"):
-            digital_analysis["score"] = clamp_score(
-                int(digital_analysis.get("score", 0) or 0)
-                + evidence["visual_score_adjustment"]
-            )
+        digital_analysis["score"] = compute_digital_presence_score(evidence)
 
         preserved_titles = {"foto e contenuti pubblici", "bio e testo profilo"}
         preserved_findings = [
@@ -12076,12 +12407,14 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
     SET linkedin_url = ?,
         portfolio_url = ?,
         instagram_handle = ?,
+        target_role = ?,
         digital_analysis_json = ?
     WHERE id = ?
     """, (
         public_user["linkedin_url"],
         public_user["portfolio_url"],
         public_user["instagram_handle"],
+        public_user["target_role"],
         digital_analysis_json,
         user_id,
     ))
@@ -12168,7 +12501,6 @@ async def analyze_social_screenshots(
         "analysis_evidence": {},
     }
     evidence = digital_analysis.setdefault("analysis_evidence", {})
-    previous_adjustment = int(evidence.get("visual_score_adjustment", 0) or 0)
     profile_analyses = evidence.setdefault("visual_media_analyses", {})
     screenshot_analysis["profile_type"] = profile_type
     screenshot_analysis["profile_label"] = VISUAL_PROFILE_LABELS[profile_type]
@@ -12188,10 +12520,7 @@ async def analyze_social_screenshots(
     evidence["instagram_bio_analyzed"] = bool(
         text_analyses.get("instagram", {}).get("ocr", {}).get("extracted_text")
     )
-    if evidence.get("can_compare_with_cv"):
-        digital_analysis["score"] = clamp_score(
-            int(digital_analysis.get("score", 0) or 0) - previous_adjustment + visual_score_adjustment
-        )
+    digital_analysis["score"] = compute_digital_presence_score(evidence)
     findings = digital_analysis.setdefault("findings", [])
     media_finding = next(
         (
