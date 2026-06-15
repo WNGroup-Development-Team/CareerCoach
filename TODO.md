@@ -1,3 +1,10 @@
-- [ ] Aggiornare `frontend/src/PersonalizeExperience.jsx`: rimuovere dalla UI campi `role_level` e `link` (label, input, errori, coerenza/validazioni collegate).
-- [ ] Aggiornare `frontend/src/App.jsx` se necessario solo per props non usate (in questo caso no, perché payload/backend devono restare funzionanti).
-- [ ] Verifica build/lint e controllare che lo step “personalize” funzioni senza riferimenti mancanti.
+# TODO
+
+## Task: Box elenco con punti e verifica testo ruolo
+
+- [x] Analisi file rilevanti (frontend/src/App.jsx e frontend/src/PersonalizeExperience.jsx) 
+- [ ] Pianificare la modifica UI richiesta (in box 'Come funziona' sostituire elenco numerato con elenco puntato)
+- [ ] Applicare modifica in `frontend/src/PersonalizeExperience.jsx`
+- [ ] (Eventuale) aggiornare CSS in `frontend/src/App.css` o `frontend/src/index.css` per stile lista puntata coerente
+- [ ] Test rapido: avvio frontend e verifica rendering se possibile
+
