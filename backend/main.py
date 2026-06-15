@@ -7539,6 +7539,16 @@ def create_optimized_docx_file(optimized_text: str, original_file_bytes: Optiona
         optimized_lines = [line.strip() for line in optimized_text.splitlines() if line.strip()]
 
         def replace_paragraph_text_preserving_runs(paragraph, value: str) -> None:
+            # Svuota anche i run dentro w:hyperlink, altrimenti il display text
+            # dell'hyperlink (es. "linkedin.com/in/...") resta visibile insieme
+            # al nuovo testo, causando duplicazione del contenuto.
+            try:
+                ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+                for hyperlink in paragraph._p.iter(f"{ns_w}hyperlink"):
+                    for t in hyperlink.iter(f"{ns_w}t"):
+                        t.text = ""
+            except Exception:
+                pass
             runs = list(paragraph.runs)
             if not runs:
                 paragraph.add_run(value)
