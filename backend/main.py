@@ -4396,13 +4396,35 @@ def build_github_profile_evidence(user: Dict, sources: List[Dict[str, str]]) -> 
     profile_curated = repositories_visible or any(
         marker in normalized_blob for marker in ["readme", "pinned", "contributions", "followers", "following"]
     )
-    match = evaluate_cv_profile_name_match(
+    public_name_match = evaluate_cv_profile_name_match(
         user.get("cv_text") or "",
         sources,
         {"other_profile_public_snippet", "other_profile_reference"},
         "il profilo GitHub",
         fallback_values=[username],
     )
+    username_match = (
+        match_personal_brand_username(user, username)
+        if is_github and username
+        else {
+            "matched": False,
+            "confidence": 0.0,
+            "method": "not_github",
+            "message": "Nessun username GitHub disponibile.",
+        }
+    )
+    if public_name_match.get("status") == "matched":
+        name_match = public_name_match
+    elif username_match.get("matched"):
+        name_match = {
+            "status": "matched",
+            "detected_name": resolve_candidate_name(user),
+            "profile_name_candidate": username,
+            "message": f"Username GitHub coerente con il candidato. {username_match['message']}",
+            **username_match,
+        }
+    else:
+        name_match = public_name_match
     return {
         "is_github_link": is_github,
         "username": username,
@@ -4412,7 +4434,8 @@ def build_github_profile_evidence(user: Dict, sources: List[Dict[str, str]]) -> 
         "repositories_visible": repositories_visible,
         "bio_coherent": bio_coherent,
         "profile_curated": profile_curated,
-        "cv_name_match": match,
+        "cv_name_match": name_match,
+        "username_match": username_match,
         "snippet_count": len(github_sources),
     }
 
@@ -4462,10 +4485,18 @@ def summarize_screenshot_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     ]
     valid_batches = [batch for batch in batches if batch.get("valid")]
     screenshots_count = sum(int(batch.get("analyzed_count", 0) or 0) for batch in valid_batches)
+    flagged_count = sum(int(batch.get("flagged_count", 0) or 0) for batch in valid_batches)
+    sensitive_flagged_count = sum(
+        int(batch.get("sensitive_flagged_count", 0) or 0)
+        for batch in valid_batches
+    )
     return {
         "uploaded": bool(batches),
         "valid_uploaded": bool(valid_batches),
         "count": screenshots_count,
+        "flagged_count": flagged_count,
+        "sensitive_flagged_count": sensitive_flagged_count,
+        "safe_content": bool(valid_batches) and flagged_count == 0,
         "profile_types": sorted({str(batch.get("profile_type") or "") for batch in valid_batches if batch.get("profile_type")}),
         "message": (
             f"Sono stati caricati {screenshots_count} screenshot validi di profili digitali."
@@ -4475,57 +4506,210 @@ def summarize_screenshot_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+SOCIAL_BRANDING_AFFIXES = (
+    "official", "officiale", "real", "thereal", "iam", "im", "its", "the",
+    "mr", "mrs", "miss", "dr", "prof", "hello", "hey", "thisis",
+)
+
+
+def extract_social_username(value: str, expected_host: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    normalized_url = raw if "://" in raw else f"https://{raw.lstrip('@')}"
+    parsed = urllib.parse.urlparse(normalized_url)
+    hostname = (parsed.hostname or "").lower().removeprefix("www.")
+    if hostname and (not expected_host or hostname == expected_host):
+        path_parts = [urllib.parse.unquote(part) for part in parsed.path.split("/") if part]
+        if path_parts:
+            return path_parts[0].strip().lower()
+    return raw.lstrip("@").split("?")[0].strip("/").lower()
+
+
+def remove_branding_affixes(value: str) -> str:
+    cleaned = value
+    changed = True
+    while changed and cleaned:
+        changed = False
+        for affix in SOCIAL_BRANDING_AFFIXES:
+            if cleaned.startswith(affix) and len(cleaned) - len(affix) >= 4:
+                cleaned = cleaned[len(affix):]
+                changed = True
+            if cleaned.endswith(affix) and len(cleaned) - len(affix) >= 4:
+                cleaned = cleaned[:-len(affix)]
+                changed = True
+    return cleaned
+
+
+def resolve_candidate_name(user: Dict) -> str:
+    cv_detected = extract_candidate_name_from_cv(user.get("cv_text") or "")
+    detected_name = str(cv_detected.get("name") or "").strip()
+    return detected_name or str(user.get("name") or "").strip()
+
+
+def match_personal_brand_username(user: Dict, username: str) -> Dict[str, Any]:
+    detected_name = resolve_candidate_name(user)
+    if not detected_name:
+        return {
+            "matched": False,
+            "confidence": 0.0,
+            "method": "missing_candidate_name",
+            "message": "Impossibile rilevare il nome dell'utente per la verifica di corrispondenza.",
+        }
+
+    ordered_tokens = [
+        token
+        for token in re.findall(r"[a-z]+", strip_accents(detected_name).lower())
+        if len(token) >= 2
+    ]
+    if len(ordered_tokens) < 2:
+        return {
+            "matched": False,
+            "confidence": 0.0,
+            "method": "incomplete_candidate_name",
+            "message": "Servono nome e cognome per verificare lo username.",
+        }
+
+    first_name = ordered_tokens[0]
+    surname = ordered_tokens[-1]
+    alphabetic_username = "".join(re.findall(r"[a-z]+", strip_accents(username).lower()))
+    branding_core = remove_branding_affixes(alphabetic_username)
+    if not branding_core:
+        return {
+            "matched": False,
+            "confidence": 0.0,
+            "method": "empty_username",
+            "message": "Lo username non contiene caratteri utili per il confronto.",
+        }
+
+    direct_variants = (first_name + surname, surname + first_name)
+    if any(variant in branding_core for variant in direct_variants):
+        return {
+            "matched": True,
+            "confidence": 1.0,
+            "method": "full_name",
+            "message": "Lo username contiene nome e cognome, anche in ordine invertito.",
+        }
+
+    best_structural_match = None
+    for surname_length in range(len(surname), 2, -1):
+        surname_root = surname[:surname_length]
+        position = branding_core.find(surname_root)
+        if position < 0:
+            continue
+        remainder = branding_core[:position] + branding_core[position + surname_length:]
+        name_prefix_length = max(
+            (
+                length
+                for length in range(len(first_name), 0, -1)
+                if first_name[:length] in remainder
+            ),
+            default=0,
+        )
+        if name_prefix_length:
+            confidence = min(
+                0.98,
+                0.45
+                + 0.35 * (surname_length / len(surname))
+                + 0.20 * (name_prefix_length / len(first_name)),
+            )
+            best_structural_match = {
+                "matched": True,
+                "confidence": round(confidence, 3),
+                "method": "surname_root_and_name_prefix",
+                "surname_root": surname_root,
+                "name_prefix": first_name[:name_prefix_length],
+                "message": (
+                    "Lo username usa una variante riconoscibile di nome e cognome "
+                    f"({first_name[:name_prefix_length]} + {surname_root})."
+                ),
+            }
+            break
+    if best_structural_match:
+        return best_structural_match
+
+    similarity = max(
+        SequenceMatcher(None, branding_core, variant).ratio()
+        for variant in direct_variants
+    )
+    if similarity >= 0.78:
+        return {
+            "matched": True,
+            "confidence": round(similarity, 3),
+            "method": "fuzzy_similarity",
+            "message": "Lo username e una variante sufficientemente simile al nome del candidato.",
+        }
+
+    return {
+        "matched": False,
+        "confidence": round(similarity, 3),
+        "method": "no_identity_signal",
+        "message": "Lo username non contiene elementi sufficienti riconducibili a nome e cognome.",
+    }
+
+
 def verify_instagram_slug(user: Dict, instagram_handle: str) -> Dict[str, Any]:
     if not instagram_handle:
         return {"matched": False, "message": "Link o handle Instagram non presente."}
-    
-    slug = str(instagram_handle).strip().lower()
-    if slug.startswith("@"):
-        slug = slug[1:]
-    for domain in ["https://www.instagram.com/", "http://www.instagram.com/", "https://instagram.com/", "http://instagram.com/", "instagram.com/"]:
-        if slug.startswith(domain):
-            slug = slug[len(domain):]
-    if slug.endswith("/"):
-        slug = slug[:-1]
-    
-    cv_detected = extract_candidate_name_from_cv(user.get("cv_text") or "")
-    detected_name = str(cv_detected.get("name") or "").strip()
-    if not detected_name:
-        detected_name = str(user.get("name") or "").strip()
-        
-    if not detected_name:
-        return {"matched": False, "message": "Impossibile rilevare il nome dell'utente per la verifica di corrispondenza."}
-        
-    name_tokens = [t.lower() for t in normalize_identity_tokens(detected_name) if len(t) >= 2]
-    if not name_tokens:
-        return {"matched": False, "message": "Impossibile normalizzare il nome per la verifica di corrispondenza."}
-        
-    clean_slug = "".join(re.findall(r"[a-z0-9]+", slug))
-    ordered_tokens = [t.lower() for t in strip_accents(detected_name).lower().split() if t.isalnum() and len(t) >= 2]
-    if not ordered_tokens:
-        ordered_tokens = name_tokens
 
-    if len(ordered_tokens) >= 2:
-        first_token = ordered_tokens[0]
-        last_token = ordered_tokens[-1]
-        matched = (first_token in clean_slug) and (last_token in clean_slug)
-    else:
-        matched = ordered_tokens[0] in clean_slug
-        
-    if matched:
-        return {
-            "matched": True,
-            "slug": slug,
-            "message": "Il nome e cognome corrispondono allo slug del link Instagram."
-        }
-    else:
-        suggested_slug = "".join(ordered_tokens[:2])
-        return {
-            "matched": False,
-            "slug": slug,
-            "message": f"Il nome e cognome non corrispondono allo slug '{slug}' del link Instagram o non sono presenti.",
-            "coach_tip": f"Modifica lo slug Instagram (es. instagram.com/{suggested_slug}) per fini di personal branding."
-        }
+    slug = extract_social_username(instagram_handle, "instagram.com")
+    result = match_personal_brand_username(user, slug)
+    result["slug"] = slug
+    if result["matched"]:
+        result["message"] = f"Slug Instagram coerente. {result['message']}"
+        return result
+
+    detected_name = resolve_candidate_name(user)
+    ordered_tokens = [
+        token
+        for token in re.findall(r"[a-z]+", strip_accents(detected_name).lower())
+        if len(token) >= 2
+    ]
+    suggested_slug = "".join(ordered_tokens[:1] + ordered_tokens[-1:])
+    result["message"] = (
+        f"Il nome e cognome non sono riconoscibili nello slug Instagram '{slug}'. "
+        f"{result['message']}"
+    )
+    result["coach_tip"] = (
+        f"Valuta uno username riconoscibile, ad esempio instagram.com/{suggested_slug}, "
+        "anche con iniziali, separatori, numeri o prefissi di branding."
+    )
+    return result
+
+
+PROFESSIONAL_SKILL_TERMS = {
+    "python", "sql", "java", "javascript", "typescript", "c++", "c#", "react",
+    "angular", "vue", "node.js", "fastapi", "django", "flask", "spring", "docker",
+    "kubernetes", "aws", "azure", "gcp", "git", "excel", "power bi", "tableau",
+    "machine learning", "deep learning", "pytorch", "tensorflow", "opencv",
+    "data analysis", "data analytics", "project management", "agile", "scrum",
+    "salesforce", "hubspot", "seo", "sem", "figma", "photoshop",
+}
+
+PROFESSIONAL_ROLE_TERMS = {
+    "analyst", "developer", "engineer", "manager", "consultant", "specialist",
+    "designer", "researcher", "recruiter", "marketer", "intern", "tirocinio",
+    "stage", "freelance", "founder", "coordinator", "responsabile",
+}
+
+
+def extract_professional_profile_signals(text: str) -> Dict[str, set[str]]:
+    normalized = normalize_plain_text(strip_accents(text or ""))
+    return {
+        "skills": {term for term in PROFESSIONAL_SKILL_TERMS if term in normalized},
+        "roles": {term for term in PROFESSIONAL_ROLE_TERMS if term in normalized},
+        "years": set(re.findall(r"\b(?:19|20)\d{2}\b", normalized)),
+    }
+
+
+def linkedin_professional_text(sources: List[Dict[str, str]], export_text: str = "") -> str:
+    parts = [export_text] if export_text else []
+    parts.extend(
+        str(source.get("content") or "")
+        for source in sources or []
+        if source.get("kind") in {"linkedin_export", "linkedin_public_snippet"}
+    )
+    return clean_social_ocr_text("\n".join(parts))
 
 
 def evaluate_linkedin_cv_coherence(cv_text: str, linkedin_text: str) -> Dict[str, Any]:
@@ -4537,55 +4721,59 @@ def evaluate_linkedin_cv_coherence(cv_text: str, linkedin_text: str) -> Dict[str
             "details": []
         }
     
-    cv_clean = strip_accents(cv_text.lower())
-    li_clean = strip_accents(linkedin_text.lower())
-    
+    cv_signals = extract_professional_profile_signals(cv_text)
+    linkedin_signals = extract_professional_profile_signals(linkedin_text)
     details = []
     score_adj = 0
-    
-    if "magistrale" in cv_clean and "magistrale" in li_clean:
-        cv_in_corso = any(term in cv_clean for term in ["in corso", "current", "presente", "2025"])
-        li_completed = any(term in li_clean for term in ["marzo 2024", "completata", "conclusa"])
-        if cv_in_corso and li_completed:
-            details.append("Laurea Magistrale: indicata come 'in corso' nel CV ma completata su LinkedIn (marzo 2024)")
-            score_adj -= 6
-            
-    if "triennale" in li_clean and "magistrale" in li_clean:
-        if "marzo 2024" in li_clean and "dicembre 2024" in li_clean:
-            details.append("Paradosso cronologico su LinkedIn: Laurea Magistrale (marzo 2024) completata prima della Laurea Triennale (dicembre 2024)")
-            score_adj -= 8
-            
-    skills = ["python", "sql", "java", "c++", "machine learning", "pytorch", "tensorflow", "opencv"]
-    cv_skills = [s for s in skills if s in cv_clean]
-    li_skills = [s for s in skills if s in li_clean]
-    
-    missing_on_li = [s for s in cv_skills if s not in li_skills]
-    if missing_on_li:
-        details.append(f"Competenze CV assenti su LinkedIn: {', '.join(missing_on_li)}")
-        score_adj -= 2
-    else:
-        score_adj += 3
-        
-    cv_exp = any(term in cv_clean for term in ["tirocinio", "internship", "stage", "esperienza"])
-    li_exp = any(term in li_clean for term in ["tirocinio", "internship", "stage", "esperienza"])
-    if cv_exp and not li_exp:
-        details.append("Tirocinio/Esperienza dichiarata nel CV ma assente su LinkedIn")
-        score_adj -= 4
-    elif cv_exp and li_exp:
-        score_adj += 3
 
-    status = "warning" if score_adj < 0 else "success"
+    shared_skills = cv_signals["skills"] & linkedin_signals["skills"]
+    missing_skills = cv_signals["skills"] - linkedin_signals["skills"]
+    if shared_skills:
+        score_adj += min(4, len(shared_skills))
+        details.append(f"Competenze allineate: {', '.join(sorted(shared_skills))}")
+    if cv_signals["skills"] and not shared_skills:
+        score_adj -= 3
+        details.append("Non risultano competenze in comune tra CV e dati LinkedIn accessibili")
+    elif missing_skills:
+        score_adj -= min(2, len(missing_skills))
+        details.append(f"Competenze presenti solo nel CV: {', '.join(sorted(missing_skills)[:6])}")
+
+    shared_roles = cv_signals["roles"] & linkedin_signals["roles"]
+    if shared_roles:
+        score_adj += min(3, len(shared_roles))
+        details.append(f"Esperienze o ruoli coerenti: {', '.join(sorted(shared_roles))}")
+    elif cv_signals["roles"] and linkedin_signals["roles"]:
+        score_adj -= 3
+        details.append("I ruoli professionali rilevati nel CV e su LinkedIn non coincidono")
+
+    shared_years = cv_signals["years"] & linkedin_signals["years"]
+    linkedin_only_years = linkedin_signals["years"] - cv_signals["years"]
+    if shared_years:
+        score_adj += min(3, len(shared_years))
+        details.append(f"Date in comune: {', '.join(sorted(shared_years))}")
+    if linkedin_only_years:
+        score_adj -= min(2, len(linkedin_only_years))
+        details.append(f"Date LinkedIn da verificare nel CV: {', '.join(sorted(linkedin_only_years))}")
+
+    score_adj = max(-10, min(10, score_adj))
+    status = "success" if score_adj >= 3 else "warning" if score_adj < 0 else "review"
     message = "Analisi coerenza LinkedIn vs CV completata. "
-    if details:
-        message += "Rilevate anomalie: " + "; ".join(details)
+    if score_adj >= 3:
+        message += "Le informazioni accessibili risultano complessivamente allineate. "
+    elif score_adj < 0:
+        message += "Sono presenti elementi da verificare. "
     else:
-        message += "I dati del profilo e del CV risultano allineati."
+        message += "I dati accessibili non sono sufficienti per confermare una piena coerenza. "
+    message += "; ".join(details)
         
     return {
         "score_adjustment": score_adj,
         "status": status,
         "message": message,
-        "details": details
+        "details": details,
+        "matched_skills": sorted(shared_skills),
+        "matched_roles": sorted(shared_roles),
+        "matched_years": sorted(shared_years),
     }
 
 
@@ -4633,11 +4821,13 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     screenshot_summary = summarize_screenshot_evidence({
         "social_screenshot_batches": social_screenshot_batches,
     })
+    github_profile = build_github_profile_evidence(user, sources)
     verified_profiles = [
         profile
         for profile, verified in [
             ("linkedin", linkedin_verified),
             ("instagram", instagram_identity["status"] == "matched"),
+            ("github", github_profile.get("cv_name_match", {}).get("status") == "matched"),
         ]
         if verified
     ]
@@ -4646,13 +4836,25 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     }
     instagram_visibility = infer_instagram_visibility(user, sources, base_evidence)
     instagram_slug_verification = verify_instagram_slug(user, user.get("instagram_handle", ""))
-    linkedin_cv_coherence = evaluate_linkedin_cv_coherence(user.get("cv_text") or "", user.get("linkedin_profile_text") or "")
+    linkedin_cv_text = linkedin_professional_text(
+        sources,
+        user.get("linkedin_profile_text") or "",
+    )
+    linkedin_cv_coherence = evaluate_linkedin_cv_coherence(
+        user.get("cv_text") or "",
+        linkedin_cv_text,
+    )
+    linkedin_link_provided = bool(user.get("linkedin_url"))
+    instagram_link_provided = bool(normalize_instagram_handle(user.get("instagram_handle")))
+    github_link_provided = bool(github_profile.get("is_github_link"))
     return {
         "cv_profile_loaded": bool(user.get("cv_text")),
         "cv_filename": user.get("cv_filename") or "",
         "target_role": user.get("target_role") or "",
         "cv_detected_name": extract_candidate_name_from_cv(user.get("cv_text") or ""),
         "instagram_slug_verification": instagram_slug_verification,
+        "github_profile": github_profile,
+        "cv_github_name_match": github_profile.get("cv_name_match", {}),
         "linkedin_cv_coherence": linkedin_cv_coherence,
         "linkedin_identity": linkedin_identity,
         "linkedin_export_identity": linkedin_export_identity,
@@ -4674,6 +4876,14 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "linkedin_export_verified": linkedin_export_verified,
         "linkedin_official_verified": linkedin_official_verified,
         "linkedin_public_link_present": linkedin_public_link_present,
+        "linkedin_link_provided": linkedin_link_provided,
+        "instagram_link_provided": instagram_link_provided,
+        "github_link_provided": github_link_provided,
+        "provided_link_count": (
+            int(linkedin_link_provided)
+            + int(instagram_link_provided)
+            + int(github_link_provided)
+        ),
         "linkedin_public_verified": linkedin_public_verified,
         "linkedin_public_snippet_found": any(source.get("kind") == "linkedin_public_snippet" for source in sources),
         "screenshots_summary": screenshot_summary,
@@ -4682,21 +4892,19 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "can_compare_with_cv": bool(
             user.get("cv_text")
             and (
-                user.get("linkedin_url")
-                or user.get("linkedin_profile_text")
-                or user.get("instagram_handle")
-                or screenshot_summary["uploaded"]
+                linkedin_link_provided
+                or instagram_link_provided
+                or github_link_provided
             )
         ),
         "zero_score_reason": (
             ""
             if (
-                user.get("linkedin_url")
-                or user.get("linkedin_profile_text")
-                or user.get("instagram_handle")
-                or screenshot_summary["uploaded"]
+                linkedin_link_provided
+                or instagram_link_provided
+                or github_link_provided
             )
-            else "Non sono stati collegati profili digitali sufficienti per un confronto completo con il CV."
+            else "Non hai inserito alcun link LinkedIn, Instagram o GitHub: il punteggio di coerenza digitale e 0."
         ),
     }
 
@@ -4717,22 +4925,24 @@ def describe_linkedin_evidence(evidence: Dict) -> str:
 
 
 def compute_digital_presence_score(evidence: Dict[str, Any]) -> int:
-    if not evidence.get("can_compare_with_cv"):
-        return 0
-
-    has_any_link = bool(
-        evidence.get("linkedin_public_link_present")
-        or evidence.get("instagram_metadata_found")
-        or evidence.get("linkedin_export_verified")
+    linkedin_provided = bool(
+        evidence.get("linkedin_link_provided")
+        or evidence.get("linkedin_public_link_present")
     )
-    if not has_any_link:
+    instagram_provided = bool(evidence.get("instagram_link_provided"))
+    github_provided = bool(evidence.get("github_link_provided"))
+    if not (linkedin_provided or instagram_provided or github_provided):
         return 0
 
-    score = 24 if evidence.get("cv_profile_loaded") else 0
+    score = 10 if evidence.get("cv_profile_loaded") else 0
+    score += 15 if linkedin_provided else 0
+    score += 10 if instagram_provided else 0
+    score += 10 if github_provided else 0
+
     if evidence.get("linkedin_export_verified"):
-        score += 18
+        score += 8
     elif evidence.get("linkedin_public_verified"):
-        score += 14
+        score += 8
     elif evidence.get("linkedin_official_verified"):
         score += 4
 
@@ -4744,13 +4954,19 @@ def compute_digital_presence_score(evidence: Dict[str, Any]) -> int:
     elif linkedin_match_status == "mismatch":
         score -= 8
 
-    instagram_match_status = str((evidence.get("cv_instagram_name_match") or {}).get("status") or "")
-    if instagram_match_status == "matched":
+    instagram_slug_match = evidence.get("instagram_slug_verification") or {}
+    if instagram_provided and instagram_slug_match.get("matched"):
         score += 6
-    elif instagram_match_status == "similar":
+    elif instagram_provided:
+        score -= 5
+
+    github_match_status = str((evidence.get("cv_github_name_match") or {}).get("status") or "")
+    if github_provided and github_match_status == "matched":
+        score += 6
+    elif github_provided and github_match_status == "similar":
         score += 2
-    elif instagram_match_status == "mismatch":
-        score -= 6
+    elif github_provided and github_match_status == "mismatch":
+        score -= 5
 
     instagram_visibility = str((evidence.get("instagram_visibility") or {}).get("status") or "")
     if instagram_visibility == "public":
@@ -4778,10 +4994,8 @@ def compute_digital_presence_score(evidence: Dict[str, Any]) -> int:
     else:
         score += min(4, int(screenshots_summary.get("count", 0) or 0))
 
-    if screenshots_summary.get("valid_uploaded"):
-        visual_media_analysis = evidence.get("visual_media_analysis") or {}
-        if int(visual_media_analysis.get("sensitive_flagged_count", 0) or 0) == 0:
-            score += 3
+    if screenshots_summary.get("safe_content"):
+        score += 3
 
     coherence = evidence.get("linkedin_cv_coherence") or {}
     score += int(coherence.get("score_adjustment", 0) or 0)
@@ -4794,6 +5008,7 @@ def describe_cv_profile_name_matches(evidence: Dict[str, Any]) -> str:
     messages = []
     for platform, label in [
         ("cv_linkedin_name_match", "LinkedIn"),
+        ("cv_github_name_match", "GitHub"),
         ("instagram_slug_verification", "Instagram"),
     ]:
         provided = False
@@ -4804,42 +5019,44 @@ def describe_cv_profile_name_matches(evidence: Dict[str, Any]) -> str:
                 or evidence.get("linkedin_official_verified")
                 or (platform in evidence and (evidence.get(platform) or {}).get("status") != "unverified")
             )
+        elif label == "GitHub":
+            provided = bool(evidence.get("github_link_provided"))
         elif label == "Instagram":
             provided = bool(
-                evidence.get("instagram_metadata_found")
+                evidence.get("instagram_link_provided")
+                or evidence.get("instagram_metadata_found")
                 or evidence.get("instagram_media_analyzed")
                 or evidence.get("public_preview_analyzed")
                 or (evidence.get("instagram_identity") or {}).get("status") not in {"not_connected", None}
-                or (platform in evidence)
             )
 
         if not provided:
             continue
 
-        if label == "LinkedIn":
+        if label in {"LinkedIn", "GitHub"}:
             match = evidence.get(platform) or {}
             status = str(match.get("status") or "unverified")
             detected_name = str(match.get("detected_name") or "").strip()
             profile_name = str(match.get("profile_name_candidate") or "").strip()
             if status == "matched":
                 messages.append(
-                    f"Nome CV ↔ LinkedIn: coerente."
+                    f"Nome CV ↔ {label}: coerente."
                     + (f" CV: {detected_name}." if detected_name else "")
                     + (f" Profilo: {profile_name}." if profile_name else "")
                 )
             elif status == "similar":
                 messages.append(
-                    f"Nome CV ↔ LinkedIn: parzialmente coerente."
+                    f"Nome CV ↔ {label}: parzialmente coerente."
                     + (f" CV: {detected_name}." if detected_name else "")
                     + (f" Profilo: {profile_name}." if profile_name else "")
                 )
             elif status == "mismatch":
                 messages.append(
-                    f"Nome CV ↔ LinkedIn: non corrispondente. Il nome sul CV ({detected_name}) non corrisponde a quello del profilo LinkedIn ({profile_name})."
+                    f"Nome CV ↔ {label}: non corrispondente. Il nome sul CV ({detected_name}) non corrisponde a quello del profilo {label} ({profile_name})."
                 )
             else:
                 messages.append(
-                    f"Nome CV ↔ LinkedIn: non verificabile con i dati pubblici disponibili."
+                    f"Nome CV ↔ {label}: non verificabile con i dati pubblici disponibili."
                 )
         elif label == "Instagram":
             slug_verification = evidence.get(platform) or {}
@@ -4863,6 +5080,11 @@ def describe_screenshot_impact(evidence: Dict[str, Any]) -> str:
         "Non sono stati caricati screenshot dei profili digitali. "
         "L'analisi resta parziale e il punteggio puo risultare leggermente piu basso."
     )
+
+
+def digital_name_checks_are_coherent(evidence: Dict[str, Any]) -> bool:
+    summary = describe_cv_profile_name_matches(evidence).lower()
+    return bool(summary) and "non corrispondente" not in summary
 
 
 def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -> Dict:
@@ -4899,12 +5121,35 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
             },
             {
                 "title": "Coerenza CV e profili",
-                "status": "success" if "non pienamente coerente" not in describe_cv_profile_name_matches(evidence).lower() else "warning",
+                "status": "success" if digital_name_checks_are_coherent(evidence) else "warning",
                 "description": (
                     describe_cv_profile_name_matches(evidence)
                     or "Non ci sono abbastanza dati pubblici per confrontare in modo affidabile il nome del CV con i profili digitali."
                 ),
                 "coach_tip": "Controlla che nome, cognome, username e bio dei profili appartengano alla stessa persona.",
+            },
+            {
+                "title": "Coerenza LinkedIn vs CV",
+                "status": (evidence.get("linkedin_cv_coherence") or {}).get("status", "warning"),
+                "description": (evidence.get("linkedin_cv_coherence") or {}).get(
+                    "message",
+                    "Confronto non disponibile.",
+                ),
+                "coach_tip": "Allinea esperienze, date e competenze tra CV e LinkedIn.",
+            },
+            {
+                "title": "GitHub",
+                "status": (
+                    "success"
+                    if (evidence.get("cv_github_name_match") or {}).get("status") == "matched"
+                    else "warning"
+                ),
+                "description": (
+                    (evidence.get("cv_github_name_match") or {}).get("message")
+                    if evidence.get("github_link_provided")
+                    else "Non hai inserito un profilo GitHub."
+                ),
+                "coach_tip": "Usa nome, cognome o una loro variante riconoscibile nello username GitHub.",
             },
             {
                 "title": "Instagram",
@@ -4955,7 +5200,7 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
         },
         {
             "title": "Coerenza CV/profili",
-            "status": "success" if can_compare_with_cv and "non pienamente coerente" not in describe_cv_profile_name_matches(evidence).lower() else "warning",
+            "status": "success" if can_compare_with_cv and digital_name_checks_are_coherent(evidence) else "warning",
             "description": (
                 describe_cv_profile_name_matches(evidence)
                 or "L'analisi usa solo CV e profili pubblici verificabili, evitando confronti con omonimi o risultati non verificati."
@@ -4963,6 +5208,29 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
                 else evidence["zero_score_reason"]
             ),
             "coach_tip": "Controlla che ruolo target, formazione e competenze principali dicano la stessa cosa su CV e LinkedIn.",
+        },
+        {
+            "title": "Coerenza LinkedIn vs CV",
+            "status": (evidence.get("linkedin_cv_coherence") or {}).get("status", "warning"),
+            "description": (evidence.get("linkedin_cv_coherence") or {}).get(
+                "message",
+                "Confronto non disponibile.",
+            ),
+            "coach_tip": "Allinea esperienze, date e competenze tra CV e LinkedIn.",
+        },
+        {
+            "title": "GitHub",
+            "status": (
+                "success"
+                if (evidence.get("cv_github_name_match") or {}).get("status") == "matched"
+                else "warning"
+            ),
+            "description": (
+                (evidence.get("cv_github_name_match") or {}).get("message")
+                if evidence.get("github_link_provided")
+                else "Non hai inserito un profilo GitHub."
+            ),
+            "coach_tip": "Usa nome, cognome o una loro variante riconoscibile nello username GitHub.",
         },
         {
             "title": "Instagram",
@@ -5098,9 +5366,7 @@ Regole:
             and "instagram" in str(result.get("summary", "")).lower()
         ):
             result["summary"] = (
-                "Il confronto usa il CV e i profili pubblici verificabili disponibili. "
-                "Per Instagram risultano accessibili soltanto metadati o anteprime pubbliche: "
-                "foto e post non sono stati analizzati."
+                "Il confronto usa il CV e i profili pubblici verificabili disponibili."
             )
         if not evidence["can_compare_with_cv"]:
             result["headline"] = "Analisi non disponibile"
@@ -14461,6 +14727,7 @@ async def analyze_social_screenshots(
             if item.get("profile_type")
         }
     )
+    evidence["screenshots_summary"] = summarize_screenshot_evidence(evidence)
     text_analyses = evidence.setdefault("social_text_analyses", {})
     previous_text_entry = text_analyses.get(profile_type, {})
     history = list(previous_text_entry.get("history", []))
@@ -14505,7 +14772,7 @@ async def analyze_social_screenshots(
     media_finding["coach_tip"] = (
         "Rivedi manualmente i contenuti intimi o sensibili segnalati prima di candidarti."
         if any(analysis.get("flagged_count", 0) for analysis in profile_analyses.values())
-        else "Gli screenshot senza contenuti sensibili non aumentano il punteggio: la coerenza professionale resta basata su CV, profili verificabili e contenuti rilevanti."
+        else "Gli screenshot non mostrano contenuti sensibili evidenti e ricevono un piccolo bonus nel punteggio."
     )
     text_finding = next(
         (
