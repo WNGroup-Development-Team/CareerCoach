@@ -3878,6 +3878,35 @@ def evaluate_social_profile_text(extracted_text: str, profile_type: str, user: D
     }
 
 
+def extract_profile_name_candidates(
+    sources: List[Dict[str, str]],
+    kinds: set[str],
+    fallback_values: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    candidates: List[str] = []
+    for source in sources or []:
+        if source.get("kind") not in kinds:
+            continue
+        for raw_value in [source.get("title", ""), source.get("content", ""), source.get("url", "")]:
+            value = str(raw_value or "").strip()
+            if not value:
+                continue
+            matches = re.findall(
+                r"\b[A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ'`-]{1,}\s+[A-ZÀ-ÖØ-Ý][A-Za-zÀ-ÖØ-öø-ÿ'`-]{1,}\b",
+                value,
+            )
+            candidates.extend(matches[:3])
+    for value in fallback_values or []:
+        item = str(value or "").strip()
+        if item:
+            candidates.append(item)
+    unique_candidates = _unique_preserve_order(candidates)
+    return {
+        "display_name_candidate": unique_candidates[0] if unique_candidates else "",
+        "all_candidates": unique_candidates[:5],
+    }
+
+
 def public_image_url_to_input(image_url: str) -> Optional[Dict]:
     if not is_safe_public_url(image_url):
         return None
@@ -3963,6 +3992,112 @@ VISUAL_PROFILE_LABELS = {
     "other": "Altro profilo",
 }
 
+SOCIAL_SCREENSHOT_REJECTION_MESSAGE = (
+    "Questo sembra uno screenshot di un CV o di un documento. Per l'analisi digitale carica "
+    "screenshot di profili social o piattaforme professionali, ad esempio LinkedIn, GitHub o portfolio online."
+)
+
+SOCIAL_SCREENSHOT_MIN_LENGTH = 18
+
+
+def classify_social_screenshot_text(extracted_text: str) -> Dict[str, Any]:
+    text = clean_social_ocr_text(extracted_text)
+    normalized = normalize_plain_text(text)
+    if not text:
+        return {
+            "valid": False,
+            "reason": "Lo screenshot non contiene testo leggibile sufficiente.",
+            "kind": "unreadable",
+        }
+
+    social_markers = [
+        "linkedin",
+        "github",
+        "behance",
+        "dribbble",
+        "portfolio",
+        "projects",
+        "followers",
+        "following",
+        "posts",
+        "repository",
+        "commit",
+        "profile",
+        "profilo",
+        "bio",
+        "website",
+        "www.",
+        "http://",
+        "https://",
+        "@",
+    ]
+    cv_markers = [
+        "curriculum vitae",
+        "cv",
+        "resume",
+        "esperienze professionali",
+        "esperienza professionale",
+        "formazione",
+        "istruzione",
+        "competenze",
+        "hard skills",
+        "soft skills",
+        "lingue",
+        "certificazioni",
+        "progetti",
+        "obiettivo professionale",
+        "profilo professionale",
+        "email",
+        "telefono",
+        "indirizzo",
+    ]
+
+    cv_hits = sum(1 for marker in cv_markers if marker in normalized)
+    social_hits = sum(1 for marker in social_markers if marker in normalized)
+    has_typical_layout = bool(re.search(r"\b(?:ruolo|azienda|date|periodo|esperienze|formazione)\b", normalized))
+    has_table_like_layout = bool(re.search(r"\b(?:tabella|colonna|column|row)\b", normalized))
+
+    if cv_hits >= 2 and social_hits == 0:
+        return {
+            "valid": False,
+            "reason": SOCIAL_SCREENSHOT_REJECTION_MESSAGE,
+            "kind": "cv_or_document",
+        }
+
+    if has_table_like_layout and cv_hits >= 1 and social_hits == 0:
+        return {
+            "valid": False,
+            "reason": SOCIAL_SCREENSHOT_REJECTION_MESSAGE,
+            "kind": "document_layout",
+        }
+
+    if social_hits >= 1 and cv_hits == 0:
+        return {
+            "valid": True,
+            "reason": "Screenshot di profilo social o piattaforma professionale riconosciuto.",
+            "kind": "social_profile",
+        }
+
+    if social_hits >= 1 and cv_hits <= 1:
+        return {
+            "valid": True,
+            "reason": "Screenshot compatibile con una presenza digitale professionale.",
+            "kind": "social_profile",
+        }
+
+    if cv_hits >= 1 and len(normalized) >= SOCIAL_SCREENSHOT_MIN_LENGTH:
+        return {
+            "valid": False,
+            "reason": SOCIAL_SCREENSHOT_REJECTION_MESSAGE,
+            "kind": "cv_or_document",
+        }
+
+    return {
+        "valid": False,
+        "reason": SOCIAL_SCREENSHOT_REJECTION_MESSAGE,
+        "kind": "unknown",
+    }
+
 
 def calculate_visual_score_adjustment(profile_analyses: Dict[str, Dict]) -> int:
     adjustment = 0
@@ -3978,6 +4113,23 @@ def calculate_visual_score_adjustment(profile_analyses: Dict[str, Dict]) -> int:
     return max(-35, min(0, adjustment))
 
 
+def calculate_social_screenshot_score_adjustment(batches: List[Dict[str, Any]]) -> int:
+    positive_adjustment = 0
+    negative_adjustment = 0
+    for batch in batches or []:
+        if not isinstance(batch, dict):
+            continue
+        if not batch.get("valid"):
+            continue
+        positive_adjustment += 2
+        flagged_count = int(batch.get("flagged_count", 0) or 0)
+        sensitive_count = int(batch.get("sensitive_flagged_count", 0) or 0)
+        generic_count = max(0, flagged_count - sensitive_count)
+        negative_adjustment += min(18, (sensitive_count * 10) + (generic_count * 4))
+    adjustment = min(8, positive_adjustment) - min(28, negative_adjustment)
+    return max(-28, min(8, adjustment))
+
+
 def describe_profile_screenshot_analyses(profile_analyses: Dict[str, Dict]) -> str:
     descriptions = []
     for profile_type, analysis in profile_analyses.items():
@@ -3991,11 +4143,14 @@ def classify_additional_link(url: str, sources: List[Dict[str, str]], identity: 
         return {
             "status": "not_provided",
             "type": "none",
+            "platform": "none",
             "message": "Non hai inserito un link aggiuntivo.",
         }
 
+    hostname = (urllib.parse.urlparse(normalize_public_profile_url(url)).hostname or "").lower().removeprefix("www.")
+    is_github_link = hostname == "github.com"
+
     if not has_public_other_profile_signals(sources):
-        hostname = (urllib.parse.urlparse(normalize_public_profile_url(url)).hostname or "").lower()
         blocked_note = (
             " Facebook spesso richiede il login e impedisce il recupero automatico dei contenuti."
             if hostname.endswith("facebook.com")
@@ -4004,36 +4159,49 @@ def classify_additional_link(url: str, sources: List[Dict[str, str]], identity: 
         return {
             "status": "unverified",
             "type": "unknown",
+            "platform": "github" if is_github_link else "generic",
             "message": (
-                "Il link aggiuntivo e stato registrato, ma non risultano contenuti pubblici accessibili."
+                "Non e stato possibile analizzare direttamente il profilo GitHub dal link fornito. "
+                "Carica uno screenshot del profilo GitHub per rendere l'analisi digitale piu completa."
+                if is_github_link
+                else "Il link aggiuntivo e stato registrato, ma non risultano contenuti pubblici accessibili."
                 f"{blocked_note}"
             ),
         }
 
-    hostname = (urllib.parse.urlparse(normalize_public_profile_url(url)).hostname or "").lower().removeprefix("www.")
     social_hosts = {
         "linkedin.com", "instagram.com", "x.com", "twitter.com", "github.com", "behance.net", "dribbble.com",
         "facebook.com", "tiktok.com", "youtube.com", "medium.com",
     }
     link_type = "profilo personale" if hostname in social_hosts else "sito o pagina pubblica"
+    platform = "github" if is_github_link else "generic"
 
     if identity["status"] == "matched":
         return {
             "status": "matched",
             "type": link_type,
+            "platform": platform,
             "message": (
-                f"Il link aggiuntivo risulta essere un {link_type} compatibile con il nome del candidato. "
+                "Il profilo GitHub e stato analizzato tramite il link fornito."
+                if is_github_link
+                else f"Il link aggiuntivo risulta essere un {link_type} compatibile con il nome del candidato. "
+            ) + (
+                " "
                 "L'analisi usa solo testo pubblico indicizzato: eventuali foto, video e post non sono stati analizzati."
                 if hostname in social_hosts
-                else f"Il link aggiuntivo risulta essere un {link_type} compatibile con il nome del candidato."
+                else ""
             ),
         }
 
     return {
         "status": identity["status"],
         "type": link_type,
+        "platform": platform,
         "message": (
-            f"Il link risulta essere un {link_type}, ma non posso attribuirlo con certezza al candidato."
+            "Non e stato possibile analizzare direttamente il profilo GitHub dal link fornito. "
+            "Carica uno screenshot del profilo GitHub per rendere l'analisi digitale piu completa."
+            if is_github_link and identity["status"] == "unverified"
+            else f"Il link risulta essere un {link_type}, ma non posso attribuirlo con certezza al candidato."
             if identity["status"] == "unverified"
             else f"Il link risulta essere un {link_type}, ma le evidenze sembrano appartenere a un'altra persona."
         ),
@@ -4113,6 +4281,200 @@ def evaluate_official_profile_identity(user: Dict, official_sources: List[Dict],
     }
 
 
+def evaluate_cv_profile_name_match(
+    cv_text: str,
+    sources: List[Dict[str, str]],
+    kinds: set[str],
+    label: str,
+    fallback_values: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    detected = extract_candidate_name_from_cv(cv_text or "")
+    detected_name = str(detected.get("name") or "").strip()
+    cv_tokens = normalize_identity_tokens(detected_name)
+    ordered_cv_tokens = [token for token in normalize_name(detected_name).split() if token]
+    profile_names = extract_profile_name_candidates(sources, kinds, fallback_values)
+    if len(cv_tokens) < 2:
+        return {
+            "status": "unverified",
+            "detected_name": detected_name,
+            "profile_name_candidate": profile_names.get("display_name_candidate", ""),
+            "profile_name_candidates": profile_names.get("all_candidates", []),
+            "message": f"Non sono riuscito a leggere con affidabilita nome e cognome dal CV per confrontarli con {label}.",
+        }
+
+    evidence_tokens = set()
+    evidence_text_fragments = []
+    for source in sources or []:
+        if source.get("kind") not in kinds:
+            continue
+        title = str(source.get("title", "") or "")
+        content = str(source.get("content", "") or "")
+        url = str(source.get("url", "") or "")
+        evidence_text_fragments.extend([title, content, url])
+        evidence_tokens.update(normalize_identity_tokens(title))
+        evidence_tokens.update(normalize_identity_tokens(content))
+        evidence_tokens.update(normalize_identity_tokens(url))
+
+    for value in fallback_values or []:
+        evidence_text_fragments.append(str(value or ""))
+        evidence_tokens.update(normalize_identity_tokens(value))
+
+    if not evidence_tokens:
+        return {
+            "status": "unverified",
+            "detected_name": detected_name,
+            "profile_name_candidate": profile_names.get("display_name_candidate", ""),
+            "profile_name_candidates": profile_names.get("all_candidates", []),
+            "message": f"Non ci sono abbastanza elementi pubblici per confrontare il nome del CV con {label}.",
+        }
+
+    matches = sum(1 for token in cv_tokens if token in evidence_tokens)
+    compact_evidence = strip_accents(" ".join(evidence_text_fragments).lower()).replace(" ", "")
+    if matches == 0 and len(ordered_cv_tokens) >= 2:
+        first_token = ordered_cv_tokens[0]
+        last_token = ordered_cv_tokens[-1]
+        if first_token[:4] in compact_evidence and last_token[:4] in compact_evidence:
+            matches = 1
+    if matches >= 2:
+        return {
+            "status": "matched",
+            "detected_name": detected_name,
+            "profile_name_candidate": profile_names.get("display_name_candidate", ""),
+            "profile_name_candidates": profile_names.get("all_candidates", []),
+            "message": f"Il nome rilevato nel CV risulta coerente con {label}.",
+        }
+    if matches == 1:
+        return {
+            "status": "similar",
+            "detected_name": detected_name,
+            "profile_name_candidate": profile_names.get("display_name_candidate", ""),
+            "profile_name_candidates": profile_names.get("all_candidates", []),
+            "message": f"Il nome del CV e solo parzialmente coerente con {label}, ma ci sono alcuni elementi compatibili.",
+        }
+    return {
+        "status": "mismatch",
+        "detected_name": detected_name,
+        "profile_name_candidate": profile_names.get("display_name_candidate", ""),
+        "profile_name_candidates": profile_names.get("all_candidates", []),
+        "message": (
+            f"Attenzione: il nome rilevato nel CV non sembra corrispondere pienamente a {label}. "
+            "Verifica che i profili appartengano alla stessa persona. L'analisi verra comunque eseguita."
+        ),
+    }
+
+
+def build_github_profile_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict[str, Any]:
+    url = normalize_public_profile_url(user.get("portfolio_url", ""))
+    hostname = (urllib.parse.urlparse(url).hostname or "").lower().removeprefix("www.")
+    is_github = hostname == "github.com"
+    path_parts = [part for part in urllib.parse.urlparse(url).path.strip("/").split("/") if part]
+    username = path_parts[0] if is_github and path_parts else ""
+    github_sources = [
+        source
+        for source in sources or []
+        if source.get("kind") in {"other_profile_reference", "other_profile_public_snippet"}
+    ]
+    text_blob = " ".join(
+        f"{source.get('title', '')} {source.get('content', '')} {source.get('url', '')}"
+        for source in github_sources
+    )
+    normalized_blob = normalize_plain_text(text_blob)
+    repositories_visible = any(
+        marker in normalized_blob
+        for marker in [
+            "repository", "repositories", "repo", "repos", "pinned", "stars", "followers",
+            "readme", "python", "javascript", "typescript", "java", "docker", "machine learning",
+        ]
+    )
+    bio_coherent = any(
+        token in normalized_blob
+        for token in social_text_tokens(user.get("target_role"))
+    ) or any(
+        marker in normalized_blob
+        for marker in ["developer", "engineer", "analyst", "data", "software", "ai", "ml"]
+    )
+    profile_curated = repositories_visible or any(
+        marker in normalized_blob for marker in ["readme", "pinned", "contributions", "followers", "following"]
+    )
+    match = evaluate_cv_profile_name_match(
+        user.get("cv_text") or "",
+        sources,
+        {"other_profile_public_snippet", "other_profile_reference"},
+        "il profilo GitHub",
+        fallback_values=[username],
+    )
+    return {
+        "is_github_link": is_github,
+        "username": username,
+        "public_accessible": bool(is_github and github_sources),
+        "analyzed_via_link": bool(is_github and github_sources),
+        "requires_screenshot_fallback": bool(is_github and not github_sources),
+        "repositories_visible": repositories_visible,
+        "bio_coherent": bio_coherent,
+        "profile_curated": profile_curated,
+        "cv_name_match": match,
+        "snippet_count": len(github_sources),
+    }
+
+
+def infer_instagram_visibility(user: Dict, sources: List[Dict[str, str]], evidence: Dict[str, Any]) -> Dict[str, Any]:
+    has_instagram = bool(normalize_instagram_handle(user.get("instagram_handle")))
+    if not has_instagram:
+        return {
+            "status": "not_provided",
+            "message": "Non hai collegato un profilo Instagram.",
+        }
+    has_metadata = has_public_instagram_metadata(sources)
+    has_screenshots = any(
+        item.get("profile_type") == "instagram"
+        for item in (evidence.get("social_screenshot_batches") or [])
+    )
+    if has_metadata:
+        return {
+            "status": "public",
+            "message": (
+                "Il profilo Instagram risulta pubblico. Questo puo migliorare leggermente la valutazione "
+                "della presenza digitale, se i contenuti sono coerenti e professionali."
+            ),
+        }
+    if has_screenshots:
+        return {
+            "status": "private_or_limited",
+            "message": (
+                "Il profilo Instagram non risulta pienamente accessibile dal web pubblico. "
+                "Gli screenshot aiutano comunque a completare il controllo."
+            ),
+        }
+    return {
+        "status": "private",
+        "message": (
+            "Il profilo Instagram risulta privato. Questo non e necessariamente un problema, "
+            "ma potrebbe ridurre la visibilita della tua presenza digitale per un recruiter."
+        ),
+    }
+
+
+def summarize_screenshot_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    batches = [
+        batch
+        for batch in (evidence.get("social_screenshot_batches") or [])
+        if isinstance(batch, dict)
+    ]
+    valid_batches = [batch for batch in batches if batch.get("valid")]
+    screenshots_count = sum(int(batch.get("analyzed_count", 0) or 0) for batch in valid_batches)
+    return {
+        "uploaded": bool(batches),
+        "valid_uploaded": bool(valid_batches),
+        "count": screenshots_count,
+        "profile_types": sorted({str(batch.get("profile_type") or "") for batch in valid_batches if batch.get("profile_type")}),
+        "message": (
+            f"Sono stati caricati {screenshots_count} screenshot validi di profili digitali."
+            if valid_batches and screenshots_count
+            else "Non sono stati caricati screenshot dei profili digitali. L'analisi e stata eseguita con le informazioni disponibili, ma il punteggio digitale potrebbe essere leggermente inferiore perche mancano elementi visivi di verifica."
+        ),
+    }
+
+
 def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
     official_profile_sources = build_official_profile_sources(user)
     linkedin_export_identity = evaluate_profile_identity(user, sources, {"linkedin_export"}, "PDF LinkedIn")
@@ -4143,24 +4505,52 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "flagged_count": 0,
         "sensitive_flagged_count": 0,
     }
+    social_screenshot_batches = list((user.get("digital_analysis") or {}).get("analysis_evidence", {}).get("social_screenshot_batches", []))
+    cv_linkedin_match = evaluate_cv_profile_name_match(
+        user.get("cv_text") or "",
+        sources,
+        {"linkedin_export", "linkedin_public_snippet", "linkedin_reference"},
+        "il profilo LinkedIn",
+        fallback_values=[user.get("linkedin_url", "")],
+    )
+    cv_instagram_match = evaluate_cv_profile_name_match(
+        user.get("cv_text") or "",
+        sources,
+        {"instagram_public_metadata", "instagram_reference"},
+        "il profilo Instagram",
+        fallback_values=[user.get("instagram_handle", "")],
+    )
+    github_profile = build_github_profile_evidence(user, sources)
+    screenshot_summary = summarize_screenshot_evidence({
+        "social_screenshot_batches": social_screenshot_batches,
+    })
     verified_profiles = [
         profile
         for profile, verified in [
             ("linkedin", linkedin_verified),
-            ("instagram", instagram_verified),
+            ("instagram", instagram_identity["status"] == "matched"),
+            ("github", github_profile["cv_name_match"]["status"] == "matched"),
             ("other_profile", other_profile_verified),
         ]
         if verified
     ]
+    base_evidence = {
+        "social_screenshot_batches": social_screenshot_batches,
+    }
+    instagram_visibility = infer_instagram_visibility(user, sources, base_evidence)
     return {
         "cv_profile_loaded": bool(user.get("cv_text")),
         "cv_filename": user.get("cv_filename") or "",
         "target_role": user.get("target_role") or "",
+        "cv_detected_name": extract_candidate_name_from_cv(user.get("cv_text") or ""),
         "linkedin_identity": linkedin_identity,
         "linkedin_export_identity": linkedin_export_identity,
         "linkedin_public_identity": linkedin_public_identity,
         "linkedin_official_identity": linkedin_official_identity,
+        "cv_linkedin_name_match": cv_linkedin_match,
         "instagram_identity": instagram_identity,
+        "cv_instagram_name_match": cv_instagram_match,
+        "instagram_visibility": instagram_visibility,
         "instagram_metadata_found": has_public_instagram_metadata(sources),
         "instagram_media_analyzed": visual_media_analysis.get("analyzed_content_count", 0) > 0,
         "public_preview_analyzed": visual_media_analysis.get("analyzed_preview_count", 0) > 0,
@@ -4170,6 +4560,7 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "official_profile_capabilities": OFFICIAL_PROFILE_CAPABILITIES,
         "other_profile_identity": other_profile_identity,
         "additional_link": additional_link,
+        "github_profile": github_profile,
         "linkedin_export_compared": bool(user.get("linkedin_profile_text")),
         "linkedin_export_filename": user.get("linkedin_profile_filename") or "",
         "linkedin_export_verified": linkedin_export_verified,
@@ -4178,13 +4569,29 @@ def build_analysis_evidence(user: Dict, sources: List[Dict[str, str]]) -> Dict:
         "linkedin_public_verified": linkedin_public_verified,
         "linkedin_public_snippet_found": any(source.get("kind") == "linkedin_public_snippet" for source in sources),
         "other_profile_public_snippet_found": other_profile_verified,
+        "screenshots_summary": screenshot_summary,
         "verified_profiles": verified_profiles,
         "verified_profile_count": len(verified_profiles),
-        "can_compare_with_cv": bool(verified_profiles),
+        "can_compare_with_cv": bool(
+            user.get("cv_text")
+            and (
+                user.get("linkedin_url")
+                or user.get("linkedin_profile_text")
+                or user.get("instagram_handle")
+                or user.get("portfolio_url")
+                or screenshot_summary["uploaded"]
+            )
+        ),
         "zero_score_reason": (
             ""
-            if verified_profiles
-            else "Nessun profilo pubblico verificabile e disponibile per il confronto con il CV."
+            if (
+                user.get("linkedin_url")
+                or user.get("linkedin_profile_text")
+                or user.get("instagram_handle")
+                or user.get("portfolio_url")
+                or screenshot_summary["uploaded"]
+            )
+            else "Non sono stati collegati profili digitali sufficienti per un confronto completo con il CV."
         ),
     }
 
@@ -4208,31 +4615,160 @@ def compute_digital_presence_score(evidence: Dict[str, Any]) -> int:
     if not evidence.get("can_compare_with_cv"):
         return 0
 
-    score = 10 if evidence.get("cv_profile_loaded") else 0
+    score = 24 if evidence.get("cv_profile_loaded") else 0
     if evidence.get("linkedin_export_verified"):
-        score += 42
+        score += 18
     elif evidence.get("linkedin_public_verified"):
-        score += 30
+        score += 14
     elif evidence.get("linkedin_official_verified"):
-        score += 10
+        score += 4
+
+    linkedin_match_status = str((evidence.get("cv_linkedin_name_match") or {}).get("status") or "")
+    if linkedin_match_status == "matched":
+        score += 8
+    elif linkedin_match_status == "similar":
+        score += 3
+    elif linkedin_match_status == "mismatch":
+        score -= 8
 
     if evidence.get("other_profile_identity", {}).get("status") == "matched":
-        score += 20
+        score += 4
+
+    instagram_match_status = str((evidence.get("cv_instagram_name_match") or {}).get("status") or "")
+    if instagram_match_status == "matched":
+        score += 6
+    elif instagram_match_status == "similar":
+        score += 2
+    elif instagram_match_status == "mismatch":
+        score -= 6
+
+    instagram_visibility = str((evidence.get("instagram_visibility") or {}).get("status") or "")
+    if instagram_visibility == "public":
+        score += 3
+    elif instagram_visibility == "private":
+        score -= 4
+    elif instagram_visibility == "private_or_limited":
+        score -= 2
+
+    github_profile = evidence.get("github_profile") or {}
+    github_match_status = str((github_profile.get("cv_name_match") or {}).get("status") or "")
+    if github_profile.get("is_github_link"):
+        if github_profile.get("analyzed_via_link"):
+            score += 3
+        else:
+            role_text = normalize_plain_text(evidence.get("target_role"))
+            if any(keyword in role_text for keyword in ["developer", "engineer", "software", "data", "ai", "ml"]):
+                score -= 4
+        if github_match_status == "matched":
+            score += 6
+        elif github_match_status == "similar":
+            score += 2
+        elif github_match_status == "mismatch":
+            score -= 5
+        if github_profile.get("repositories_visible"):
+            score += 4
+        else:
+            score -= 2
+        if github_profile.get("bio_coherent"):
+            score += 3
+        if github_profile.get("profile_curated"):
+            score += 2
 
     verified_count = int(evidence.get("verified_profile_count", 0) or 0)
     if verified_count > 1:
-        score += min((verified_count - 1) * 6, 12)
+        score += min((verified_count - 1) * 3, 9)
 
     social_text_analyses = evidence.get("social_text_analyses") or {}
     for analysis in social_text_analyses.values():
         status = str((analysis.get("evaluation") or {}).get("status") or "").lower()
         if status == "aligned":
-            score += 6
-        elif status in {"misaligned", "warning"}:
-            score -= 6
+            score += 3
+        elif status in {"misaligned", "warning", "review"}:
+            score -= 2
+
+    screenshots_summary = evidence.get("screenshots_summary") or {}
+    if not screenshots_summary.get("valid_uploaded"):
+        score -= 4
+    else:
+        score += min(4, int(screenshots_summary.get("count", 0) or 0))
 
     score += int(evidence.get("visual_score_adjustment", 0) or 0)
     return clamp_score(score)
+
+
+def describe_cv_profile_name_matches(evidence: Dict[str, Any]) -> str:
+    messages = []
+    for platform, label in [
+        ("cv_linkedin_name_match", "LinkedIn"),
+        ("cv_instagram_name_match", "Instagram"),
+        ("github_profile", "GitHub"),
+    ]:
+        match = (
+            (evidence.get("github_profile") or {}).get("cv_name_match") or {}
+            if platform == "github_profile"
+            else evidence.get(platform) or {}
+        )
+        status = str(match.get("status") or "unverified")
+        detected_name = str(match.get("detected_name") or "").strip()
+        profile_name = str(match.get("profile_name_candidate") or "").strip()
+        if status == "matched":
+            messages.append(
+                f"Nome CV ↔ {label}: coerente."
+                + (f" CV: {detected_name}." if detected_name else "")
+                + (f" Profilo: {profile_name}." if profile_name else "")
+            )
+        elif status == "similar":
+            messages.append(
+                f"Nome CV ↔ {label}: parzialmente coerente."
+                + (f" CV: {detected_name}." if detected_name else "")
+                + (f" Profilo: {profile_name}." if profile_name else "")
+            )
+        elif status == "mismatch":
+            messages.append(
+                f"Nome CV ↔ {label}: non pienamente coerente."
+                + (f" CV: {detected_name}." if detected_name else "")
+                + (f" Profilo: {profile_name}." if profile_name else "")
+            )
+        else:
+            messages.append(
+                f"Nome CV ↔ {label}: non verificabile con i dati pubblici disponibili."
+            )
+    return " ".join(messages)
+
+
+def describe_github_analysis(evidence: Dict[str, Any]) -> str:
+    github_profile = evidence.get("github_profile") or {}
+    additional_link = evidence.get("additional_link") or {}
+    if not github_profile.get("is_github_link"):
+        return "Non e stato inserito un link GitHub specifico."
+    if github_profile.get("analyzed_via_link"):
+        parts = ["Il profilo GitHub e stato analizzato tramite il link fornito."]
+        if github_profile.get("repositories_visible"):
+            parts.append("Sono presenti repository pubblici o riferimenti tecnici visibili.")
+        else:
+            parts.append("Non risultano repository pubblici chiaramente visibili.")
+        if github_profile.get("bio_coherent"):
+            parts.append("Bio o descrizione appaiono coerenti con il profilo professionale.")
+        return " ".join(parts)
+    if github_profile.get("requires_screenshot_fallback"):
+        return additional_link.get("message") or (
+            "Non e stato possibile analizzare direttamente il profilo GitHub dal link fornito. "
+            "Carica uno screenshot del profilo GitHub per migliorare l'analisi digitale."
+        )
+    return additional_link.get("message") or "Il link GitHub non ha restituito abbastanza dati pubblici."
+
+
+def describe_screenshot_impact(evidence: Dict[str, Any]) -> str:
+    screenshots_summary = evidence.get("screenshots_summary") or {}
+    if screenshots_summary.get("valid_uploaded"):
+        return (
+            f"Sono stati caricati screenshot validi di {', '.join(screenshots_summary.get('profile_types') or ['profili digitali'])}. "
+            f"Questo ha contribuito in modo leggero al punteggio digitale ({int(evidence.get('visual_score_adjustment', 0) or 0):+d})."
+        )
+    return screenshots_summary.get("message") or (
+        "Non sono stati caricati screenshot dei profili digitali. "
+        "L'analisi resta parziale e il punteggio puo risultare leggermente piu basso."
+    )
 
 
 def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -> Dict:
@@ -4248,16 +4784,15 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
-    instagram_verified = False
     other_profile_verified = other_profile_identity["status"] == "matched"
     linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
     score = compute_digital_presence_score(evidence)
 
     return {
         "score": score,
-        "headline": "Analisi preliminare completata" if evidence["can_compare_with_cv"] else "Analisi non disponibile",
+        "headline": "Analisi digitale completata" if evidence["can_compare_with_cv"] else "Analisi digitale parziale",
         "summary": (
-            "Ho confrontato il CV con i profili pubblici verificabili disponibili."
+            "Ho confrontato il CV con LinkedIn, Instagram, GitHub e gli screenshot disponibili, usando solo dati pubblici o caricati dall'utente."
             if evidence["can_compare_with_cv"]
             else evidence["zero_score_reason"]
         ),
@@ -4275,24 +4810,37 @@ def build_fallback_digital_analysis(user: Dict, sources: List[Dict[str, str]]) -
                 ),
             },
             {
+                "title": "Coerenza CV e profili",
+                "status": "success" if "non pienamente coerente" not in describe_cv_profile_name_matches(evidence).lower() else "warning",
+                "description": (
+                    describe_cv_profile_name_matches(evidence)
+                    or "Non ci sono abbastanza dati pubblici per confrontare in modo affidabile il nome del CV con i profili digitali."
+                ),
+                "coach_tip": "Controlla che nome, cognome, username e bio dei profili appartengano alla stessa persona.",
+            },
+            {
+                "title": "Instagram",
+                "status": "success" if str((evidence.get("instagram_visibility") or {}).get("status")) == "public" else "warning",
+                "description": (evidence.get("instagram_visibility") or {}).get("message") or describe_visual_media_analysis(evidence, has_instagram),
+                "coach_tip": "Se il profilo e visibile pubblicamente, mantieni bio e contenuti coerenti con il ruolo target.",
+            },
+            {
                 "title": "Foto e contenuti pubblici",
                 "status": visual_media_finding_status(evidence),
                 "description": describe_visual_media_analysis(evidence, has_instagram),
                 "coach_tip": "Mantieni foto profilo, bio e contenuti recenti coerenti con il ruolo per cui ti candidi.",
             },
             {
-                "title": "Link aggiuntivo",
-                "status": "success" if other_profile_verified else "warning",
-                "description": (
-                    evidence["additional_link"]["message"]
-                    if other_profile_verified
-                    else evidence["additional_link"]["message"]
-                    if has_public_other_profile
-                    else evidence["additional_link"]["message"]
-                    if has_other_profile
-                    else "Non hai inserito un link aggiuntivo."
-                ),
-                "coach_tip": "Verifica manualmente cosa puo vedere un recruiter non autenticato.",
+                "title": "GitHub o link aggiuntivo",
+                "status": "success" if (evidence.get("github_profile") or {}).get("analyzed_via_link") or other_profile_verified else "warning",
+                "description": describe_github_analysis(evidence),
+                "coach_tip": "Per ruoli tecnici, un GitHub pubblico con bio e repository coerenti rafforza il profilo.",
+            },
+            {
+                "title": "Screenshot caricati",
+                "status": "success" if (evidence.get("screenshots_summary") or {}).get("valid_uploaded") else "warning",
+                "description": describe_screenshot_impact(evidence),
+                "coach_tip": "Carica screenshot validi di LinkedIn, Instagram, GitHub o portfolio per rendere l'analisi piu verificabile.",
             },
         ],
         "sources": sources,
@@ -4314,7 +4862,6 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
     linkedin_identity = evidence["linkedin_identity"]
     instagram_identity = evidence["instagram_identity"]
     other_profile_identity = evidence["other_profile_identity"]
-    instagram_verified = False
     other_profile_verified = other_profile_identity["status"] == "matched"
     can_compare_with_cv = evidence["can_compare_with_cv"]
     linkedin_basic_info = build_linkedin_basic_info(user.get("linkedin_url", ""))
@@ -4332,13 +4879,20 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
         },
         {
             "title": "Coerenza CV/profili",
-            "status": "success" if can_compare_with_cv else "warning",
+            "status": "success" if can_compare_with_cv and "non pienamente coerente" not in describe_cv_profile_name_matches(evidence).lower() else "warning",
             "description": (
-                "L'analisi usa solo CV e profili pubblici verificabili, evitando confronti con omonimi o risultati non verificati."
+                describe_cv_profile_name_matches(evidence)
+                or "L'analisi usa solo CV e profili pubblici verificabili, evitando confronti con omonimi o risultati non verificati."
                 if can_compare_with_cv
                 else evidence["zero_score_reason"]
             ),
             "coach_tip": "Controlla che ruolo target, formazione e competenze principali dicano la stessa cosa su CV e LinkedIn.",
+        },
+        {
+            "title": "Instagram",
+            "status": "success" if str((evidence.get("instagram_visibility") or {}).get("status")) == "public" else "warning",
+            "description": (evidence.get("instagram_visibility") or {}).get("message") or "Instagram non e stato collegato.",
+            "coach_tip": "Se il profilo e pubblico, mantieni visibili bio e contenuti coerenti con la tua immagine professionale.",
         },
         {
             "title": "Foto e contenuti pubblici",
@@ -4347,18 +4901,16 @@ def build_clean_digital_analysis(user: Dict, sources: List[Dict[str, str]], scor
             "coach_tip": "Evita contenuti pubblici che possano confondere il posizionamento professionale.",
         },
         {
-            "title": "Link aggiuntivo",
-            "status": "success" if other_profile_verified else "warning",
-            "description": (
-                evidence["additional_link"]["message"]
-                if other_profile_verified
-                else evidence["additional_link"]["message"]
-                if has_public_other_profile
-                else evidence["additional_link"]["message"]
-                if has_other_profile
-                else "Non e stato collegato un link aggiuntivo."
-            ),
-            "coach_tip": "Controlla visibilita, descrizione e contenuti pubblici prima di candidarti.",
+            "title": "GitHub o link aggiuntivo",
+            "status": "success" if (evidence.get("github_profile") or {}).get("analyzed_via_link") or other_profile_verified else "warning",
+            "description": describe_github_analysis(evidence),
+            "coach_tip": "Per ruoli tecnici, completa GitHub con bio, repository e descrizioni minime dei progetti.",
+        },
+        {
+            "title": "Screenshot caricati",
+            "status": "success" if (evidence.get("screenshots_summary") or {}).get("valid_uploaded") else "warning",
+            "description": describe_screenshot_impact(evidence),
+            "coach_tip": "Gli screenshot validi aiutano a verificare nome, bio e coerenza del profilo digitale.",
         },
     ]
 
@@ -7677,7 +8229,8 @@ def create_user(data: UserCreate):
 
 
 @app.get("/users/{user_id}")
-def get_user(user_id: int):
+def get_user(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -7812,7 +8365,8 @@ def delete_profile_image(user_id: int, authorization: Optional[str] = Header(def
 
 
 @app.delete("/users/{user_id}")
-def delete_user(user_id: int):
+def delete_user(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -7861,7 +8415,8 @@ def delete_user(user_id: int):
 
 
 @app.put("/users/{user_id}")
-def update_user(user_id: int, data: UserUpdate):
+def update_user(user_id: int, data: UserUpdate, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     email = validate_email_address(data.email) if data.email else None
     phone = validate_phone(data.phone)
 
@@ -7949,7 +8504,8 @@ def update_user(user_id: int, data: UserUpdate):
 
 
 @app.delete("/users/{user_id}/cv")
-def delete_user_cv(user_id: int):
+def delete_user_cv(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -8673,12 +9229,38 @@ ATS_HARD_SKILL_TERMS = [
     "machine learning", "ai", "ml", "llm", "nlp", "clustering testuale",
     "accuratezza", "tempi di risposta", "preparazione dati", "confronto modelli",
     "pandas", "numpy", "cplex", "ottimizzazione",
+    "analisi finanziaria", "modellazione finanziaria", "valutazione d'azienda",
+    "bilancio", "contabilita generale", "ifrs", "gaap", "corporate finance",
+    "mergers and acquisitions", "due diligence", "risk management", "credit risk",
+    "market risk", "controllo di gestione", "budgeting", "forecasting",
+    "scienza attuariale", "econometria", "audit", "fiscalita", "asset allocation",
+    "portfolio management", "cad", "progettazione meccanica", "analisi fem",
+    "termodinamica", "bim", "progettazione strutturale", "calcolo strutturale",
+    "impianti elettrici", "circuit design", "lean manufacturing", "six sigma",
+    "ingegneria di processo", "simulazione di processo", "valutazione ambientale",
+    "life cycle assessment", "dispositivi medici", "segnali biomedicali",
+    "inferenza statistica", "disegno sperimentale", "ricerca operativa",
+    "programmazione lineare", "analisi quantitativa", "stochastic calculus",
+    "modellazione matematica", "strategia di marketing", "marketing automation",
+    "seo", "sem", "content strategy", "brand management", "media relations",
+    "talent acquisition", "selezione del personale", "diritto del lavoro",
+    "contrattualistica", "compliance normativa", "gdpr", "user research",
+    "interaction design", "information architecture", "graphic design",
+    "tipografia", "industrial design", "clinical data management", "gcp",
+    "bioinformatica", "genomica", "metodologia scientifica", "laboratory research",
+    "supply chain planning", "demand planning", "gestione inventario",
+    "logistica", "procurement", "strategic sourcing", "vendor management",
 ]
 
 ATS_SOFT_SKILL_TERMS = [
     "comunicazione", "problem solving", "team", "collaborazione",
     "pensiero analitico", "ragionamento analitico", "decisioni",
     "organizzazione", "precisione", "autonomia",
+    "attenzione ai dettagli", "leadership", "negoziazione",
+    "gestione stakeholder", "orientamento al risultato", "integrita professionale",
+    "riservatezza", "creativita", "pensiero sistemico", "gestione priorita",
+    "comunicazione scientifica", "comunicazione visiva", "empatia",
+    "capacita decisionale", "gestione del cambiamento", "orientamento al cliente",
 ]
 
 
@@ -8714,6 +9296,102 @@ ROLE_KEYWORD_GROUPS = {
         ("prototipazione", ["prototipazione", "prototype", "prototipi"]),
         ("playtesting", ["playtesting", "play test"]),
         ("portfolio progetti", ["portfolio", "progetti"]),
+    ],
+    "financial analyst": [
+        ("Analisi finanziaria", ["analisi finanziaria", "financial analysis"]),
+        ("Modellazione finanziaria", ["modellazione finanziaria", "financial modeling"]),
+        ("Valutazione d'azienda", ["valutazione d'azienda", "business valuation", "company valuation"]),
+        ("Budgeting e forecasting", ["budgeting", "forecasting"]),
+        ("Excel avanzato", ["excel avanzato", "advanced excel"]),
+        ("Bloomberg Terminal", ["bloomberg terminal", "bloomberg"]),
+    ],
+    "accountant": [
+        ("Contabilita generale", ["contabilita generale", "general ledger"]),
+        ("Bilancio", ["bilancio", "financial statements"]),
+        ("IFRS / GAAP", ["ifrs", "gaap"]),
+        ("Riconciliazioni", ["riconciliazioni", "reconciliation"]),
+        ("SAP", ["sap"]),
+        ("Zucchetti", ["zucchetti"]),
+    ],
+    "risk manager": [
+        ("Risk management", ["risk management", "gestione dei rischi"]),
+        ("Credit risk", ["credit risk", "rischio di credito"]),
+        ("Market risk", ["market risk", "rischio di mercato"]),
+        ("Stress testing", ["stress testing", "stress test"]),
+        ("VaR", ["value at risk", "var"]),
+        ("SAS", ["sas"]),
+    ],
+    "mechanical engineer": [
+        ("Progettazione meccanica", ["progettazione meccanica", "mechanical design"]),
+        ("CAD 3D", ["cad 3d", "3d cad"]),
+        ("Analisi FEM", ["analisi fem", "finite element analysis", "fea"]),
+        ("GD&T", ["gd&t", "geometric dimensioning"]),
+        ("SolidWorks", ["solidworks"]),
+        ("ANSYS", ["ansys"]),
+    ],
+    "civil engineer": [
+        ("Progettazione civile", ["progettazione civile", "civil design"]),
+        ("BIM", ["bim", "building information modeling"]),
+        ("Calcolo strutturale", ["calcolo strutturale", "structural analysis"]),
+        ("Direzione lavori", ["direzione lavori", "construction supervision"]),
+        ("AutoCAD", ["autocad"]),
+        ("Revit", ["revit"]),
+    ],
+    "electrical engineer": [
+        ("Progettazione elettrica", ["progettazione elettrica", "electrical design"]),
+        ("Circuit design", ["circuit design", "progettazione circuiti"]),
+        ("PLC", ["plc", "programmable logic controller"]),
+        ("Sistemi di potenza", ["sistemi di potenza", "power systems"]),
+        ("MATLAB", ["matlab"]),
+        ("ETAP", ["etap"]),
+    ],
+    "marketing manager": [
+        ("Strategia di marketing", ["strategia di marketing", "marketing strategy"]),
+        ("Market research", ["market research", "ricerche di mercato"]),
+        ("Campaign management", ["campaign management", "gestione campagne"]),
+        ("Brand positioning", ["brand positioning", "posizionamento del brand"]),
+        ("Google Analytics", ["google analytics", "ga4"]),
+        ("HubSpot", ["hubspot"]),
+    ],
+    "digital marketer": [
+        ("Digital advertising", ["digital advertising", "online advertising"]),
+        ("SEO / SEM", ["seo", "sem", "search engine marketing"]),
+        ("Marketing automation", ["marketing automation"]),
+        ("Conversion rate optimization", ["conversion rate optimization", "cro"]),
+        ("Google Ads", ["google ads"]),
+        ("Meta Ads Manager", ["meta ads manager", "facebook ads manager"]),
+    ],
+    "recruiter": [
+        ("Talent acquisition", ["talent acquisition", "acquisizione talenti"]),
+        ("Sourcing", ["candidate sourcing", "sourcing candidati"]),
+        ("Selezione del personale", ["selezione del personale", "recruitment"]),
+        ("Interviste strutturate", ["interviste strutturate", "structured interviews"]),
+        ("LinkedIn Recruiter", ["linkedin recruiter"]),
+        ("ATS recruiting", ["applicant tracking system", "ats recruiting"]),
+    ],
+    "legal counsel": [
+        ("Contrattualistica", ["contrattualistica", "contract drafting"]),
+        ("Diritto societario", ["diritto societario", "corporate law"]),
+        ("Legal research", ["legal research", "ricerca giuridica"]),
+        ("Compliance normativa", ["compliance normativa", "regulatory compliance"]),
+        ("Westlaw", ["westlaw"]),
+        ("LexisNexis", ["lexisnexis"]),
+    ],
+    "ux designer": [
+        ("User research", ["user research", "ricerca utente"]),
+        ("Interaction design", ["interaction design"]),
+        ("Wireframing", ["wireframing", "wireframe"]),
+        ("Usability testing", ["usability testing", "test di usabilita"]),
+        ("Figma", ["figma"]),
+        ("Miro", ["miro"]),
+    ],
+    "supply chain manager": [
+        ("Supply chain planning", ["supply chain planning", "pianificazione supply chain"]),
+        ("Demand planning", ["demand planning", "pianificazione della domanda"]),
+        ("Gestione inventario", ["gestione inventario", "inventory management"]),
+        ("S&OP", ["s&op", "sales and operations planning"]),
+        ("SAP", ["sap"]),
+        ("Oracle SCM Cloud", ["oracle scm cloud", "oracle scm"]),
     ],
 }
 
@@ -8762,6 +9440,96 @@ ROLE_SKILL_LIBRARY = {
         "soft_skills": ["Creativita", "Problem solving", "Comunicazione", "Attenzione ai dettagli", "Collaborazione"],
         "programming_languages": ["JavaScript", "TypeScript", "React"],
         "tools": ["Figma", "Adobe XD", "VS Code", "Git", "Webpack"],
+    },
+    "financial analyst": {
+        "hard_skills": ["Analisi finanziaria", "Modellazione finanziaria", "Valutazione d'azienda", "Analisi di bilancio", "Budgeting", "Forecasting", "Variance analysis", "KPI finanziari"],
+        "soft_skills": ["Pensiero analitico", "Attenzione ai dettagli", "Comunicazione con stakeholder", "Gestione delle scadenze", "Integrita professionale"],
+        "programming_languages": ["SQL", "Python", "VBA"],
+        "tools": ["Excel avanzato", "Bloomberg Terminal", "Power BI", "Tableau", "SAP", "Oracle Hyperion"],
+    },
+    "accountant": {
+        "hard_skills": ["Contabilita generale", "Scritture contabili", "Chiusure mensili", "Redazione del bilancio", "Riconciliazioni contabili", "Principi IFRS", "Principi GAAP", "Contabilita fornitori e clienti"],
+        "soft_skills": ["Precisione", "Affidabilita", "Gestione delle scadenze", "Riservatezza", "Organizzazione"],
+        "programming_languages": [],
+        "tools": ["SAP", "Oracle NetSuite", "Zucchetti", "TeamSystem", "Excel avanzato", "Microsoft Dynamics 365"],
+    },
+    "investment banker": {
+        "hard_skills": ["Mergers and Acquisitions", "Corporate finance", "Financial modeling", "Valutazione d'azienda", "Due diligence finanziaria", "Leveraged Buyout modeling", "Analisi dei capital markets", "Preparazione di pitch book"],
+        "soft_skills": ["Resistenza allo stress", "Negoziazione", "Comunicazione executive", "Attenzione ai dettagli", "Gestione delle priorita"],
+        "programming_languages": ["VBA", "Python"],
+        "tools": ["Bloomberg Terminal", "Refinitiv Workspace", "S&P Capital IQ", "PitchBook", "FactSet", "Excel avanzato", "PowerPoint"],
+    },
+    "risk manager": {
+        "hard_skills": ["Enterprise Risk Management", "Credit risk", "Market risk", "Operational risk", "Value at Risk", "Stress testing", "Risk assessment", "Regulatory reporting"],
+        "soft_skills": ["Pensiero critico", "Capacita decisionale", "Comunicazione con stakeholder", "Integrita professionale", "Gestione delle priorita"],
+        "programming_languages": ["Python", "R", "SQL", "SAS"],
+        "tools": ["SAS Risk Management", "Moody's Analytics", "MATLAB", "Bloomberg Terminal", "Power BI", "Excel avanzato"],
+    },
+    "controller": {
+        "hard_skills": ["Controllo di gestione", "Budgeting", "Forecasting", "Variance analysis", "Cost accounting", "Management reporting", "Analisi della marginalita", "Definizione KPI"],
+        "soft_skills": ["Pensiero analitico", "Orientamento al risultato", "Comunicazione manageriale", "Precisione", "Pianificazione"],
+        "programming_languages": ["SQL", "VBA"],
+        "tools": ["SAP CO", "Oracle Hyperion", "Tagetik", "Power BI", "Excel avanzato", "Qlik Sense"],
+    },
+    "actuary": {
+        "hard_skills": ["Matematica attuariale", "Pricing assicurativo", "Reserving", "Solvency II", "Modelli di mortalita", "Analisi di sopravvivenza", "Risk modeling", "Valutazione delle passivita"],
+        "soft_skills": ["Pensiero quantitativo", "Precisione", "Comunicazione tecnica", "Pensiero critico", "Apprendimento continuo"],
+        "programming_languages": ["R", "Python", "SQL", "SAS"],
+        "tools": ["Prophet", "MoSes", "SAS", "RStudio", "Excel avanzato", "Power BI"],
+    },
+    "economist": {
+        "hard_skills": ["Econometria", "Analisi macroeconomica", "Analisi microeconomica", "Modelli economici", "Forecasting economico", "Valutazione delle politiche pubbliche", "Analisi delle serie storiche", "Causal inference"],
+        "soft_skills": ["Pensiero critico", "Comunicazione dei risultati", "Rigore metodologico", "Curiosita intellettuale", "Sintesi"],
+        "programming_languages": ["R", "Python", "Stata", "SQL"],
+        "tools": ["Stata", "EViews", "RStudio", "MATLAB", "Excel avanzato", "World Bank DataBank"],
+    },
+    "auditor": {
+        "hard_skills": ["Revisione contabile", "Audit planning", "Internal controls", "Risk assessment", "Test di conformita", "Analisi di bilancio", "Campionamento di audit", "Principi ISA"],
+        "soft_skills": ["Integrita professionale", "Scetticismo professionale", "Precisione", "Comunicazione con il cliente", "Gestione delle scadenze"],
+        "programming_languages": ["SQL"],
+        "tools": ["CaseWare", "TeamMate+", "IDEA", "ACL Analytics", "SAP", "Excel avanzato"],
+    },
+    "tax consultant": {
+        "hard_skills": ["Fiscalita d'impresa", "Imposte dirette e indirette", "IVA", "Transfer pricing", "Tax compliance", "Pianificazione fiscale", "Contenzioso tributario", "Dichiarazioni fiscali"],
+        "soft_skills": ["Precisione", "Riservatezza", "Aggiornamento continuo", "Comunicazione con il cliente", "Gestione delle scadenze"],
+        "programming_languages": [],
+        "tools": ["TeamSystem", "Zucchetti", "SAP", "Bloomberg Tax", "OneSource", "Excel avanzato"],
+    },
+    "portfolio manager": {
+        "hard_skills": ["Asset allocation", "Portfolio construction", "Security analysis", "Performance attribution", "Risk-adjusted return", "Fixed income analysis", "Equity valuation", "Investment strategy"],
+        "soft_skills": ["Capacita decisionale", "Gestione del rischio", "Comunicazione con investitori", "Disciplina", "Pensiero strategico"],
+        "programming_languages": ["Python", "R", "SQL"],
+        "tools": ["Bloomberg Terminal", "FactSet", "Morningstar Direct", "BlackRock Aladdin", "Refinitiv Workspace", "Excel avanzato"],
+    },
+    "mechanical engineer": {
+        "hard_skills": ["Progettazione meccanica", "CAD 3D", "Analisi FEM", "GD&T", "Termodinamica", "Meccanica dei materiali", "Design for Manufacturing", "Tolleranze dimensionali"],
+        "soft_skills": ["Problem solving tecnico", "Precisione", "Collaborazione multidisciplinare", "Pensiero sistemico", "Gestione delle priorita"],
+        "programming_languages": ["MATLAB", "Python"],
+        "tools": ["SolidWorks", "CATIA", "Siemens NX", "AutoCAD", "ANSYS", "Abaqus", "PTC Creo"],
+    },
+    "civil engineer": {
+        "hard_skills": ["Progettazione civile", "Calcolo strutturale", "BIM", "Geotecnica", "Idraulica", "Direzione lavori", "Computo metrico", "Normativa delle costruzioni"],
+        "soft_skills": ["Gestione del cantiere", "Comunicazione con stakeholder", "Problem solving sul campo", "Precisione", "Pianificazione"],
+        "programming_languages": ["Python", "MATLAB"],
+        "tools": ["AutoCAD Civil 3D", "Revit", "SAP2000", "ETABS", "Primus", "ArcGIS", "Microsoft Project"],
+    },
+    "electrical engineer": {
+        "hard_skills": ["Progettazione elettrica", "Circuit design", "Sistemi di potenza", "Controlli automatici", "Elettronica analogica e digitale", "PLC", "Dimensionamento impianti", "Normative IEC"],
+        "soft_skills": ["Pensiero analitico", "Problem solving tecnico", "Precisione", "Collaborazione multidisciplinare", "Orientamento alla sicurezza"],
+        "programming_languages": ["MATLAB", "C", "C++", "VHDL"],
+        "tools": ["MATLAB Simulink", "ETAP", "EPLAN", "AutoCAD Electrical", "LTspice", "Altium Designer", "Siemens TIA Portal"],
+    },
+    "structural engineer": {
+        "hard_skills": ["Analisi strutturale", "Progettazione in cemento armato", "Progettazione di strutture in acciaio", "Analisi sismica", "Analisi FEM", "Verifiche agli stati limite", "Eurocodici", "Dettagli costruttivi"],
+        "soft_skills": ["Precisione", "Pensiero critico", "Responsabilita professionale", "Collaborazione con progettisti", "Gestione delle scadenze"],
+        "programming_languages": ["Python", "MATLAB"],
+        "tools": ["SAP2000", "ETABS", "Tekla Structures", "Revit", "MIDAS Gen", "Abaqus", "AutoCAD"],
+    },
+    "industrial engineer": {
+        "hard_skills": ["Lean manufacturing", "Six Sigma", "Ottimizzazione dei processi", "Tempi e metodi", "Operations management", "Quality management", "Capacity planning", "Supply chain analysis"],
+        "soft_skills": ["Pensiero sistemico", "Orientamento al miglioramento continuo", "Leadership operativa", "Comunicazione interfunzionale", "Capacita decisionale"],
+        "programming_languages": ["Python", "R", "SQL", "MATLAB"],
+        "tools": ["Minitab", "Arena Simulation", "SAP", "Power BI", "Excel avanzato", "Microsoft Visio", "IBM CPLEX"],
     },
 }
 
@@ -9649,9 +10417,35 @@ def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z\s]", " ", strip_accents(name or "").lower()).strip()
 
 
+def _name_fragment_in_text(text: str, name: str) -> bool:
+    normalized_text = normalize_plain_text(text)
+    normalized_name = normalize_name(name)
+    if not normalized_text or not normalized_name:
+        return False
+
+    if normalized_name in normalized_text:
+        return True
+
+    compact_text = normalized_text.replace(" ", "")
+    compact_name = normalized_name.replace(" ", "")
+    return bool(compact_name) and compact_name in compact_text
+
+
 def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -> Dict:
     expected = normalize_name(f"{user_first_name} {user_last_name}")
     expected_tokens = [token for token in expected.split() if token]
+    reversed_expected = " ".join(reversed(expected_tokens))
+
+    if len(expected_tokens) >= 2 and (
+        _name_fragment_in_text(cv_text, expected)
+        or _name_fragment_in_text(cv_text, reversed_expected)
+    ):
+        return {
+            "matches_user": True,
+            "confidence": 1.0,
+            "detected_name": f"{user_first_name} {user_last_name}".strip(),
+            "message": "Identità coerente: il nome presente nel CV corrisponde a quello dell'utente.",
+        }
 
     detected = extract_candidate_name_from_cv(cv_text)
     detected_name = normalize_name(detected.get("name", ""))
@@ -9694,12 +10488,30 @@ def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -
             "message": "Identità coerente: il nome presente nel CV corrisponde a quello dell'utente.",
         }
 
+    strong_detected_name = detected.get("confidence", 0) >= 0.70 and len(detected_tokens) >= 2
+    very_low_match = confidence < 0.50 and token_matches == 0
+    likely_other_person = strong_detected_name and very_low_match
+
+    if likely_other_person:
+        return {
+            "matches_user": False,
+            "confidence": round(confidence, 2),
+            "detected_name": detected.get("name", ""),
+            "message": (
+                "Il nome rilevato nel CV sembra appartenere a un'altra persona. "
+                "Controlla di aver caricato il file corretto."
+            ),
+        }
+
     if len(detected_tokens) >= 2 and confidence < 0.50:
         return {
             "matches_user": None,
             "confidence": round(confidence, 2),
             "detected_name": detected.get("name", ""),
-            "message": "Non sono riuscito a verificare con certezza il nome nel CV. Controlla che il documento sia corretto.",
+            "message": (
+                "Il nome nel CV non coincide in modo chiaro con quello del profilo. "
+                "Verifica che il documento sia corretto prima di proseguire."
+            ),
         }
 
     if detected.get("confidence", 0) >= 0.65 and confidence < 0.60:
@@ -9707,7 +10519,10 @@ def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -
             "matches_user": None,
             "confidence": round(confidence, 2),
             "detected_name": detected.get("name", ""),
-            "message": "Non sono riuscito a verificare con certezza il nome nel CV. Controlla che il documento sia corretto.",
+            "message": (
+                "Il nome rilevato nel CV e solo parzialmente coerente con il profilo. "
+                "Controlla il file finale prima di usarlo."
+            ),
         }
 
     return {
@@ -10556,6 +11371,17 @@ def _education_rewrite(education: str, target_profile: Dict[str, Any], cv_text: 
     )
 
 
+def _shorten_cv_text(text: str, max_length: int = 700) -> str:
+    compact = re.sub(r"\s+", " ", text or "").strip()
+    if not compact:
+        return ""
+    if len(compact) <= max_length:
+        return compact
+
+    shortened = compact[:max_length].rsplit(" ", 1)[0].strip()
+    return (shortened or compact[:max_length].strip()) + "..."
+
+
 def _unique_preserve_order(values: Iterable[str]) -> List[str]:
     result: List[str] = []
     seen = set()
@@ -11221,7 +12047,12 @@ async def analyze_cv_for_job_endpoint(
 
 
 @app.post("/users/{user_id}/cv/analyze-for-job")
-def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
+def analyze_saved_user_cv_for_job(
+    user_id: int,
+    data: JobValidationRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     existing_user = fetch_user_by_id(cursor, user_id)
@@ -11290,7 +12121,12 @@ def analyze_saved_user_cv_for_job(user_id: int, data: JobValidationRequest):
 
 
 @app.post("/users/{user_id}/cv-optimize")
-def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
+def optimize_user_cv(
+    user_id: int,
+    data: CvOptimizationAnalysisRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     existing_user = fetch_user_by_id(cursor, user_id)
@@ -11806,7 +12642,13 @@ def optimize_user_cv(user_id: int, data: CvOptimizationAnalysisRequest):
 
 
 @app.get("/users/{user_id}/optimized-cvs/{optimized_cv_id}/file")
-def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[str] = None):
+def download_optimized_cv(
+    user_id: int,
+    optimized_cv_id: int,
+    format: Optional[str] = None,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -11848,17 +12690,26 @@ def download_optimized_cv(user_id: int, optimized_cv_id: int, format: Optional[s
 
 
 @app.get("/users/{user_id}/optimized-cvs/{optimized_cv_id}/download-docx")
-def download_optimized_cv_docx(user_id: int, optimized_cv_id: int):
-    return download_optimized_cv(user_id, optimized_cv_id, format="docx")
+def download_optimized_cv_docx(
+    user_id: int,
+    optimized_cv_id: int,
+    authorization: Optional[str] = Header(default=None),
+):
+    return download_optimized_cv(user_id, optimized_cv_id, format="docx", authorization=authorization)
 
 
 @app.get("/users/{user_id}/optimized-cvs/{optimized_cv_id}/download-pdf")
-def download_optimized_cv_pdf(user_id: int, optimized_cv_id: int):
-    return download_optimized_cv(user_id, optimized_cv_id, format="pdf")
+def download_optimized_cv_pdf(
+    user_id: int,
+    optimized_cv_id: int,
+    authorization: Optional[str] = Header(default=None),
+):
+    return download_optimized_cv(user_id, optimized_cv_id, format="pdf", authorization=authorization)
 
 
 @app.get("/users/{user_id}/optimized-cvs")
-def list_optimized_cvs(user_id: int):
+def list_optimized_cvs(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
@@ -11900,7 +12751,12 @@ def list_optimized_cvs(user_id: int):
 
 
 @app.delete("/users/{user_id}/optimized-cvs/{optimized_cv_id}")
-def delete_optimized_cv(user_id: int, optimized_cv_id: int):
+def delete_optimized_cv(
+    user_id: int,
+    optimized_cv_id: int,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM optimized_cvs WHERE id = ? AND user_id = ?", (optimized_cv_id, user_id))
@@ -11916,7 +12772,13 @@ def delete_optimized_cv(user_id: int, optimized_cv_id: int):
 
 
 @app.patch("/users/{user_id}/optimized-cvs/{optimized_cv_id}")
-def update_optimized_cv(user_id: int, optimized_cv_id: int, update_data: Dict[str, str]):
+def update_optimized_cv(
+    user_id: int,
+    optimized_cv_id: int,
+    update_data: Dict[str, str],
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT filename FROM optimized_cvs WHERE id = ? AND user_id = ?", (optimized_cv_id, user_id))
@@ -11949,7 +12811,8 @@ def update_optimized_cv(user_id: int, optimized_cv_id: int, update_data: Dict[st
 
 # Legacy endpoint for backward compatibility
 @app.get("/users/{user_id}/cv-optimized-file")
-def download_optimized_cv_legacy(user_id: int):
+def download_optimized_cv_legacy(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -12249,7 +13112,12 @@ async def validate_cv_file(file: UploadFile = File(...)):
 
 
 @app.post("/users/{user_id}/cv")
-def upload_user_cv(user_id: int, data: UserCvUpload):
+def upload_user_cv(
+    user_id: int,
+    data: UserCvUpload,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     filename = data.filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     allowed_extensions = {"pdf", "docx"}
@@ -12330,7 +13198,8 @@ def upload_user_cv(user_id: int, data: UserCvUpload):
 
 
 @app.get("/users/{user_id}/cv-file")
-def get_user_cv_file(user_id: int):
+def get_user_cv_file(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     user = fetch_user_by_id(cursor, user_id)
@@ -12352,7 +13221,12 @@ def get_user_cv_file(user_id: int):
     }
 
 @app.post("/users/{user_id}/linkedin-profile")
-async def upload_linkedin_profile(user_id: int, file: UploadFile = File(...)):
+async def upload_linkedin_profile(
+    user_id: int,
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     filename = (file.filename or "").strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     allowed_extensions = {"pdf", "docx"}
@@ -12400,7 +13274,8 @@ async def upload_linkedin_profile(user_id: int, file: UploadFile = File(...)):
 
 
 @app.delete("/users/{user_id}/linkedin-profile")
-def delete_linkedin_profile(user_id: int):
+def delete_linkedin_profile(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
@@ -12426,7 +13301,8 @@ def delete_linkedin_profile(user_id: int):
 
 
 @app.get("/users/{user_id}/official-profiles")
-def get_user_official_profiles(user_id: int):
+def get_user_official_profiles(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     existing_user = fetch_user_by_id(cursor, user_id)
@@ -12452,7 +13328,12 @@ def get_user_official_profiles(user_id: int):
 
 
 @app.post("/users/{user_id}/cv-optimization-analysis")
-def analyze_user_cv_for_optimization(user_id: int, data: CvOptimizationAnalysisRequest):
+def analyze_user_cv_for_optimization(
+    user_id: int,
+    data: CvOptimizationAnalysisRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     existing_user = fetch_user_by_id(cursor, user_id)
@@ -12483,7 +13364,12 @@ def analyze_user_cv_for_optimization(user_id: int, data: CvOptimizationAnalysisR
 
 
 @app.put("/users/{user_id}/digital-presence")
-def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
+def update_digital_presence(
+    user_id: int,
+    data: DigitalPresenceUpdate,
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
     existing_user = fetch_user_by_id(cursor, user_id)
@@ -12532,6 +13418,7 @@ def update_digital_presence(user_id: int, data: DigitalPresenceUpdate):
         evidence = digital_analysis.setdefault("analysis_evidence", {})
         evidence["visual_media_analyses"] = previous_profile_analyses
         evidence["social_text_analyses"] = previous_text_analyses
+        evidence["social_screenshot_batches"] = list(previous_evidence.get("social_screenshot_batches", []))
         evidence["profile_screenshots_analyzed"] = previous_evidence.get(
             "profile_screenshots_analyzed", sorted(previous_profile_analyses)
         )
@@ -12606,7 +13493,9 @@ async def analyze_social_screenshots(
     profile_type: str = Form("instagram"),
     instagram_handle: str = Form(""),
     files: List[UploadFile] = File(...),
+    authorization: Optional[str] = Header(default=None),
 ):
+    require_user_session(user_id, authorization)
     profile_type = profile_type.strip().lower()
     if profile_type not in VISUAL_PROFILE_LABELS:
         raise HTTPException(status_code=400, detail="Tipo di profilo non valido.")
@@ -12627,6 +13516,13 @@ async def analyze_social_screenshots(
             "image_url": {"url": f"data:{content_type};base64,{encoded}"},
         })
 
+    ocr_analysis = await run_in_threadpool(
+        extract_social_screenshot_texts,
+        image_inputs,
+    )
+    content_classification = classify_social_screenshot_text(ocr_analysis.get("extracted_text", ""))
+    if not content_classification["valid"]:
+        raise HTTPException(status_code=400, detail=content_classification["reason"])
     screenshot_analysis = await run_in_threadpool(
         moderate_visual_inputs,
         image_inputs,
@@ -12638,10 +13534,6 @@ async def analyze_social_screenshots(
     if screenshot_analysis.get("status") in {"provider_not_configured", "provider_unavailable"}:
         raise HTTPException(status_code=503, detail=screenshot_analysis["message"])
 
-    ocr_analysis = await run_in_threadpool(
-        extract_social_screenshot_texts,
-        image_inputs,
-    )
     conn = get_connection()
     cursor = conn.cursor()
     user = fetch_user_by_id(cursor, user_id)
@@ -12671,24 +13563,74 @@ async def analyze_social_screenshots(
         "analysis_evidence": {},
     }
     evidence = digital_analysis.setdefault("analysis_evidence", {})
+    profile_batches = evidence.setdefault("social_screenshot_batches", [])
     profile_analyses = evidence.setdefault("visual_media_analyses", {})
     screenshot_analysis["profile_type"] = profile_type
     screenshot_analysis["profile_label"] = VISUAL_PROFILE_LABELS[profile_type]
-    profile_analyses[profile_type] = screenshot_analysis
-    visual_score_adjustment = calculate_visual_score_adjustment(profile_analyses)
-    evidence["visual_score_adjustment"] = visual_score_adjustment
-    evidence["visual_media_analysis"] = screenshot_analysis
-    evidence["instagram_media_analyzed"] = (
-        profile_analyses.get("instagram", {}).get("analyzed_content_count", 0) > 0
+    existing_batch_index = next(
+        (
+            index
+            for index, item in enumerate(profile_batches)
+            if item.get("profile_type") == profile_type and item.get("profile_label") == VISUAL_PROFILE_LABELS[profile_type]
+        ),
+        None,
     )
-    evidence["profile_screenshots_analyzed"] = sorted(profile_analyses)
+    batch_payload = {
+        "profile_type": profile_type,
+        "profile_label": VISUAL_PROFILE_LABELS[profile_type],
+        "valid": True,
+        "classification": content_classification,
+        "ocr": ocr_analysis,
+        "visual_analysis": screenshot_analysis,
+        "text_analysis": profile_text_analysis,
+        "flagged_count": int(screenshot_analysis.get("flagged_count", 0) or 0),
+        "sensitive_flagged_count": int(screenshot_analysis.get("sensitive_flagged_count", 0) or 0),
+        "analyzed_count": int(screenshot_analysis.get("analyzed_count", 0) or 0),
+    }
+    if existing_batch_index is None:
+        profile_batches.append(batch_payload)
+    else:
+        profile_batches[existing_batch_index] = batch_payload
+    profile_analyses[profile_type] = {
+        **screenshot_analysis,
+        "profile_type": profile_type,
+        "profile_label": VISUAL_PROFILE_LABELS[profile_type],
+        "batch_count": sum(1 for item in profile_batches if item.get("profile_type") == profile_type),
+    }
+    visual_score_adjustment = calculate_social_screenshot_score_adjustment(profile_batches)
+    evidence["visual_score_adjustment"] = visual_score_adjustment
+    evidence["visual_media_analysis"] = profile_analyses[profile_type]
+    evidence["instagram_media_analyzed"] = any(
+        item.get("profile_type") == "instagram" and int(item.get("analyzed_count", 0) or 0) > 0
+        for item in profile_batches
+    )
+    evidence["profile_screenshots_analyzed"] = sorted(
+        {
+            item.get("profile_type")
+            for item in profile_batches
+            if item.get("profile_type")
+        }
+    )
     text_analyses = evidence.setdefault("social_text_analyses", {})
+    previous_text_entry = text_analyses.get(profile_type, {})
+    history = list(previous_text_entry.get("history", []))
+    history.append({
+        "ocr": ocr_analysis,
+        "evaluation": profile_text_analysis,
+        "classification": content_classification,
+    })
     text_analyses[profile_type] = {
         "ocr": ocr_analysis,
         "evaluation": profile_text_analysis,
+        "classification": content_classification,
+        "history": history[-6:],
     }
     evidence["instagram_bio_analyzed"] = bool(
-        text_analyses.get("instagram", {}).get("ocr", {}).get("extracted_text")
+        any(
+            item.get("ocr", {}).get("extracted_text")
+            for item in (text_analyses.get("instagram", {}) or {}).get("history", [])
+        )
+        or text_analyses.get("instagram", {}).get("ocr", {}).get("extracted_text")
     )
     digital_analysis["score"] = compute_digital_presence_score(evidence)
     findings = digital_analysis.setdefault("findings", [])
@@ -12735,6 +13677,25 @@ async def analyze_social_screenshots(
     text_finding["coach_tip"] = " ".join(profile_text_analysis.get("suggestions") or []) or (
         "Mantieni la bio sintetica, verificabile e coerente con il ruolo target."
     )
+    score_finding = next(
+        (
+            finding
+            for finding in findings
+            if "punteggio" in str(finding.get("title", "")).lower() or "score" in str(finding.get("title", "")).lower()
+        ),
+        None,
+    )
+    if not score_finding:
+        score_finding = {"title": "Punteggio digitale"}
+        findings.append(score_finding)
+    score_finding["status"] = "success"
+    score_finding["description"] = (
+        f"Punteggio digitale aggiornato dopo l'aggiunta di {len(image_inputs)} screenshot validi. "
+        f"Contributo screenshot: {visual_score_adjustment:+d}."
+    )
+    score_finding["coach_tip"] = (
+        "Aggiungi screenshot validi di profili o piattaforme professionali per aggiornare il punteggio in modo cumulativo."
+    )
 
     cursor.execute(
         "UPDATE users SET digital_analysis_json = ? WHERE id = ?",
@@ -12749,7 +13710,8 @@ async def analyze_social_screenshots(
         "message": (
             f"{VISUAL_PROFILE_LABELS[profile_type]}: {screenshot_analysis['message']} "
             f"{ocr_analysis.get('message', '')} "
-            f"Impatto visuale sul punteggio: {visual_score_adjustment:+d}."
+            f"Punteggio digitale aggiornato: {digital_analysis['score']}% "
+            f"(screenshot: {visual_score_adjustment:+d})."
         ),
     }
 
@@ -13480,7 +14442,8 @@ Regole di valutazione:
 # =========================
 
 @app.get("/history/{user_id}")
-def get_history(user_id: int):
+def get_history(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -13550,7 +14513,8 @@ def get_history(user_id: int):
 # =========================
 
 @app.get("/progress/{user_id}")
-def get_progress(user_id: int):
+def get_progress(user_id: int, authorization: Optional[str] = Header(default=None)):
+    require_user_session(user_id, authorization)
     conn = get_connection()
     cursor = conn.cursor()
 
