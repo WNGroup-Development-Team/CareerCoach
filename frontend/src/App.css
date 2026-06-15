@@ -2623,6 +2623,56 @@ textarea {
   font-weight: 800;
 }
 
+.cv-score-comparison {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #dceffa;
+  border-radius: 13px;
+  background: #f8fcff;
+}
+
+.cv-score-comparison > strong {
+  color: #17395d;
+  font-size: 13px;
+}
+
+.cv-score-comparison > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.cv-score-comparison span {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 8px;
+  padding: 9px;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cv-score-comparison span b {
+  grid-column: 1 / -1;
+  color: #344054;
+}
+
+.cv-score-comparison span small {
+  color: #667085;
+  font-weight: 900;
+}
+
+.cv-score-comparison span.improved small {
+  color: #168a71;
+}
+
+.cv-score-comparison span.reduced small {
+  color: #b42318;
+}
+
 .cv-ready-date {
   min-height: 40px;
   padding: 0 13px;

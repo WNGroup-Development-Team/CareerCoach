@@ -2002,6 +2002,7 @@ function App() {
         },
         body: JSON.stringify({
           ...digitalPresence,
+          target_role: personalizeForm.role.trim() || profile.target_role || "",
           linkedin_connected: isLinkedInConnected,
         })
       }, 60000);
@@ -2398,6 +2399,14 @@ function App() {
       );
       setOptimizedCv(nextOptimizedCv);
       setOptimizedCvWarnings(uniqueWarnings);
+      if (data.optimized_analysis) {
+        setCvOptimizationAnalysis((current) => ({
+          ...(current || {}),
+          ...data.optimized_analysis,
+          sources: data.candidate_sources || current?.sources || [],
+          score_comparison: data.score_comparison || null,
+        }));
+      }
       downloadOptimizedCvFile(nextOptimizedCv);
       await loadOptimizedCvsList(userId);
       transitionToStep("cv-optimized");
@@ -3008,6 +3017,12 @@ function App() {
       ...current,
       [field]: value,
     }));
+    if (["role", "company", "goal", "role_level", "sector", "link"].includes(field)) {
+      setCvOptimizationAnalysis(null);
+      setOptimizedCv(null);
+      setSelectedCoachSuggestions({});
+      setConfirmedSkillDetails({});
+    }
   };
 
   const validatePersonalizeForm = async () => {
@@ -3204,6 +3219,7 @@ function App() {
   const cvStrategyTargetCompany = cvOptimizationAnalysis?.target?.company || company || "azienda target";
   const cvStrategyOverallScore = cvOptimizationAnalysis?.overall_score || cvOptimizationAnalysis?.score || 0;
   const cvStrategyScoreExplanation = cvOptimizationAnalysis?.score_explanation || null;
+  const cvScoreComparison = cvOptimizationAnalysis?.score_comparison || optimizedCv?.score_comparison || null;
   const cvStrategyScoreItems = [
     { label: "Generale", value: cvStrategyOverallScore },
     { label: "ATS simulato", value: cvOptimizationAnalysis?.ats_score || cvOptimizationAnalysis?.ats_analysis?.ats_score || 0 },
@@ -5081,6 +5097,30 @@ const screenshotUploadBoxes = [];
                     <span>Modifiche applicate</span>
                   </div>
                 </div>
+
+                {cvScoreComparison?.before && cvScoreComparison?.after && (
+                  <div className="cv-score-comparison">
+                    <strong>Confronto punteggi prima e dopo</strong>
+                    <div>
+                      {[
+                        ["Generale", "overall_score"],
+                        ["ATS", "ats_score"],
+                        ["Competenze", "keyword_score"],
+                        ["Ruolo", "role_match_score"],
+                        ["Completezza", "completeness_score"],
+                      ].map(([label, key]) => {
+                        const delta = cvScoreComparison.delta?.[key] || 0;
+                        return (
+                          <span className={delta > 0 ? "improved" : delta < 0 ? "reduced" : ""} key={key}>
+                            <b>{label}</b>
+                            {cvScoreComparison.before[key]} → {cvScoreComparison.after[key]}
+                            <small>{delta > 0 ? `+${delta}` : delta}</small>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 <div className="cv-ready-date">
                   <span>
