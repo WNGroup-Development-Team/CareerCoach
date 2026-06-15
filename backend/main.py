@@ -114,9 +114,6 @@ OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL", "http://localhost
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
-APPLE_CLIENT_ID = os.getenv("APPLE_CLIENT_ID")
-APPLE_CLIENT_SECRET = os.getenv("APPLE_CLIENT_SECRET")
-APPLE_REDIRECT_URI = os.getenv("APPLE_REDIRECT_URI")
 LINKEDIN_CLIENT_ID = os.getenv("LINKEDIN_CLIENT_ID")
 LINKEDIN_CLIENT_SECRET = os.getenv("LINKEDIN_CLIENT_SECRET")
 LINKEDIN_REDIRECT_URI = os.getenv("LINKEDIN_REDIRECT_URI")
@@ -645,7 +642,6 @@ def make_oauth_callback_url(provider: str) -> str:
     provider = normalize_oauth_provider(provider)
     provider_redirects = {
         "google": GOOGLE_REDIRECT_URI,
-        "apple": APPLE_REDIRECT_URI,
         "linkedin": LINKEDIN_REDIRECT_URI,
     }
 
@@ -779,15 +775,7 @@ def get_oauth_config(provider: str) -> Dict:
             "userinfo_url": "https://openidconnect.googleapis.com/v1/userinfo",
             "scope": "openid email profile",
         },
-        "apple": {
-            "client_id": APPLE_CLIENT_ID,
-            "client_secret": APPLE_CLIENT_SECRET,
-            "redirect_uri": make_oauth_callback_url("apple"),
-            "auth_url": "https://appleid.apple.com/auth/authorize",
-            "token_url": "https://appleid.apple.com/auth/token",
-            "userinfo_url": None,
-            "scope": "name email",
-        },
+    
         "linkedin": {
             "client_id": LINKEDIN_CLIENT_ID,
             "client_secret": LINKEDIN_CLIENT_SECRET,
@@ -836,9 +824,6 @@ def build_oauth_authorization_url(provider: str, state: str) -> str:
         "state": state,
     }
 
-    if config["provider"] == "apple":
-        params["response_mode"] = "query"
-
     return f"{config['auth_url']}?{urllib.parse.urlencode(params)}"
 
 
@@ -886,25 +871,6 @@ def fetch_oauth_profile(provider: str, code: str) -> Dict:
         )
 
     token_data = token_response.json()
-
-    if provider == "apple":
-        profile = decode_jwt_payload(token_data.get("id_token", ""))
-    else:
-        userinfo_response = requests.get(
-            config["userinfo_url"],
-            headers={"Authorization": f"Bearer {token_data.get('access_token')}"},
-            timeout=15,
-        )
-        if userinfo_response.status_code >= 400:
-            provider_hint = config.get("setup_hint", "Controlla permessi e scope del provider.")
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Impossibile leggere il profilo {provider}. "
-                    f"{provider_hint} Dettaglio provider: {userinfo_response.text[:300]}"
-                ),
-            )
-        profile = userinfo_response.json()
 
     email = profile.get("email")
     if not email:
@@ -8513,45 +8479,8 @@ def logout(data: TokenRequest):
 def oauth_redirect_uris():
     return {
         "google": make_oauth_callback_url("google"),
-        "apple": make_oauth_callback_url("apple"),
         "linkedin": make_oauth_callback_url("linkedin"),
     }
-
-
-@app.get("/auth/oauth/status")
-def oauth_status():
-    providers = ["google", "apple", "linkedin"]
-    status = {}
-
-    for provider in providers:
-        client_id = {
-            "google": GOOGLE_CLIENT_ID,
-            "apple": APPLE_CLIENT_ID,
-            "linkedin": LINKEDIN_CLIENT_ID,
-        }.get(provider)
-        client_secret = {
-            "google": GOOGLE_CLIENT_SECRET,
-            "apple": APPLE_CLIENT_SECRET,
-            "linkedin": LINKEDIN_CLIENT_SECRET,
-        }.get(provider)
-
-        try:
-            config = get_oauth_config(provider)
-            scope = config["scope"]
-            configured = True
-        except HTTPException:
-            scope = None
-            configured = False
-
-        status[provider] = {
-            "configured": configured,
-            "has_client_id": bool(client_id),
-            "has_client_secret": bool(client_secret),
-            "redirect_uri": make_oauth_callback_url(provider),
-            "scope": scope,
-        }
-
-    return status
 
 
 @app.get("/auth/oauth/{provider}/start")
