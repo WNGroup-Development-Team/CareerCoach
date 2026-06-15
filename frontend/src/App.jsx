@@ -2136,7 +2136,7 @@ function App() {
     try {
       const requestPayload = {
         description: personalizeForm.goal.trim(),
-        company: targetOverride?.company ?? (personalizeForm.company.trim() || (company === "Generica" ? "" : company)),
+        company: targetOverride?.company ?? (personalizeForm.company.trim() || (company === "Azienda Generica" ? "" : company)),
         role: targetOverride?.role ?? (personalizeForm.role.trim() || profileOverride.target_role || ""),
         role_level: personalizeForm.role_level.trim(),
         sector: personalizeForm.sector.trim() || profile.sector || "",
