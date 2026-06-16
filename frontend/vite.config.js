@@ -12,6 +12,7 @@ const apiProxy = {
 export default defineConfig({
   plugins: [react()],
   server: {
+    allowedHosts: ['vigorous-glowing-unpicked.ngrok-free.dev'],
     proxy: apiProxy,
   },
   preview: {
