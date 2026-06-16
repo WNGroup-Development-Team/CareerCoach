@@ -113,6 +113,15 @@ function tokenize(value) {
   return normalizeValidationValue(value).split(" ").filter(Boolean);
 }
 
+export function isValidRoleSelection(value, roles = VALID_ROLES) {
+  const normalizedValue = normalizeValidationValue(value);
+  if (!normalizedValue) {
+    return false;
+  }
+
+  return roles.some((role) => normalizeValidationValue(role) === normalizedValue);
+}
+
 export function levenshtein(leftValue, rightValue) {
   const left = normalizeValidationValue(leftValue);
   const right = normalizeValidationValue(rightValue);

@@ -113,6 +113,61 @@ class DigitalAnalysisContractTests(unittest.TestCase):
             "caricati con contenuti sensibili",
         )
 
+    def test_screenshot_evidence_is_recomputed_from_batches(self):
+        user = {
+            "cv_text": "Mario Rossi",
+            "linkedin_url": "",
+            "linkedin_profile_text": "",
+            "instagram_handle": "@mario.rossi",
+            "portfolio_url": "",
+        }
+        evidence = {
+            "cv_detected_name": {"name": "Mario Rossi"},
+            "linkedin_cv_coherence": {"status": "unverified", "details": []},
+            "github_profile": {"is_github_link": False},
+            "social_screenshot_batches": [{
+                "valid": True,
+                "profile_type": "instagram",
+                "analyzed_count": 2,
+                "flagged_count": 0,
+                "sensitive_flagged_count": 0,
+            }],
+        }
+
+        result = main.build_deterministic_digital_analysis(user, [], evidence)
+        refreshed = result["analysis_evidence"]
+
+        self.assertEqual(refreshed["visual_score_adjustment"], 2)
+        self.assertTrue(refreshed["screenshots_summary"]["safe_content"])
+        self.assertEqual(refreshed["instagram_screenshots_summary"]["count"], 2)
+        self.assertEqual(refreshed["profile_screenshots_analyzed"], ["instagram"])
+
+    def test_stale_visual_score_adjustment_is_ignored_when_batches_change(self):
+        user = {
+            "cv_text": "Mario Rossi",
+            "linkedin_url": "",
+            "linkedin_profile_text": "",
+            "instagram_handle": "@mario.rossi",
+            "portfolio_url": "",
+        }
+        evidence = {
+            "cv_detected_name": {"name": "Mario Rossi"},
+            "linkedin_cv_coherence": {"status": "unverified", "details": []},
+            "github_profile": {"is_github_link": False},
+            "visual_score_adjustment": -99,
+            "social_screenshot_batches": [{
+                "valid": True,
+                "profile_type": "instagram",
+                "analyzed_count": 1,
+                "flagged_count": 1,
+                "sensitive_flagged_count": 1,
+            }],
+        }
+
+        result = main.build_deterministic_digital_analysis(user, [], evidence)
+
+        self.assertEqual(result["analysis_evidence"]["visual_score_adjustment"], -8)
+
     def test_payload_contract_returns_only_required_keys(self):
         result = main.build_digital_analysis_from_payload(
             main.DigitalCoherenceInput(

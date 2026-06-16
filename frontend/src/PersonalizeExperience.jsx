@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { VALID_COMPANIES } from "./data/companies";
 import { matchCompany } from "./utils/companyValidation";
-import { VALID_ROLES, matchRole } from "./utils/roleValidation";
+import { VALID_ROLES, isValidRoleSelection, matchRole } from "./utils/roleValidation";
 
 function BuildingIcon() {
   return (
@@ -43,15 +43,16 @@ export default function PersonalizeExperience({
   isValidating = false,
   submitLabel = "Continua",
 }) {
+  const hasValidInitialRole = isValidRoleSelection(role, VALID_ROLES);
   const [roleInput, setRoleInput] = useState(role || "");
-  const [roleSelected, setRoleSelected] = useState(Boolean(role));
+  const [roleSelected, setRoleSelected] = useState(hasValidInitialRole);
   const [isRoleFocused, setIsRoleFocused] = useState(false);
   const [roleTouched, setRoleTouched] = useState(false);
   const [isCompanyFocused, setIsCompanyFocused] = useState(false);
 
   useEffect(() => {
     setRoleInput(role || "");
-    setRoleSelected(Boolean(role));
+    setRoleSelected(isValidRoleSelection(role, VALID_ROLES));
   }, [role]);
 
   const normalizedCompany = company.trim();

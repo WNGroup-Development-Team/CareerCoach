@@ -5,6 +5,15 @@ import main
 
 
 class SocialProfileTextTests(unittest.TestCase):
+    def test_structured_visual_analysis_prefers_vl_model_over_moondream(self):
+        with (
+            patch.object(main, "OLLAMA_VISION_MODEL", "moondream"),
+            patch.object(main, "OLLAMA_OCR_MODEL", "qwen2.5vl:3b"),
+        ):
+            result = main.select_ollama_visual_model(require_structured_output=True)
+
+        self.assertEqual(result, "qwen2.5vl:3b")
+
     def test_clean_ocr_text_removes_duplicate_lines(self):
         result = main.clean_social_ocr_text("Data Analyst\nData Analyst\n  Python e SQL  ")
 

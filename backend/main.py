@@ -3287,12 +3287,25 @@ def build_visual_analysis_result(
     }
 
 
+def select_ollama_visual_model(require_structured_output: bool = False) -> str:
+    primary_model = str(OLLAMA_VISION_MODEL or "").strip()
+    ocr_model = str(OLLAMA_OCR_MODEL or "").strip()
+    if not require_structured_output:
+        return primary_model or ocr_model or "moondream"
+    if primary_model and primary_model.split(":", 1)[0] != "moondream":
+        return primary_model
+    if ocr_model and "vl" in ocr_model.lower():
+        return ocr_model
+    return primary_model or ocr_model or "moondream"
+
+
 def analyze_image_with_ollama(image_input: Dict) -> Dict:
     encoded_image = extract_image_base64(image_input)
     if not encoded_image:
         raise ValueError("Immagine Base64 non disponibile.")
 
-    uses_lightweight_description = OLLAMA_VISION_MODEL.split(":", 1)[0] == "moondream"
+    classifier_model = select_ollama_visual_model(require_structured_output=True)
+    uses_lightweight_description = classifier_model.split(":", 1)[0] == "moondream"
     if uses_lightweight_description:
         prompt = "Describe only what is visibly present in this image in one short factual sentence."
     else:
@@ -3308,7 +3321,7 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
             "captions, comments, and interface labels. Keep summary brief and factual."
         )
     payload = {
-        "model": OLLAMA_VISION_MODEL,
+        "model": classifier_model,
         "stream": False,
         "messages": [{
             "role": "user",
@@ -3449,7 +3462,8 @@ def analyze_cv_image_with_ollama(image_input: Dict[str, Any]) -> Dict[str, Any]:
     if not encoded_image:
         raise ValueError("Immagine Base64 non disponibile.")
 
-    uses_lightweight_description = OLLAMA_VISION_MODEL.split(":", 1)[0] == "moondream"
+    classifier_model = select_ollama_visual_model(require_structured_output=True)
+    uses_lightweight_description = classifier_model.split(":", 1)[0] == "moondream"
     prompt = (
         "Describe only what is visibly present in this image in one short factual sentence."
         if uses_lightweight_description
@@ -3465,7 +3479,7 @@ def analyze_cv_image_with_ollama(image_input: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
     payload = {
-        "model": OLLAMA_VISION_MODEL,
+        "model": classifier_model,
         "stream": False,
         "messages": [{
             "role": "user",
@@ -4534,6 +4548,36 @@ def summarize_screenshot_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def refresh_screenshot_analysis_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    profile_batches = [
+        batch
+        for batch in (evidence.get("social_screenshot_batches") or [])
+        if isinstance(batch, dict)
+    ]
+    evidence["social_screenshot_batches"] = profile_batches
+    evidence["visual_score_adjustment"] = calculate_social_screenshot_score_adjustment(profile_batches)
+    evidence["screenshots_summary"] = summarize_screenshot_evidence(evidence)
+    evidence["instagram_screenshots_summary"] = summarize_screenshot_evidence({
+        "social_screenshot_batches": [
+            batch
+            for batch in profile_batches
+            if batch.get("profile_type") == "instagram"
+        ],
+    })
+    evidence["instagram_media_analyzed"] = any(
+        item.get("profile_type") == "instagram" and int(item.get("analyzed_count", 0) or 0) > 0
+        for item in profile_batches
+    )
+    evidence["profile_screenshots_analyzed"] = sorted(
+        {
+            item.get("profile_type")
+            for item in profile_batches
+            if item.get("profile_type")
+        }
+    )
+    return evidence
+
+
 SOCIAL_BRANDING_AFFIXES = (
     "official", "officiale", "real", "thereal", "iam", "im", "its", "the",
     "mr", "mrs", "miss", "dr", "prof", "hello", "hey", "thisis",
@@ -5007,6 +5051,8 @@ def build_deterministic_digital_analysis(
     evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     evidence = evidence or build_analysis_evidence(user, sources)
+    if evidence.get("social_screenshot_batches") is not None:
+        evidence = refresh_screenshot_analysis_evidence(evidence)
     linkedin = evaluate_linkedin_section(user, evidence)
     instagram = evaluate_instagram_section(user, sources, evidence)
     github = evaluate_github_section(user, evidence)
@@ -15032,28 +15078,14 @@ def update_digital_presence(
         evidence = digital_analysis.setdefault("analysis_evidence", {})
         evidence["visual_media_analyses"] = previous_profile_analyses
         evidence["social_screenshot_batches"] = preserved_screenshot_batches
-        evidence["profile_screenshots_analyzed"] = previous_evidence.get(
-            "profile_screenshots_analyzed", sorted(previous_profile_analyses)
-        )
-        evidence["instagram_media_analyzed"] = (
-            previous_evidence.get("instagram_media_analyzed", False)
-            if same_instagram_profile
-            else False
-        )
         evidence["instagram_identity_check"] = (
             previous_evidence.get("instagram_identity_check", {})
             if same_instagram_profile
             else {}
         )
-        evidence["visual_score_adjustment"] = int(
-            previous_evidence.get("visual_score_adjustment", 0) or 0
-        )
         if previous_evidence.get("visual_media_analysis"):
             evidence["visual_media_analysis"] = previous_evidence["visual_media_analysis"]
-        evidence["screenshots_summary"] = summarize_screenshot_evidence(evidence)
-        evidence["instagram_screenshots_summary"] = summarize_screenshot_evidence({
-            "social_screenshot_batches": preserved_screenshot_batches,
-        })
+        refresh_screenshot_analysis_evidence(evidence)
         evidence.pop("social_text_analyses", None)
         evidence.pop("instagram_bio_analyzed", None)
         digital_analysis = build_deterministic_digital_analysis(
@@ -15185,27 +15217,8 @@ async def analyze_social_screenshots(
         "profile_label": VISUAL_PROFILE_LABELS[profile_type],
         "batch_count": sum(1 for item in profile_batches if item.get("profile_type") == profile_type),
     }
-    evidence["visual_score_adjustment"] = 0
     evidence["visual_media_analysis"] = profile_analyses[profile_type]
-    evidence["instagram_media_analyzed"] = any(
-        item.get("profile_type") == "instagram" and int(item.get("analyzed_count", 0) or 0) > 0
-        for item in profile_batches
-    )
-    evidence["profile_screenshots_analyzed"] = sorted(
-        {
-            item.get("profile_type")
-            for item in profile_batches
-            if item.get("profile_type")
-        }
-    )
-    evidence["screenshots_summary"] = summarize_screenshot_evidence(evidence)
-    evidence["instagram_screenshots_summary"] = summarize_screenshot_evidence({
-        "social_screenshot_batches": [
-            batch
-            for batch in profile_batches
-            if batch.get("profile_type") == "instagram"
-        ],
-    })
+    refresh_screenshot_analysis_evidence(evidence)
     evidence.pop("social_text_analyses", None)
     evidence.pop("instagram_bio_analyzed", None)
     analysis_user = user_to_response(user)
