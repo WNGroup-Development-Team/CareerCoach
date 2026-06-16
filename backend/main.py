@@ -13890,13 +13890,14 @@ def optimize_user_cv(
                 detail="Nessuna modifica selezionata e applicabile: controlla i suggerimenti o riprova.",
             )
 
-    if not accepted_suggestions and not flatten_cv_support_data(user_additional_data):
+    has_user_boxes_or_confirmed_skills = bool(flatten_cv_support_data(user_additional_data))
+    if not has_user_boxes_or_confirmed_skills:
         conn.close()
         raise HTTPException(
             status_code=400,
             detail=(
-                "Non ci sono modifiche accettate da applicare. "
-                "Accetta almeno un suggerimento oppure aggiungi informazioni reali nella schermata Skill/Informazioni."
+                "Non ci sono informazioni da aggiungere al CV. "
+                "Inserisci dettagli reali nelle box oppure conferma almeno una skill prima di generare il file."
             ),
         )
 

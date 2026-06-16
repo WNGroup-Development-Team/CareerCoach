@@ -589,11 +589,7 @@ def _call_copywriting_llm(prompt: str) -> Optional[Dict[str, Any]]:
 
 
 def _rewrite_llm_enabled() -> bool:
-    try:
-        from main import CV_REWRITE_LLM_ENABLED as enabled
-        return bool(enabled)
-    except Exception:
-        return False
+    return False
 
 
 def _build_copywriting_instruction_json(
