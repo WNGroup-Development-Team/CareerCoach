@@ -25,14 +25,6 @@ function BriefcaseIcon() {
   );
 }
 
-function ChevronDownIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="m6 9 6 6 6-6" />
-    </svg>
-  );
-}
-
 export default function PersonalizeExperience({
   company,
   onBack,
@@ -74,14 +66,14 @@ export default function PersonalizeExperience({
     } else if (roleTouched) {
       localErrors.role = "Inserisci e seleziona un ruolo dalla lista";
     } else {
-      localErrors.description = "Seleziona un ruolo dalla lista e inserisci un'azienda reale.";
+      localErrors.description = "Seleziona un ruolo e un'azienda dalla lista e inserisci un'azienda reale.";
     }
   }
 
   if (!normalizedCompany) {
-    localErrors.company = "Inserisci il nome di un'azienda reale";
+    localErrors.company = "Inserisci e seleziona un'azienda dalla lista";
   } else if (companyMatch.minLengthReached && !companyMatch.isValid) {
-    localErrors.company = "Inserisci il nome di un'azienda reale";
+    localErrors.company = "Inserisci e selezione un'azienda dalla lista";
   }
 
   const fieldErrors = {
@@ -142,7 +134,7 @@ export default function PersonalizeExperience({
 
           {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
           <p className="field-hint">
-            Seleziona un ruolo dalla lista e inserisci un'azienda riconoscibile per procedere.
+            Seleziona un ruolo e un'azienda dalla lista.
           </p>
 
           <label htmlFor="personalize-role">Ruolo</label>
@@ -157,9 +149,6 @@ export default function PersonalizeExperience({
               placeholder="Es. UX Designer, Data Analyst, Software Engineer"
               autoComplete="off"
             />
-            <span className="personalize-field-caret" aria-hidden="true">
-              <ChevronDownIcon />
-            </span>
             {showRoleSuggestions && (
               <div className="personalize-role-suggestions" role="listbox" aria-label="Suggerimenti ruolo">
                 {roleMatch.suggestions.map((suggestion) => (
@@ -234,10 +223,10 @@ export default function PersonalizeExperience({
         <aside className="personalize-sidebar">
           <div className="personalize-sidebar-card">
             <span className="personalize-sidebar-kicker">Come funziona</span>
-            <h3>Piu dettagli, migliore sara il risultato</h3>
+            <h3>Più dettagli, migliore sarà il risultato</h3>
             <ul>
               <li>Seleziona un ruolo professionale dalla lista suggerita.</li>
-              <li>Inserisci il nome di un'azienda reale per attivare la simulazione.</li>
+              <li>Seleziona un'azienda dalla lista suggerita.</li>
             </ul>
           </div>
 
