@@ -14101,6 +14101,51 @@ def optimize_user_cv(
             extension = "docx"
             applied_changes_count = len(apply_result.applied_ids)
             final_docx_text = apply_result.validation_report.get("final_text", "")
+            missing_confirmed_by_section: Dict[str, List[str]] = {}
+            final_docx_plain = normalize_plain_text(final_docx_text)
+            for item in confirmed_skills:
+                if isinstance(item, dict):
+                    skill_name = str(item.get("name") or item.get("skill") or "").strip()
+                    category = normalize_plain_text(str(item.get("category") or "hard_skill"))
+                else:
+                    skill_name = str(item or "").strip()
+                    category = "hard_skill"
+                if not skill_name or normalize_plain_text(skill_name) in final_docx_plain:
+                    continue
+                target_section = "SOFT SKILLS" if category in {"soft skill", "soft_skill"} else "COMPETENZE TECNICHE"
+                section_skills = missing_confirmed_by_section.setdefault(target_section, [])
+                if normalize_plain_text(skill_name) not in {normalize_plain_text(existing) for existing in section_skills}:
+                    section_skills.append(skill_name)
+            if missing_confirmed_by_section:
+                supplemental_instructions = [
+                    StructuredRewriteInstruction(
+                        suggestion_id=f"confirmed-skill-docx-repair-{index + 1}",
+                        target_section=target_section,
+                        action="append",
+                        old_text_hint="",
+                        new_text=" | ".join(skill_names),
+                        items=skill_names,
+                        reason="Skill confermate dall'utente reinserite dopo verifica del DOCX finale.",
+                        confidence=1.0,
+                        source_field="confirmed_skills",
+                    )
+                    for index, (target_section, skill_names) in enumerate(missing_confirmed_by_section.items())
+                ]
+                repair_result = docx_pipeline.apply_instructions_to_docx(file_bytes, supplemental_instructions)
+                file_bytes = repair_result.file_bytes
+                applied_changes_count += len(repair_result.applied_ids)
+                final_docx_text = repair_result.validation_report.get("final_text", final_docx_text)
+                apply_result.validation_report = repair_result.validation_report
+                apply_result.applied_ids = [*apply_result.applied_ids, *repair_result.applied_ids]
+                apply_result.partially_applied_ids = [
+                    *apply_result.partially_applied_ids,
+                    *repair_result.partially_applied_ids,
+                ]
+                apply_result.failed_ids = [*apply_result.failed_ids, *repair_result.failed_ids]
+                print(
+                    "[CV-OPT DEBUG] DOCX confirmed skills repair applied: "
+                    f"{missing_confirmed_by_section}"
+                )
             # === DEBUG cv-optimize: stato applicazione DOCX ===
             try:
                 print("[CV-OPT DEBUG] structured_instructions count =", len(structured_instructions))
