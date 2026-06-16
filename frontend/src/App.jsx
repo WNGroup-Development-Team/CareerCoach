@@ -18,7 +18,18 @@ import {
 
 
 const IS_DEV = import.meta.env.DEV;
+<<<<<<< HEAD
 const API_URL = import.meta.env.VITE_API_URL || (IS_DEV ? "http://127.0.0.1:8000" : "/api");
+=======
+const isLocalBrowserHost = () => {
+  if (typeof window === "undefined" || !window.location?.hostname) {
+    return true;
+  }
+  const { hostname } = window.location;
+  return hostname === "localhost" || hostname === "127.0.0.1";
+};
+const API_URL = import.meta.env.VITE_API_URL || (IS_DEV && isLocalBrowserHost() ? "http://127.0.0.1:8000" : "/api");
+>>>>>>> main
 const API_URL_FALLBACKS = (() => {
   const localOrigins = [API_URL];
 
@@ -1209,7 +1220,9 @@ function App() {
     let isRedirecting = false;
 
     try {
-      const response = await fetchWithTimeout(`${API_URL}/auth/oauth/${provider}/url`, {}, 10000);
+      const frontendOrigin = typeof window !== "undefined" ? window.location.origin : "";
+      const oauthUrl = `${API_URL}/auth/oauth/${provider}/url?frontend_origin=${encodeURIComponent(frontendOrigin)}`;
+      const response = await fetchWithTimeout(oauthUrl, {}, 10000);
       const data = await response.json();
 
       if (!response.ok) {
@@ -3317,7 +3330,7 @@ function App() {
     ...optimizedCvsList.map((item) => item.target_company),
   ]
     .map((item) => String(item || "").trim())
-    .filter((item) => item && item.toLowerCase() !== "Azienda Generica")
+    .filter((item) => item && item.toLowerCase() !== "azienda generica")
     .filter((item, index, list) =>
       list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
     );

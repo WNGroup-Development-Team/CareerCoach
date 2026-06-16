@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 import json
 from typing import Any, Dict, Iterable, List, Optional
 
-from .section_catalog import SECTION_ALIASES, canonical_section_key
+from .section_catalog import SECTION_ALIASES, additional_field_section_key, canonical_section_key
 
 CANONICAL_TO_HEADING = {
     "profile": "PROFILO",
@@ -719,6 +719,14 @@ def _classify_additional_note(section_hint: str, text: str) -> str:
         return "experience"
     if hint in {"projects", "project", "progetti", "progetto", "measurable_results"}:
         return "projects"
+    if hint in {"certifications", "certification", "certificazioni", "certificati", "attestati"}:
+        return "certifications"
+    if hint in {"languages", "language", "lingue"}:
+        return "languages"
+    if hint in {"education", "formazione", "istruzione"}:
+        return "education"
+    if hint in {"company_role_notes", "role_notes", "profile", "profilo", "additional_notes"}:
+        return "profile"
     if hint in {"technical_skills", "technical skills", "tools", "soft_skills", "soft skills"}:
         return "hard_skills" if "soft" not in hint else "soft_skills"
     if any(term in plain for term in ["presso ", "poste italiane", "azienda", "cliente", "stage", "tirocinio", "impiego", "chatbot"]):
@@ -728,11 +736,84 @@ def _classify_additional_note(section_hint: str, text: str) -> str:
     return "profile"
 
 
+def _professionalize_project_text(raw_text: str) -> str:
+    cleaned = _professionalize_user_note(raw_text)
+    cleaned = re.sub(r"(?i)\bprogetto\s+(?:personale|accademico|universitario|professionale)\s*[:/-]?\s*", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)^\s*sviluppo\s+di\s+", "", cleaned).strip()
+    if not cleaned:
+        return ""
+    sentences = [clean_line(part) for part in re.split(r"(?<=[.!?])\s+|\n+", cleaned) if clean_line(part)]
+    first = sentences[0] if sentences else cleaned
+    title = " ".join(first.split()[:5]).strip(" .,:;-")
+    title = re.sub(r"(?i)^progetto\s+", "", title).strip(" .,:;-") or "Progetto"
+    if len(title) > 52:
+        title = title[:52].rsplit(" ", 1)[0].strip()
+    description = re.sub(r"(?i)^\s*(progetto|project)\s*[:/-]?\s*", "", " ".join(sentences) if sentences else cleaned).strip()
+    description = re.sub(r"\s+", " ", description).strip(" .")
+    if len(description) > 260:
+        description = description[:260].rsplit(" ", 1)[0].strip()
+    if description and not description.endswith("."):
+        description += "."
+    return f"{title}\n{description}" if description else title
+
+
+def _normalize_certification_text(raw_text: str) -> str:
+    cleaned = _professionalize_user_note(raw_text)
+    if not cleaned:
+        return ""
+    language_typos = {
+        r"\bfrance[sc]e\b": "Francese",
+        r"\bfrancesce\b": "Francese",
+        r"\bfrancesee\b": "Francese",
+        r"\bingles[eai]\b": "Inglese",
+        r"\bspagnollo\b": "Spagnolo",
+        r"\btedescoo\b": "Tedesco",
+    }
+    for pattern, replacement in language_typos.items():
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    plain = normalize(cleaned)
+    level_match = re.search(r"\b([abc][12])\b", plain)
+    provider_aliases = {
+        "cambridge": "Cambridge",
+        "ielts": "IELTS",
+        "toefl": "TOEFL",
+        "dele": "DELE",
+        "delf": "DELF",
+        "dalf": "DALF",
+        "goethe": "Goethe",
+    }
+    provider = next((label for marker, label in provider_aliases.items() if marker in plain), "")
+    if level_match and provider:
+        language = next(
+            (
+                label
+                for marker, label in {
+                    "francese": "Francese",
+                    "inglese": "Inglese",
+                    "spagnolo": "Spagnolo",
+                    "tedesco": "Tedesco",
+                    "italiano": "Italiano",
+                }.items()
+                if marker in plain
+            ),
+            "linguistica",
+        )
+        return f"Certificazione {language} {level_match.group(1).upper()} {provider}"
+    if level_match and "certific" in plain:
+        return f"Certificazione linguistica {level_match.group(1).upper()}"
+    return clean_line(cleaned)
+
+
 def _collect_additional_section_payloads(user_additional_data: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
     payloads: Dict[str, List[str]] = {}
 
     def add(section_key: str, raw_text: str) -> None:
-        cleaned = _professionalize_user_note(raw_text)
+        if section_key == "projects":
+            cleaned = _professionalize_project_text(raw_text)
+        elif section_key == "certifications":
+            cleaned = _normalize_certification_text(raw_text)
+        else:
+            cleaned = _professionalize_user_note(raw_text)
         if not cleaned:
             return
         payloads.setdefault(section_key, [])
@@ -742,14 +823,14 @@ def _collect_additional_section_payloads(user_additional_data: Optional[Dict[str
     if not isinstance(user_additional_data, dict):
         return payloads
 
-    direct_fields = {
-        "experiences": "experience",
-        "projects": "projects",
-        "measurable_results": "projects",
-        "company_role_notes": "profile",
-        "additional_notes": "profile",
-    }
-    for field_name, section_key in direct_fields.items():
+    for field_name, raw_value in user_additional_data.items():
+        if field_name in {"adaptation_answers", "confirmed_skills"}:
+            continue
+        if not isinstance(raw_value, str):
+            continue
+        section_key = additional_field_section_key(field_name)
+        if not section_key:
+            continue
         value = str(user_additional_data.get(field_name) or "").strip()
         if value:
             add(section_key, value)

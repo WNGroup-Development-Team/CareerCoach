@@ -94,6 +94,41 @@ HEADING_TO_SECTION = {
     for alias in aliases
 }
 
+ADDITIONAL_FIELD_SECTION_KEYS: Dict[str, str] = {
+    "experiences": "experience",
+    "experience": "experience",
+    "work_experience": "experience",
+    "professional_experience": "experience",
+    "projects": "projects",
+    "project": "projects",
+    "portfolio": "projects",
+    "measurable_results": "projects",
+    "results": "projects",
+    "achievements": "projects",
+    "certifications": "certifications",
+    "certification": "certifications",
+    "certificates": "certifications",
+    "licenses": "certifications",
+    "languages": "languages",
+    "language": "languages",
+    "education": "education",
+    "training": "education",
+    "courses": "education",
+    "technical_skills": "hard_skills",
+    "hard_skills": "hard_skills",
+    "tools": "hard_skills",
+    "technologies": "hard_skills",
+    "skills": "hard_skills",
+    "soft_skills": "soft_skills",
+    "personal_skills": "soft_skills",
+    "company_role_notes": "profile",
+    "role_notes": "profile",
+    "target_notes": "profile",
+    "additional_notes": "profile",
+    "profile": "profile",
+    "summary": "profile",
+}
+
 
 def canonical_section_key(value: str) -> Optional[str]:
     normalized = normalize_section_title(value)
@@ -106,6 +141,18 @@ def canonical_section_key(value: str) -> Optional[str]:
         normalized,
     ).strip()
     return HEADING_TO_SECTION.get(without_dates)
+
+
+def additional_field_section_key(value: str) -> Optional[str]:
+    normalized = normalize_section_title(value)
+    if not normalized:
+        return None
+    underscored = normalized.replace(" ", "_")
+    return (
+        ADDITIONAL_FIELD_SECTION_KEYS.get(underscored)
+        or ADDITIONAL_FIELD_SECTION_KEYS.get(normalized)
+        or canonical_section_key(normalized)
+    )
 
 
 def aliases_for(section: str) -> Set[str]:
