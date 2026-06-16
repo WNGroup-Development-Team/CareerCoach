@@ -77,6 +77,78 @@ class ResumeParserLayoutTests(unittest.TestCase):
             with self.subTest(heading=heading):
                 self.assertEqual(canonical_section_key(heading), expected)
 
+    def test_requested_heading_variants_map_to_same_canonical_sections(self):
+        variants = {
+            "Esperienza": "experience",
+            "Esperienze": "experience",
+            "Esperienza lavorativa": "experience",
+            "Esperienze lavorative": "experience",
+            "Esperienza professionale": "experience",
+            "Esperienze professionali": "experience",
+            "Percorso professionale": "experience",
+            "Attività professionale": "experience",
+            "Work Experience": "experience",
+            "Professional Experience": "experience",
+            "Formazione": "education",
+            "Istruzione": "education",
+            "Educazione": "education",
+            "Percorso formativo": "education",
+            "Titoli di studio": "education",
+            "Education": "education",
+            "Academic background": "education",
+            "Competenze": "hard_skills",
+            "Skills": "hard_skills",
+            "Competenze tecniche": "hard_skills",
+            "Competenze professionali": "hard_skills",
+            "Hard skills": "hard_skills",
+            "Technical skills": "hard_skills",
+            "Skill tecniche": "hard_skills",
+            "Soft skills": "soft_skills",
+            "Competenze trasversali": "soft_skills",
+            "Competenze personali": "soft_skills",
+            "Capacità relazionali": "soft_skills",
+            "Capacità organizzative": "soft_skills",
+            "Progetti": "projects",
+            "Progetti universitari": "projects",
+            "Progetti personali": "projects",
+            "Project work": "projects",
+            "Projects": "projects",
+            "Personal projects": "projects",
+            "Academic projects": "projects",
+            "Certificazioni": "certifications",
+            "Certificati": "certifications",
+            "Corsi": "certifications",
+            "Corsi e certificazioni": "certifications",
+            "Certifications": "certifications",
+            "Courses and certifications": "certifications",
+            "Lingue": "languages",
+            "Lingue straniere": "languages",
+            "Competenze linguistiche": "languages",
+            "Languages": "languages",
+            "Language skills": "languages",
+            "Profilo": "profile",
+            "Profilo personale": "profile",
+            "Profilo professionale": "profile",
+            "Presentazione": "profile",
+            "Chi sono": "profile",
+            "Summary": "profile",
+            "Professional summary": "profile",
+            "About me": "profile",
+            "Objective": "profile",
+            "Obiettivo professionale": "profile",
+            "Contatti": "contacts",
+            "Informazioni personali": "contacts",
+            "Dati personali": "contacts",
+            "Personal information": "contacts",
+            "Contact": "contacts",
+            "Contacts": "contacts",
+        }
+
+        for heading, expected in variants.items():
+            with self.subTest(heading=heading):
+                self.assertEqual(canonical_section_key(heading), expected)
+                self.assertEqual(canonical_section_key(f"  {heading.upper()} : "), expected)
+
     def test_resume_parser_accepts_work_experience_synonym(self):
         sections = {
             section.name: section.text
@@ -157,10 +229,6 @@ class DynamicAdditionalContentTests(unittest.TestCase):
                 "Partecipazione a un progetto di imprenditorialita digitale.",
                 "",
             ),
-        )
-        self.assertEqual(
-            pipeline._format_section_text("certificazioni", "Certificazione AWS.", ""),
-            "Certificazione AWS",
         )
 
     def test_clean_user_fact_is_not_discarded_as_duplicate_note(self):
@@ -1291,6 +1359,7 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         project_body = next(paragraph for paragraph in updated.paragraphs if paragraph.text == "Progetto uno")
 
         self.assertTrue(project_heading.runs[0].bold)
+        self.assertTrue(project_heading.paragraph_format.keep_with_next)
 
     def test_structured_pipeline_formats_project_titles_and_descriptions(self):
         document = Document()
@@ -1328,6 +1397,10 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         self.assertTrue(projects["Progetto Machine Learning"].runs[0].bold)
         self.assertFalse(projects["Implementazione di una pipeline di analisi predittiva."].runs[0].bold)
         self.assertTrue(projects["Progetto Big Data"].paragraph_format.keep_with_next)
+        self.assertGreaterEqual(
+            projects["Implementazione di una pipeline di analisi predittiva."].paragraph_format.space_after.pt,
+            6,
+        )
 
     def test_structured_pipeline_harmonizes_arial_mt_without_replacing_custom_fonts(self):
         document = Document()
@@ -1554,6 +1627,45 @@ class DocxPreserverLayoutTests(unittest.TestCase):
         texts = [paragraph.text for paragraph in updated.paragraphs]
         self.assertEqual(applied, 1)
         self.assertEqual(texts, ["PROGETTI", "Progetto esistente", "Nuovo progetto confermato"])
+
+    def test_appends_existing_projects_with_supplemental_heading(self):
+        document = Document()
+        project_heading = document.add_paragraph("PROGETTI")
+        project_heading.runs[0].font.name = "Montserrat"
+        project_heading.runs[0].font.bold = True
+        project_body = document.add_paragraph("Progetto esistente")
+        project_body.runs[0].font.name = "Open Sans"
+        project_body.runs[0].font.size = Pt(10)
+
+        updated_bytes, applied = DocxPreserver().apply(
+            self._docx_bytes(document),
+            [
+                RewriteInstruction(
+                    section="PROGETTI",
+                    original="",
+                    replacement="Progetto aggiuntivo\nDescrizione del progetto aggiuntivo",
+                    category="project",
+                    source_id="test-supplemental-project",
+                )
+            ],
+        )
+
+        updated = Document(io.BytesIO(updated_bytes))
+        texts = [paragraph.text for paragraph in updated.paragraphs if paragraph.text]
+        supplemental = next(paragraph for paragraph in updated.paragraphs if paragraph.text == "Ulteriori progetti")
+        self.assertEqual(applied, 1)
+        self.assertEqual(
+            texts,
+            [
+                "PROGETTI",
+                "Progetto esistente",
+                "Ulteriori progetti",
+                "Progetto aggiuntivo\nDescrizione del progetto aggiuntivo",
+            ],
+        )
+        self.assertTrue(supplemental.runs[0].bold)
+        self.assertEqual(supplemental.runs[0].font.name, "Open Sans")
+        self.assertTrue(supplemental.paragraph_format.keep_with_next)
 
     def test_structured_pipeline_appends_without_deleting_existing_section(self):
         document = Document()

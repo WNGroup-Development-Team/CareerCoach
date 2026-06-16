@@ -1503,7 +1503,7 @@ def call_rewrite_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
-        preferred_order=["gemini"],
+        preferred_order=["gemini", "ollama"],
     )
 
 
@@ -3306,6 +3306,10 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
 
     classifier_model = select_ollama_visual_model(require_structured_output=True)
     uses_lightweight_description = classifier_model.split(":", 1)[0] == "moondream"
+    print(
+        "Screenshot analysis: chiamata Ollama visuale "
+        f"(model={classifier_model}, lightweight={uses_lightweight_description})"
+    )
     if uses_lightweight_description:
         prompt = "Describe only what is visibly present in this image in one short factual sentence."
     else:
@@ -3387,9 +3391,34 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
         for category in result.get("categories") or []
         if str(category).lower() in allowed_categories
     ]
+    normalized_summary = str(result.get("summary", "")).strip().lower()
+    inferred_categories = list(categories)
+    if not inferred_categories:
+        summary_keywords = {
+            "nudita": ("nude", "nudity", "naked", "topless", "senza vestiti"),
+            "contenuto sessuale esplicito": ("explicit sexual", "sexual act", "sexually explicit"),
+            "contenuto intimo o non professionale": (
+                "underwear",
+                "lingerie",
+                "revealing",
+                "suggestive",
+                "intimate",
+                "shirtless",
+                "topless",
+                "bikini",
+            ),
+            "violenza": ("violence", "violent", "blood", "injury", "wound"),
+            "armi": ("weapon", "gun", "rifle", "knife", "firearm"),
+            "droghe": ("drug", "cocaine", "heroin", "marijuana", "syringe"),
+        }
+        inferred_categories = [
+            category
+            for category, keywords in summary_keywords.items()
+            if any(keyword in normalized_summary for keyword in keywords)
+        ]
     return {
-        "flagged": bool(result.get("flagged")),
-        "categories": categories,
+        "flagged": bool(result.get("flagged")) or bool(inferred_categories),
+        "categories": inferred_categories,
         "summary": str(result.get("summary", "")).strip(),
     }
 
@@ -3559,6 +3588,11 @@ def analyze_embedded_cv_image(image_input: Dict[str, Any]) -> Dict[str, Any]:
 def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_count: int) -> Dict:
     global openai_visual_rate_limited_until
 
+    print(
+        "Visual moderation start: "
+        f"source={source}, provider={VISION_PROVIDER}, discovered_count={discovered_count}, "
+        f"input_count={len(image_inputs or [])}"
+    )
     if not image_inputs:
         return {
             "status": "no_media_found",
@@ -3589,7 +3623,15 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
                 ):
                     break
         if analyzed:
+            print(
+                "Visual moderation completed with Ollama: "
+                f"analyzed={len(analyzed)}, failed={failed_count}"
+            )
             return build_visual_analysis_result(source, discovered_count, analyzed, failed_count)
+        print(
+            "Visual moderation failed before producing results with Ollama: "
+            f"failed={failed_count}, last_error={last_error}"
+        )
         return {
             "status": "provider_unavailable",
             "provider": "ollama",
@@ -7026,6 +7068,10 @@ Schema:
             )
             if match:
                 language_values.append(f"{language.capitalize()} {(match.group(1) or match.group(2)).upper()}")
+        if not language_values and normalized_hint in {"certifications", "certificazioni", "languages", "lingue"}:
+            generic_level_match = re.fullmatch(r"(?i)[abc][12]", fragment_plain)
+            if generic_level_match:
+                language_values.append(f"Inglese {generic_level_match.group(0).upper()}")
         if language_values and (
             normalized_hint in {"certifications", "certificazioni", "languages", "lingue"}
             or any(language.lower() in fragment_plain for language in language_values)
@@ -7053,7 +7099,11 @@ Schema:
         elif normalized_hint in {"company role notes", "company_role_notes"}:
             section, category = "PROFILO", "profile"
         else:
-            mapped_section_key = additional_field_section_key(category_hint)
+            mapped_section_key = (
+                None
+                if normalized_hint in {"additional_notes", "additional notes"}
+                else additional_field_section_key(category_hint)
+            )
             mapped_sections = {
                 "experience": ("ESPERIENZE PROFESSIONALI", "experience"),
                 "projects": ("PROGETTI", "project"),
@@ -7098,24 +7148,19 @@ Schema:
                 professional_text = skill_text(cleaned_fragment, "skill")
                 section, category = "COMPETENZE TECNICHE", "skill"
         elif category in {"skill", "soft_skill"}:
-            if normalized_hint not in {
-                "technical skills", "technical_skills", "tools",
-                "soft skills", "soft_skills",
-            }:
-                # L'utente ha scritto qualcosa che contiene parole chiave
-                # tecniche ma non e' stato indirizzato esplicitamente come
-                # skill (es. additional_notes o adaptation answer senza
-                # category): non scartare silenziosamente. Riformula come
-                # paragrafo in ATTIVITA RILEVANTI.
+            if normalized_hint in {"additional_notes", "additional notes"}:
+                if any(term in fragment_plain for term in ["progetto", "progetti", "dashboard", "dataset"]):
+                    professional_text = project_block(cleaned_fragment, force_project=True)
+                    if not professional_text:
+                        return
+                    section, category = "PROGETTI", "project"
+                else:
+                    return
+            else:
                 professional_text = build_professional_extra_text(
                     {"additional_notes": cleaned_fragment}, role
                 )
                 section, category = "ATTIVITA RILEVANTI", "extra_page"
-                if not professional_text:
-                    return
-            else:
-                professional_text = skill_text(cleaned_fragment, category)
-                section = "SOFT SKILLS" if category == "soft_skill" else "COMPETENZE TECNICHE"
                 if not professional_text:
                     return
         elif category == "extra_page":
@@ -14081,20 +14126,22 @@ def optimize_user_cv(
                 print(f"[CV-OPT DEBUG] errore nel logging DOCX apply: {_dbg_exc}")
 
             if normalize_plain_text(final_docx_text) == normalize_plain_text(cv_text):
-                print("[CV-OPT DEBUG] 422 -> testo finale identico al CV originale")
-                raise HTTPException(
-                    status_code=422,
-                    detail="Il motore non è riuscito ad applicare modifiche reali al DOCX. Il file originale non è stato salvato come ottimizzato.",
+                print("[CV-OPT DEBUG] testo finale identico al CV originale: continuo e restituisco comunque il file")
+                format_warnings.append(
+                    "Il contenuto del CV ottimizzato coincide quasi del tutto con l'originale: controlla il file finale prima dell'invio."
                 )
             if apply_result.validation_report.get("status") == "failed":
-                print("[CV-OPT DEBUG] 422 -> validation_report.status = failed")
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "message": "Il DOCX non contiene modifiche applicabili o non conserva correttamente la struttura originale.",
-                        "validation_report": apply_result.validation_report,
-                    },
+                print("[CV-OPT DEBUG] validation_report.status = failed: continuo e restituisco comunque il file")
+                format_warnings.append(
+                    "Il documento ottimizzato non conserva perfettamente la struttura del CV originale: verifica layout e contenuti finali."
                 )
+                for warning in (
+                    apply_result.validation_report.get("heading_warnings", [])
+                    + apply_result.validation_report.get("contamination_warnings", [])
+                    + apply_result.validation_report.get("content_warnings", [])
+                ):
+                    if warning:
+                        format_warnings.append(str(warning))
         except HTTPException:
             raise
         except Exception as exc:
@@ -14134,7 +14181,7 @@ def optimize_user_cv(
 
     if _quality_blocking:
         print(
-            f"[CV-OPT] 422 quality_review bloccante: score={_qr_score}, "
+            f"[CV-OPT] quality_review bloccante convertita in warning: score={_qr_score}, "
             f"critical_issues={_has_critical}, total_issues={len(_qr_issues)}"
         )
         try:
@@ -14153,13 +14200,14 @@ def optimize_user_cv(
                     )
         except Exception as _dbg_exc:
             print(f"[CV-OPT] errore dump quality_review: {_dbg_exc}")
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message": "Il motore di ottimizzazione non ha prodotto un CV pronto da inviare.",
-                "quality_review": quality_review,
-            },
+        format_warnings.append(
+            "Il CV generato potrebbe non essere perfettamente coerente o pronto all'invio senza un controllo finale."
         )
+        for issue in _qr_issues:
+            if isinstance(issue, dict):
+                description = str(issue.get("description") or "").strip()
+                if description:
+                    format_warnings.append(description)
 
     # Se non blocchiamo ma il revisore aveva detto ready_to_send=False,
     # registriamo lo skip e forziamo ready_to_send=True per il frontend,
@@ -15133,6 +15181,10 @@ async def analyze_social_screenshots(
 ):
     require_user_session(user_id, authorization)
     profile_type = profile_type.strip().lower()
+    print(
+        "Endpoint /social-screenshots invoked: "
+        f"user_id={user_id}, profile_type={profile_type}, file_count={len(files or [])}"
+    )
     if profile_type not in VISUAL_PROFILE_LABELS:
         raise HTTPException(status_code=400, detail="Tipo di profilo non valido.")
     if not files or len(files) > 8:

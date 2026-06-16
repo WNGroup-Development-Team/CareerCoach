@@ -14,6 +14,7 @@ def build_resume_rewrite_result(
     """Apply accepted suggestions and return the final structured CV rewrite."""
     from fastapi import HTTPException
     from main import (
+        CoachSuggestionEngine,
         ResumeParser,
         ResumeRewriter,
         build_additional_rewrite_instructions,
@@ -27,14 +28,14 @@ def build_resume_rewrite_result(
         normalize_professional_language,
     )
 
-    def _append_only_instruction(instruction: Any) -> Optional[Any]:
-        """Keep original CV text intact; allow only additive changes."""
+    def _deduplicate_skill_append(instruction: Any) -> Optional[Any]:
         source_id = str(getattr(instruction, "source_id", "") or "")
         original = str(getattr(instruction, "original", "") or "").strip()
         replacement = str(getattr(instruction, "replacement", "") or "").strip()
         section = normalize_plain_text(str(getattr(instruction, "section", "") or ""))
         if not replacement:
             return None
+
         if is_additive_user_rewrite_source(source_id) or not original:
             if section in {"hard skills", "soft skills", "competenze", "competenze tecniche", "skills"}:
                 existing_terms = {
@@ -52,21 +53,40 @@ def build_resume_rewrite_result(
                     instruction.replacement = ", ".join(incoming_terms)
                 else:
                     return None
-            instruction.original = ""
-            return instruction
+        return instruction
 
-        # Coach suggestions may extend an existing paragraph. In that case,
-        # append only the new tail and leave the original paragraph untouched.
+    def _local_instruction(instruction: Any) -> Optional[Any]:
+        """Keep the original CV as base and allow only local edits or additive appends."""
+        original = str(getattr(instruction, "original", "") or "").strip()
+        replacement = str(getattr(instruction, "replacement", "") or "").strip()
+        section = normalize_plain_text(str(getattr(instruction, "section", "") or ""))
+        if not replacement:
+            return None
+
+        if not original:
+            instruction.original = ""
+            return _deduplicate_skill_append(instruction)
+
         if replacement.startswith(original):
             tail = replacement[len(original):].strip(" \n\t.-:;")
             if tail:
                 instruction.original = ""
                 instruction.replacement = (tail[:1].upper() + tail[1:]).rstrip(".") + "."
-                return instruction
+                return _deduplicate_skill_append(instruction)
+
+        if original in cv_text:
+            if section in {"hard skills", "soft skills", "competenze", "competenze tecniche", "skills"}:
+                instruction.original = ""
+                return _deduplicate_skill_append(instruction)
+            return instruction
+
         return None
 
     parser = ResumeParser()
     sections = parser.parse_text(cv_text)
+    rewriter = ResumeRewriter(parser)
+    accepted = CoachSuggestionEngine().accepted_only(accepted_suggestions)
+    accepted_instructions = rewriter.instructions_from_suggestions(accepted)
     confirmed_instructions = build_confirmed_skill_rewrite_instructions(
         cv_text, user_additional_data or {}, role
     )
@@ -76,13 +96,12 @@ def build_resume_rewrite_result(
         cv_text,
     )
 
-    rewriter = ResumeRewriter(parser)
-    instructions = [*confirmed_instructions, *additional_instructions]
+    instructions = [*accepted_instructions, *confirmed_instructions, *additional_instructions]
     instructions = [
-        append_instruction
+        local_instruction
         for instruction in instructions
-        for append_instruction in [_append_only_instruction(instruction)]
-        if append_instruction is not None
+        for local_instruction in [_local_instruction(instruction)]
+        if local_instruction is not None
     ]
 
     if not instructions:
@@ -130,7 +149,7 @@ def build_resume_rewrite_result(
         "optimized_text": optimized_text,
         "instructions": instructions,
         "grouped_changes": {"sections": [item.section for item in instructions]},
-        "accepted_suggestions": [],
+        "accepted_suggestions": accepted,
         "missing_proposed_text_count": 0,
         "sections": sections,
         "previewFinalCvContent": preview,

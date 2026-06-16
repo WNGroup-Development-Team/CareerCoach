@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from docx.oxml import OxmlElement
+from docx.shared import Pt
 
 from .section_catalog import SECTION_ALIASES as SHARED_SECTION_ALIASES
 from .section_catalog import additional_field_section_key, canonical_section_key, normalize_section_title
@@ -1187,6 +1188,14 @@ Dati aggiuntivi utente:
             rows.append(line if line.endswith((".", ":", ";")) else f"{line}.")
         return "\n".join(rows)
 
+    def _normalize_sentence_case(self, text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", text or "").strip()
+        if not cleaned:
+            return ""
+        if cleaned.isupper() and len(cleaned.split()) > 1:
+            cleaned = cleaned.lower()
+        return cleaned[:1].upper() + cleaned[1:]
+
     def _clean_instruction_text(self, text: str, note_texts: List[str]) -> str:
         lines: List[str] = []
         for raw_line in re.sub(r"\r\n?", "\n", text or "").splitlines():
@@ -1252,7 +1261,7 @@ Dati aggiuntivi utente:
             return ""
         if len(lines) == 1:
             single = lines[0].rstrip(".")
-            return f"{self._project_title_from_text(single)}\n{single[:1].upper() + single[1:]}."
+            return f"{self._project_title_from_text(single)}\n{self._normalize_sentence_case(single)}."
 
         rows: List[str] = []
         index = 0
@@ -1261,11 +1270,14 @@ Dati aggiuntivi utente:
             plain = normalize_text(title)
             if not plain.startswith(("progetto ", "project ", "tesi ")):
                 if len(plain.split()) <= 7 and len(title) <= 70:
-                    rows.append(f"{self._project_title_from_text(title)}\n{title[:1].upper() + title[1:].rstrip('.')}." )
+                    rows.append(
+                        f"{self._project_title_from_text(title)}\n"
+                        f"{self._normalize_sentence_case(title).rstrip('.')}."
+                    )
                 index += 1
                 continue
             if index + 1 >= len(lines):
-                rows.append(f"{title[:1].upper() + title[1:].rstrip('.')}." )
+                rows.append(f"{self._normalize_sentence_case(title).rstrip('.')}.")
                 break
             description = lines[index + 1].strip()
             if (
@@ -1274,7 +1286,10 @@ Dati aggiuntivi utente:
             ):
                 index += 1
                 continue
-            rows.extend([title, description.rstrip(".") + "."])
+            rows.extend([
+                self._project_title_from_text(title),
+                self._normalize_sentence_case(description).rstrip(".") + ".",
+            ])
             index += 2
         return "\n".join(rows).strip()
 
@@ -2111,8 +2126,17 @@ Dati aggiuntivi utente:
             self._style_section_line(paragraph, section_name, index)
 
     def _style_section_line(self, paragraph, section_name: str, line_index: int) -> None:
-        if canonical_section(section_name) == "progetti" and line_index % 2 == 0:
-            paragraph.paragraph_format.keep_with_next = True
+        if canonical_section(section_name) == "progetti":
+            if line_index % 2 == 0:
+                paragraph.paragraph_format.keep_with_next = True
+                paragraph.paragraph_format.space_after = Pt(1)
+                if paragraph.runs:
+                    paragraph.runs[0].bold = True
+            elif paragraph.runs:
+                paragraph.runs[0].bold = False
+                paragraph.paragraph_format.space_after = Pt(6)
+        elif paragraph.runs:
+            paragraph.runs[0].bold = False
 
     def _find_best_section_anchor(self, document, target: str, sections_detected: List[str]):
         contexts = self._paragraph_contexts(document)
@@ -2215,10 +2239,47 @@ Dati aggiuntivi utente:
             "contatti": "Contatti",
         }.get(section, section.capitalize())
 
+    def _supplemental_section_heading(self, section: str) -> str:
+        section_name = canonical_section(section)
+        base_label = self._section_display_name(section_name).strip()
+        if not base_label:
+            return "Ulteriori informazioni"
+
+        gendered_labels = {
+            "Esperienze professionali": "Ulteriori esperienze professionali",
+            "Competenze": "Ulteriori competenze",
+            "Lingue": "Ulteriori lingue",
+            "Certificazioni": "Ulteriori certificazioni",
+            "Pubblicazioni": "Ulteriori pubblicazioni",
+        }
+        if base_label in gendered_labels:
+            return gendered_labels[base_label]
+        return f"Ulteriori {base_label.lower()}"
+
     def _make_heading_like(self, paragraph) -> None:
         if not paragraph.runs:
             paragraph.add_run("")
         paragraph.paragraph_format.keep_with_next = True
+        if paragraph.paragraph_format.space_before is None:
+            paragraph.paragraph_format.space_before = Pt(6)
+        if paragraph.paragraph_format.space_after is None:
+            paragraph.paragraph_format.space_after = Pt(4)
+        first_run = paragraph.runs[0]
+        if first_run.bold is None:
+            first_run.bold = True
+
+    def _make_subheading_like(self, paragraph) -> None:
+        if not paragraph.runs:
+            paragraph.add_run("")
+        paragraph.paragraph_format.keep_with_next = True
+        if paragraph.paragraph_format.space_before is None:
+            paragraph.paragraph_format.space_before = Pt(4)
+        if paragraph.paragraph_format.space_after is None:
+            paragraph.paragraph_format.space_after = Pt(2)
+        first_run = paragraph.runs[0]
+        first_run.bold = True
+        if first_run.italic is None:
+            first_run.italic = False
 
     def _replace_paragraph_preserving_style(self, paragraph, replacement: str) -> None:
         # Gestione hyperlink: se il replacement contiene il testo gia' presente
@@ -2285,6 +2346,27 @@ Dati aggiuntivi utente:
             if target_run._r.rPr is not None:
                 target_run._r.remove(target_run._r.rPr)
             target_run._r.insert(0, deepcopy(source_run._r.rPr))
+        try:
+            target.paragraph_format.alignment = source.paragraph_format.alignment
+            target.paragraph_format.left_indent = source.paragraph_format.left_indent
+            target.paragraph_format.right_indent = source.paragraph_format.right_indent
+            target.paragraph_format.first_line_indent = source.paragraph_format.first_line_indent
+            target.paragraph_format.space_before = source.paragraph_format.space_before
+            target.paragraph_format.space_after = source.paragraph_format.space_after
+            target.paragraph_format.line_spacing = source.paragraph_format.line_spacing
+            target.paragraph_format.keep_together = source.paragraph_format.keep_together
+            target.paragraph_format.keep_with_next = source.paragraph_format.keep_with_next
+            target.paragraph_format.widow_control = source.paragraph_format.widow_control
+        except Exception:
+            pass
+        try:
+            target_run.font.name = source_run.font.name if source_run is not None else target_run.font.name
+            target_run.font.size = source_run.font.size if source_run is not None else target_run.font.size
+            target_run.font.bold = source_run.font.bold if source_run is not None else target_run.font.bold
+            target_run.font.italic = source_run.font.italic if source_run is not None else target_run.font.italic
+            target_run.font.underline = source_run.font.underline if source_run is not None else target_run.font.underline
+        except Exception:
+            pass
         try:
             target_run.font.name = source_run.font.name if source_run is not None else target_run.font.name
             target_run.font.size = source_run.font.size if source_run is not None else target_run.font.size
@@ -2817,6 +2899,7 @@ Dati aggiuntivi utente:
         if heading == "PAGINA AGGIUNTIVA":
             heading = "PROGETTI"
         section_name = canonical_section(heading)
+        replacement_lines = [line.strip() for line in str(instruction.replacement or "").splitlines() if line.strip()]
         contexts = self._paragraph_contexts(document)
         preferred_order = [
             "profilo",
@@ -2854,6 +2937,19 @@ Dati aggiuntivi utente:
             existing_section_text = "\n".join(existing_section_parts)
             if normalize_text(instruction.replacement) in normalize_text(existing_section_text):
                 return
+            insert_subheading = bool(
+                existing_section_parts
+                and section_name in {"progetti", "esperienze", "formazione", "certificazioni", "lingue", "competenze"}
+                and len(replacement_lines) > 1
+            )
+            if insert_subheading:
+                subheading_paragraph = document.add_paragraph(self._supplemental_section_heading(section_name))
+                subheading_paragraph._p.getparent().remove(subheading_paragraph._p)
+                anchor._p.addnext(subheading_paragraph._p)
+                if body_reference is not None:
+                    self._copy_paragraph_format(body_reference, subheading_paragraph)
+                self._make_subheading_like(subheading_paragraph)
+                anchor = subheading_paragraph
             body_paragraph = document.add_paragraph(instruction.replacement)
             body_paragraph._p.getparent().remove(body_paragraph._p)
             anchor._p.addnext(body_paragraph._p)

@@ -19,6 +19,36 @@ class SocialProfileTextTests(unittest.TestCase):
 
         self.assertEqual(result, "Data Analyst\nPython e SQL")
 
+    def test_visual_analysis_uses_categories_even_when_flagged_is_false(self):
+        with patch.object(
+            main,
+            "extract_json",
+            return_value={
+                "flagged": False,
+                "categories": ["nudita"],
+                "summary": "topless person visible",
+            },
+        ), patch.object(
+            main,
+            "extract_image_base64",
+            return_value="ZmFrZQ==",
+        ), patch.object(
+            main.requests,
+            "post",
+        ) as mock_post:
+            mock_post.return_value.ok = True
+            mock_post.return_value.json.return_value = {
+                "message": {"content": '{"flagged": false, "categories": ["nudita"], "summary": "topless person visible"}'}
+            }
+            with (
+                patch.object(main, "OLLAMA_VISION_MODEL", "qwen2.5vl:3b"),
+                patch.object(main, "OLLAMA_OCR_MODEL", "qwen2.5vl:3b"),
+            ):
+                result = main.analyze_image_with_ollama({"image_url": {"url": "data:image/png;base64,ZmFrZQ=="}})
+
+        self.assertTrue(result["flagged"])
+        self.assertEqual(result["categories"], ["nudita"])
+
     def test_profile_text_is_aligned_with_target_role(self):
         result = main.evaluate_social_profile_text(
             "Silvia Mucci\nData Analyst\nPython, SQL e Power BI\nlinkedin.com/in/silvia",
