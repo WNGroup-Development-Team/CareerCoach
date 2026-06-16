@@ -61,7 +61,7 @@ from services.cv_image_safety import validate_cv_images
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
-load_dotenv(ENV_FILE_PATH, override=True)
+load_dotenv(ENV_FILE_PATH, override=False)
 ENV_FILE_VALUES = dotenv_values(ENV_FILE_PATH)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
