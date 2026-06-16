@@ -60,9 +60,14 @@ from services.cv_image_safety import validate_cv_images
 # =========================
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+#ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
+#load_dotenv(ENV_FILE_PATH, override=False)
+#ENV_FILE_VALUES = dotenv_values(ENV_FILE_PATH)
+
+# DOPO
 ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
 load_dotenv(ENV_FILE_PATH, override=False)
-ENV_FILE_VALUES = dotenv_values(ENV_FILE_PATH)
+ENV_FILE_VALUES = os.environ  # ← usa le env vars di sistema/Render
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 #GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
