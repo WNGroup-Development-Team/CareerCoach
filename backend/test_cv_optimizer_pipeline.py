@@ -484,6 +484,39 @@ class DynamicAdditionalContentTests(unittest.TestCase):
 
 
 class ResumeRewriterTests(unittest.TestCase):
+    @patch("main.CV_REWRITE_LLM_ENABLED", False)
+    def test_resume_rewrite_keeps_original_profile_and_appends_only_new_tail(self):
+        cv_text = "PROFILO\nContabile con esperienza in prima nota."
+        result = build_resume_rewrite_result(
+            cv_text=cv_text,
+            company="TIM",
+            role="Accountant",
+            goal="Candidatura",
+            accepted_suggestions=[
+                {
+                    "id": "coach-profile-extension",
+                    "type": "actionableEdit",
+                    "category": "profile",
+                    "section": "PROFILO",
+                    "original_text": "Contabile con esperienza in prima nota.",
+                    "proposed_text": (
+                        "Contabile con esperienza in prima nota. "
+                        "Profilo orientato a opportunita come Accountant."
+                    ),
+                }
+            ],
+            user_additional_data={},
+        )
+
+        optimized = result["optimized_text"]
+
+        self.assertIn("Contabile con esperienza in prima nota.", optimized)
+        self.assertIn("Profilo orientato a opportunita come Accountant.", optimized)
+        self.assertNotIn(
+            "Contabile con esperienza in prima nota. Profilo orientato",
+            optimized,
+        )
+
     def test_applies_generated_instructions_to_optimized_text(self):
         original = (
             "PROFILO\n"

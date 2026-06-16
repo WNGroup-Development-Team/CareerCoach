@@ -28,7 +28,7 @@ from urllib3.exceptions import MaxRetryError, NewConnectionError
 from typing import Iterable, List
 
 from dotenv import dotenv_values, load_dotenv
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from openai import OpenAI
@@ -67,7 +67,7 @@ BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # DOPO
 ENV_FILE_PATH = os.path.join(BACKEND_DIR, ".env")
-load_dotenv(ENV_FILE_PATH, override=False)
+load_dotenv(ENV_FILE_PATH, override=True)
 ENV_FILE_VALUES = os.environ  # ← usa le env vars di sistema/Render
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -309,10 +309,12 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         provider TEXT NOT NULL,
         state TEXT NOT NULL UNIQUE,
+        frontend_origin TEXT,
         expires_at TIMESTAMP NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+    add_column_if_not_exists(cursor, "oauth_states", "frontend_origin", "TEXT")
 
     add_column_if_not_exists(cursor, "users", "password_hash", "TEXT")
     add_column_if_not_exists(cursor, "users", "phone", "TEXT")
@@ -810,13 +812,27 @@ def get_oauth_config(provider: str) -> Dict:
     return {"provider": provider, **config}
 
 
-def create_oauth_state(cursor, provider: str) -> str:
+def normalize_frontend_origin(frontend_origin: Optional[str]) -> str:
+    candidate = (frontend_origin or "").strip().rstrip("/")
+    if not candidate:
+        return FRONTEND_URL.rstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except Exception:
+        return FRONTEND_URL.rstrip("/")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return FRONTEND_URL.rstrip("/")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def create_oauth_state(cursor, provider: str, frontend_origin: Optional[str] = None) -> str:
     state = make_token()
     expires_at = utc_now() + timedelta(minutes=10)
+    normalized_origin = normalize_frontend_origin(frontend_origin)
     cursor.execute("""
-    INSERT INTO oauth_states (provider, state, expires_at)
-    VALUES (?, ?, ?)
-    """, (provider, state, expires_at.isoformat()))
+    INSERT INTO oauth_states (provider, state, frontend_origin, expires_at)
+    VALUES (?, ?, ?, ?)
+    """, (provider, state, normalized_origin, expires_at.isoformat()))
     return state
 
 
@@ -835,7 +851,7 @@ def build_oauth_authorization_url(provider: str, state: str) -> str:
 
 def consume_oauth_state(cursor, provider: str, state: str):
     cursor.execute("""
-    SELECT expires_at
+    SELECT expires_at, frontend_origin
     FROM oauth_states
     WHERE provider = ? AND state = ?
     """, (provider, state))
@@ -848,6 +864,9 @@ def consume_oauth_state(cursor, provider: str, state: str):
 
     if datetime.fromisoformat(row[0]) < utc_now():
         raise HTTPException(status_code=400, detail="Sessione OAuth scaduta.")
+    return {
+        "frontend_origin": normalize_frontend_origin(row[1] if len(row) > 1 else ""),
+    }
 
 
 def fetch_oauth_profile(provider: str, code: str) -> Dict:
@@ -8512,11 +8531,11 @@ def oauth_redirect_uris():
 
 
 @app.get("/auth/oauth/{provider}/start")
-def start_oauth(provider: str):
+def start_oauth(provider: str, frontend_origin: Optional[str] = Query(default=None)):
     provider = normalize_oauth_provider(provider)
     conn = get_connection()
     cursor = conn.cursor()
-    state = create_oauth_state(cursor, provider)
+    state = create_oauth_state(cursor, provider, frontend_origin)
     conn.commit()
     conn.close()
 
@@ -8524,11 +8543,11 @@ def start_oauth(provider: str):
 
 
 @app.get("/auth/oauth/{provider}/url")
-def get_oauth_url(provider: str):
+def get_oauth_url(provider: str, frontend_origin: Optional[str] = Query(default=None)):
     provider = normalize_oauth_provider(provider)
     conn = get_connection()
     cursor = conn.cursor()
-    state = create_oauth_state(cursor, provider)
+    state = create_oauth_state(cursor, provider, frontend_origin)
     auth_url = build_oauth_authorization_url(provider, state)
     conn.commit()
     conn.close()
@@ -8550,7 +8569,7 @@ def oauth_callback(provider: str, code: Optional[str] = None, state: Optional[st
     cursor = conn.cursor()
 
     try:
-        consume_oauth_state(cursor, provider, state)
+        oauth_state = consume_oauth_state(cursor, provider, state)
         profile = fetch_oauth_profile(provider, code)
         user_id = find_or_create_oauth_user(cursor, provider, profile)
         session_token = create_session(cursor, user_id)
@@ -8558,7 +8577,8 @@ def oauth_callback(provider: str, code: Optional[str] = None, state: Optional[st
     finally:
         conn.close()
 
-    return RedirectResponse(make_frontend_oauth_link(session_token))
+    frontend_origin = oauth_state.get("frontend_origin") or FRONTEND_URL.rstrip("/")
+    return RedirectResponse(f"{frontend_origin}/?oauth_token={session_token}")
 
 
 @app.get("/auth/linkedin/callback")
@@ -11925,6 +11945,17 @@ def is_valid_actionable_suggestion(suggestion: Dict) -> bool:
     section_plain = normalize_plain_text(section)
     original_plain = normalize_plain_text(original)
     proposed_plain = normalize_plain_text(proposed)
+    unsupported_boilerplate = {
+        "esperienza valorizzata per il ruolo",
+        "progetti valorizzati per il ruolo",
+        "evidenziando attivita gia presenti",
+        "con attenzione a chiarezza collaborazione e risultati concreti",
+        "con focus su ruolo target",
+        "keyword da coprire nel cv",
+        "competenze tecniche da evidenziare solo se",
+    }
+    if any(marker in proposed_plain for marker in unsupported_boilerplate):
+        return False
     # Reject suggestions that are identical when normalized
     if original and original_plain == proposed_plain:
         return False

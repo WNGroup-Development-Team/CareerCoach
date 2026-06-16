@@ -37,6 +37,15 @@ BAD_PROPOSED_MARKERS = {
     "progetti rilevanti per il ruolo di project manager /",
     "progetti rilevanti per il ruolo di",
 }
+UNSUPPORTED_BOILERPLATE_MARKERS = {
+    "esperienza valorizzata per il ruolo",
+    "progetti valorizzati per il ruolo",
+    "evidenziando attivita gia presenti",
+    "con attenzione a chiarezza collaborazione e risultati concreti",
+    "con focus su ruolo target",
+    "keyword da coprire nel cv",
+    "competenze tecniche da evidenziare solo se",
+}
 COMMON_SKILLS = [
     "Python", "SQL", "Java", "C++", "C#", "Linux", "Networking", "Big Data",
     "ML & AI", "Machine Learning", "Artificial Intelligence", "Data Engineering",
@@ -399,6 +408,8 @@ def is_bad_suggestion(item: Dict[str, Any]) -> bool:
         if original.startswith("di realizzare") or original.startswith("progetto con"):
             return True
     if "strumenti hard" in proposed or proposed.strip() in {"/", "progetti rilevanti per il ruolo di project manager /"}:
+        return True
+    if any(marker in proposed for marker in UNSUPPORTED_BOILERPLATE_MARKERS):
         return True
     if any(marker in proposed for marker in BAD_PROPOSED_MARKERS):
         if not (category == "project" and len(proposed.split()) > 10):
@@ -764,12 +775,9 @@ def _final_role_phrase(role: str, company: str = "") -> str:
 
 def _profile_rewrite(profile: str, target: Dict[str, Any], cv_text: str = "") -> str:
     text = compact(profile, 760).rstrip(".")
-    role = clean_line(str(target.get("role") or ""))
     if not text:
         return ""
-    if not role or norm(role) in norm(text):
-        return f"{text}."
-    return f"{text}. Profilo orientato a opportunita come {role}, in coerenza con il percorso descritto."
+    return f"{text}."
 
 
 def _skills_rewrite(skills: str, target: Dict[str, Any]) -> str:
@@ -972,6 +980,8 @@ def build_structured_cv_suggestions(evaluation: Dict[str, Any]) -> List[Dict[str
         original = norm(item.get("original_text") or "")
         proposed = norm(item.get("proposed_text") or "")
         if not original or not proposed or original == proposed:
+            continue
+        if any(marker in proposed for marker in UNSUPPORTED_BOILERPLATE_MARKERS):
             continue
         key = (item.get("section"), original[:220], proposed[:220])
         if key in seen:

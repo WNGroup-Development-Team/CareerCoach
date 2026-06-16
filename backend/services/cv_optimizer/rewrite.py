@@ -24,36 +24,52 @@ def build_resume_rewrite_result(
         call_rewrite_llm,
         consolidate_rewrite_instructions,
         extract_resume_sections,
+        is_additive_user_rewrite_source,
         normalize_plain_text,
     )
     from services.cv_optimizer.safe_cv_guard import sanitize_accepted_cv_suggestions
     from services.cv_optimizer.structured_cv_engine import (
-        build_optimized_cv_text,
         extract_skill_terms,
         normalize_professional_language,
     )
 
-    def _instruction_applied(text: str, instruction: Any) -> bool:
-        replacement = normalize_plain_text(str(getattr(instruction, "replacement", "") or ""))
-        if not replacement:
-            return True
-        return replacement in normalize_plain_text(text)
-
-    def _should_reapply_instruction(text: str, instruction: Any) -> bool:
+    def _append_only_instruction(instruction: Any) -> Optional[Any]:
+        """Keep original CV text intact; allow only additive changes."""
+        source_id = str(getattr(instruction, "source_id", "") or "")
+        original = str(getattr(instruction, "original", "") or "").strip()
+        replacement = str(getattr(instruction, "replacement", "") or "").strip()
         section = normalize_plain_text(str(getattr(instruction, "section", "") or ""))
-        if section in {"hard skills", "soft skills", "competenze", "skills"}:
-            replacement_terms = {
-                normalize_plain_text(term)
-                for term in extract_skill_terms(str(getattr(instruction, "replacement", "") or ""))
-            }
-            if replacement_terms:
-                current_terms = {
+        if not replacement:
+            return None
+        if is_additive_user_rewrite_source(source_id) or not original:
+            if section in {"hard skills", "soft skills", "competenze", "competenze tecniche", "skills"}:
+                existing_terms = {
                     normalize_plain_text(term)
-                    for term in extract_skill_terms(text)
+                    for term in extract_skill_terms(cv_text)
                 }
-                if replacement_terms.issubset(current_terms):
-                    return False
-        return True
+                incoming_terms = []
+                seen_terms = set()
+                for term in extract_skill_terms(replacement):
+                    key = normalize_plain_text(term)
+                    if key and key not in existing_terms and key not in seen_terms:
+                        seen_terms.add(key)
+                        incoming_terms.append(term)
+                if incoming_terms:
+                    instruction.replacement = ", ".join(incoming_terms)
+                else:
+                    return None
+            instruction.original = ""
+            return instruction
+
+        # Coach suggestions may extend an existing paragraph. In that case,
+        # append only the new tail and leave the original paragraph untouched.
+        if replacement.startswith(original):
+            tail = replacement[len(original):].strip(" \n\t.-:;")
+            if tail:
+                instruction.original = ""
+                instruction.replacement = (tail[:1].upper() + tail[1:]).rstrip(".") + "."
+                return instruction
+        return None
 
     parser = ResumeParser()
     sections = parser.parse_text(cv_text)
@@ -108,15 +124,13 @@ def build_resume_rewrite_result(
 
     instructions.extend(confirmed_instructions)
     instructions.extend(additional_instructions)
+    instructions = [
+        append_instruction
+        for instruction in instructions
+        for append_instruction in [_append_only_instruction(instruction)]
+        if append_instruction is not None
+    ]
     if instructions:
-        # === DEBUG: tracciamento sezioni prima del consolidamento ===
-        print("[REWRITE DEBUG] istruzioni prima del consolidamento:")
-        for _i, _inst in enumerate(instructions):
-            _rep_preview = (_inst.replacement or "")[:120].replace("\n", " / ")
-            print(
-                f"  #{_i} section={_inst.section!r} source_id={_inst.source_id!r} "
-                f"replacement_preview={_rep_preview!r}"
-            )
         instructions = consolidate_rewrite_instructions(
             cv_text,
             instructions,
@@ -125,80 +139,16 @@ def build_resume_rewrite_result(
             goal,
             use_llm=CV_REWRITE_LLM_ENABLED,
         )
-        print("[REWRITE DEBUG] istruzioni DOPO il consolidamento:")
-        for _i, _inst in enumerate(instructions):
-            _rep_preview = (_inst.replacement or "")[:120].replace("\n", " / ")
-            print(
-                f"  #{_i} section={_inst.section!r} source_id={_inst.source_id!r} "
-                f"replacement_preview={_rep_preview!r}"
-            )
+        instructions = [
+            append_instruction
+            for instruction in instructions
+            for append_instruction in [_append_only_instruction(instruction)]
+            if append_instruction is not None
+        ]
 
-    structured_suggestions = list(accepted)
-    existing_keys = {
-        (
-            normalize_plain_text(str(item.get("section") or item.get("target_section") or "")),
-            normalize_plain_text(str(item.get("proposed_text") or item.get("replacement") or item.get("new_text") or "")),
-        )
-        for item in structured_suggestions
-        if isinstance(item, dict)
-    }
-    for index, instruction in enumerate(instructions):
-        key = (
-            normalize_plain_text(instruction.section),
-            normalize_plain_text(instruction.replacement),
-        )
-        if not key[1] or key in existing_keys:
-            continue
-        structured_suggestions.append({
-            "id": instruction.source_id or f"rewrite-instruction-{index + 1}",
-            "type": "actionableEdit",
-            "category": instruction.category or instruction.section,
-            "section": instruction.section,
-            "original_text": instruction.original,
-            "proposed_text": instruction.replacement,
-            "description": instruction.reason,
-            "supported_by_cv": True,
-            "requires_confirmation": False,
-        })
-        existing_keys.add(key)
-
-    try:
-        optimized_text = build_optimized_cv_text(
-            cv_text,
-            structured_suggestions,
-            user_additional_data or {},
-            role=role,
-            company=company,
-            use_llm=False,
-        )
-        if (
-            not (optimized_text or "").strip()
-            or (
-                instructions
-                and len((optimized_text or "").strip()) < 120
-                and normalize_plain_text(optimized_text) == normalize_plain_text(cv_text)
-            )
-        ):
-            optimized_text = rewriter.apply_to_text(cv_text, instructions)
-        elif instructions:
-            missing_instructions = [
-                instruction
-                for instruction in instructions
-                if not _instruction_applied(optimized_text, instruction)
-                and _should_reapply_instruction(optimized_text, instruction)
-            ]
-            if missing_instructions:
-                print(
-                    "[REWRITE DEBUG] istruzioni mancanti dopo build_optimized_cv_text: "
-                    + ", ".join(
-                        f"{inst.section}:{(inst.source_id or 'unknown')}" for inst in missing_instructions[:10]
-                    )
-                )
-                patched_text = rewriter.apply_to_text(optimized_text, missing_instructions)
-                if normalize_plain_text(patched_text) != normalize_plain_text(optimized_text):
-                    optimized_text = patched_text
-    except Exception as exc:
-        print(f"Generazione CV strutturato non disponibile, uso rewriter esistente: {exc}")
+    if not instructions:
+        optimized_text = cv_text or ""
+    else:
         optimized_text = rewriter.apply_to_text(cv_text, instructions)
 
     optimized_text = normalize_professional_language(optimized_text)
