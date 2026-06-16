@@ -45,7 +45,6 @@ function BriefcaseIcon() {
 
 export default function PersonalizeExperience({
   company,
-  goal,
   onBack,
   onChange,
   onSubmit,
@@ -54,17 +53,15 @@ export default function PersonalizeExperience({
   isValidating = false,
   submitLabel = "Continua",
 }) {
-  const normalizedGoal = goal.trim();
   const normalizedCompany = company.trim();
   const normalizedRole = role.trim();
-  const hasQuickMethod = normalizedGoal.length >= 12;
   const hasPlausibleRole = isPlausibleRole(normalizedRole);
 
   const localErrors = {
-    description: hasQuickMethod || hasPlausibleRole
+    description: hasPlausibleRole
       ? ""
-      : "Inserisci almeno un ruolo target oppure descrivi la candidatura nel metodo rapido.",
-    company: hasQuickMethod || (!normalizedCompany || normalizedCompany.length > 2) ? "" : "Inserisci un nome azienda valido.",
+      : "Inserisci almeno un ruolo target.",
+    company: !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
     role: (!normalizedRole || hasPlausibleRole)
       ? ""
       : "Inserisci solo il titolo del ruolo, non una frase sul colloquio.",
@@ -75,7 +72,7 @@ export default function PersonalizeExperience({
     ...(validation.errors || {}),
   };
 
-  const hasRequiredContext = hasQuickMethod || hasPlausibleRole;
+  const hasRequiredContext = hasPlausibleRole;
   const hasLocalValidFields = hasRequiredContext && !localErrors.company && !localErrors.role;
   const canSubmit = hasLocalValidFields && !isValidating;
 
@@ -97,19 +94,9 @@ export default function PersonalizeExperience({
 
       <div className="personalize-layout">
         <form className="personalize-card" onSubmit={handleSubmit}>
-          <div className="quick-method-label">Metodo rapido</div>
-          <label htmlFor="goal">Descrivilo in una frase</label>
-          <textarea
-            id="goal"
-            className={`interview-textarea ${fieldErrors.description ? "input-error" : ""}`}
-            value={goal}
-            onChange={(event) => onChange("goal", event.target.value)}
-            placeholder="Es. Voglio prepararmi per un colloquio da Data Analyst in Google."
-          />
-          {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
-
           <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
+          {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
           {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
           <p className="field-hint">
             Puoi cercare anche solo per ruolo. Se inserisci anche un'azienda, controlleremo che sia valida.
@@ -168,7 +155,6 @@ export default function PersonalizeExperience({
             <ul>
               <li>Indica un ruolo professionale specifico.</li>
               <li>Aggiungi l'azienda per rendere l'analisi più mirata.</li>
-              <li>Usa la frase libera per raccontare il tuo obiettivo.</li>
             </ul>
           </div>
 

@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from docx.oxml import OxmlElement
 
 from .section_catalog import SECTION_ALIASES as SHARED_SECTION_ALIASES
-from .section_catalog import canonical_section_key, normalize_section_title
+from .section_catalog import additional_field_section_key, canonical_section_key, normalize_section_title
 
 SECTION_ALIASES = {
     "profilo": SHARED_SECTION_ALIASES["profile"],
@@ -733,6 +733,9 @@ class StructuredRewriteInstruction:
     items: List[str] = field(default_factory=list)
     reason: str = ""
     confidence: float = 0.0
+    source_field: str = ""
+    llm_target_section: str = ""
+    section_override_reason: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -744,6 +747,9 @@ class StructuredRewriteInstruction:
             "items": list(self.items),
             "reason": self.reason,
             "confidence": self.confidence,
+            "source_field": self.source_field,
+            "llm_target_section": self.llm_target_section,
+            "section_override_reason": self.section_override_reason,
         }
 
 
@@ -779,6 +785,7 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
         self._source_cv_text = cv_text or ""
         self._user_additional_data = dict(user_additional_data or {})
         normalized_suggestions: List[Dict[str, Any]] = []
+        strong_section_by_id: Dict[str, Dict[str, str]] = {}
         for index, suggestion in enumerate(accepted_suggestions):
             if not isinstance(suggestion, dict):
                 continue
@@ -805,10 +812,17 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
             ).strip()
             if not new_text:
                 continue
+            source_field = self._source_field_from_id(suggestion_id)
+            strong_target = self._strong_section_for_source(source_field, target_section)
             items = suggestion.get("items") if isinstance(suggestion.get("items"), list) else []
+            if source_field:
+                strong_section_by_id[suggestion_id] = {
+                    "source_field": source_field,
+                    "target_section": strong_target,
+                }
             normalized_suggestions.append({
                 "suggestion_id": suggestion_id,
-                "target_section": target_section,
+                "target_section": strong_target,
                 "action": str(
                     suggestion.get("action")
                     or ("append" if not old_text_hint else "replace")
@@ -817,6 +831,7 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
                 "new_text": new_text,
                 "items": [str(item) for item in items if str(item).strip()],
                 "reason": str(suggestion.get("description") or suggestion.get("reason") or "").strip(),
+                "source_field": source_field,
             })
 
         prompt = f"""
@@ -845,15 +860,31 @@ Dati aggiuntivi utente:
                     for item in raw_instructions:
                         if not isinstance(item, dict):
                             continue
+                        suggestion_id = str(item.get("suggestion_id") or "")
+                        llm_target = str(item.get("target_section") or "")
+                        strong = strong_section_by_id.get(suggestion_id)
+                        final_target = strong["target_section"] if strong else llm_target
+                        source_field = strong.get("source_field", "") if strong else ""
+                        override_reason = ""
+                        if strong and canonical_section(llm_target) != canonical_section(final_target):
+                            override_reason = "hint forte dal frontend: la sezione proposta dall'LLM e stata ignorata"
+                            print(
+                                "[CV-OPT DEBUG] structured section override: "
+                                f"source_field={source_field}, final_target={final_target}, "
+                                f"llm_target={llm_target}, reason={override_reason}"
+                            )
                         instructions.append(StructuredRewriteInstruction(
-                            suggestion_id=str(item.get("suggestion_id") or ""),
-                            target_section=str(item.get("target_section") or ""),
+                            suggestion_id=suggestion_id,
+                            target_section=final_target,
                             action=str(item.get("action") or "replace").strip() or "replace",
                             old_text_hint=str(item.get("old_text_hint") or ""),
                             new_text=str(item.get("new_text") or ""),
                             items=[str(x) for x in (item.get("items") if isinstance(item.get("items"), list) else []) if str(x).strip()],
                             reason=str(item.get("reason") or ""),
                             confidence=float(item.get("confidence") or 0.0),
+                            source_field=source_field,
+                            llm_target_section=llm_target,
+                            section_override_reason=override_reason,
                         ))
             except Exception as exc:
                 print(f"Generazione istruzioni strutturate non disponibile: {exc}")
@@ -869,6 +900,9 @@ Dati aggiuntivi utente:
                     items=suggestion["items"],
                     reason=suggestion["reason"],
                     confidence=0.5,
+                    source_field=suggestion.get("source_field", ""),
+                    llm_target_section="",
+                    section_override_reason="",
                 ))
         return self._sanitize_structured_instructions(
             instructions,
@@ -901,57 +935,24 @@ Dati aggiuntivi utente:
         # Le info extra confermate dall'utente possono creare nuove sezioni anche se assenti nell'originale.
         user_provided_sections: set[str] = set()
         if isinstance(user_additional_data, dict):
-            field_to_section = {
-                "experiences": "esperienze",
-                "projects": "progetti",
-                "certifications": "certificazioni",
-                "languages": "lingue",
-                "education": "formazione",
-                "technical_skills": "hard_skills",
-                "tools": "hard_skills",
-                "soft_skills": "soft_skills",
-                "measurable_results": (
-                    "progetti"
-                    if str(user_additional_data.get("projects") or "").strip()
-                    else "attivita rilevanti"
-                ),
-                "company_role_notes": "profilo",
-                "additional_notes": "attivita rilevanti",
-            }
-            for field_name, section_name in field_to_section.items():
-                if str(user_additional_data.get(field_name) or "").strip():
+            for field_name, raw_value in user_additional_data.items():
+                if field_name in {"adaptation_answers", "confirmed_skills"}:
+                    continue
+                if not isinstance(raw_value, str) or not raw_value.strip():
+                    continue
+                section_key = additional_field_section_key(field_name)
+                section_name = self._pipeline_section_from_key(section_key or "")
+                if section_name:
                     user_provided_sections.add(section_name)
             answers = user_additional_data.get("adaptation_answers") or []
             if isinstance(answers, list):
-                category_to_section = {
-                    "experiences": "esperienze",
-                    "esperienze": "esperienze",
-                    "projects": "progetti",
-                    "progetti": "progetti",
-                    "certifications": "certificazioni",
-                    "certificazioni": "certificazioni",
-                    "languages": "lingue",
-                    "lingue": "lingue",
-                    "education": "formazione",
-                    "formazione": "formazione",
-                    "technical_skills": "hard_skills",
-                    "tools": "hard_skills",
-                    "soft_skills": "soft_skills",
-                    "measurable_results": (
-                        "progetti"
-                        if str(user_additional_data.get("projects") or "").strip()
-                        else "attivita rilevanti"
-                    ),
-                    "company_role_notes": "profilo",
-                    "additional_notes": "attivita rilevanti",
-                }
                 for ans in answers:
                     if not isinstance(ans, dict):
                         continue
                     if not str(ans.get("answer") or "").strip():
                         continue
-                    cat = str(ans.get("category") or "").strip().lower()
-                    section_name = category_to_section.get(cat)
+                    section_key = additional_field_section_key(str(ans.get("category") or ""))
+                    section_name = self._pipeline_section_from_key(section_key or "")
                     if section_name:
                         user_provided_sections.add(section_name)
             confirmed_skills = user_additional_data.get("confirmed_skills") or []
@@ -1002,7 +1003,17 @@ Dati aggiuntivi utente:
                 items=list(instruction.items),
                 reason=instruction.reason,
                 confidence=instruction.confidence,
+                source_field=instruction.source_field,
+                llm_target_section=instruction.llm_target_section,
+                section_override_reason=instruction.section_override_reason,
             ))
+            print(
+                "[CV-OPT DEBUG] structured instruction sanitized: "
+                f"source_field={instruction.source_field or '-'}, "
+                f"target_final={instruction.target_section}, "
+                f"llm_target={instruction.llm_target_section or '-'}, "
+                f"override_reason={instruction.section_override_reason or '-'}"
+            )
         return cleaned
 
     def _confirmed_skill_names(self, user_data: Dict[str, Any]) -> List[str]:
@@ -1012,6 +1023,51 @@ Dati aggiuntivi utente:
             if name.strip():
                 names.append(name.strip())
         return names
+
+    def _source_field_from_id(self, suggestion_id: str) -> str:
+        raw = str(suggestion_id or "")
+        patterns = (
+            r"user_box_([a-z_]+)_\d+",
+            r"user_additional_answer_\d+_\d+_([a-z_]+)",
+            r"confirmed_([a-z_]+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, raw)
+            if match:
+                return (match.group(1) or "").strip("_")
+        return ""
+
+    def _strong_section_for_source(self, source_field: str, fallback_section: str) -> str:
+        section_key = additional_field_section_key(source_field)
+        if not section_key:
+            return fallback_section
+        return self._display_section_from_key(section_key, fallback_section)
+
+    def _pipeline_section_from_key(self, section_key: str, fallback: str = "") -> str:
+        return {
+            "profile": "profilo",
+            "experience": "esperienze",
+            "education": "formazione",
+            "hard_skills": "hard_skills",
+            "soft_skills": "soft_skills",
+            "languages": "lingue",
+            "projects": "progetti",
+            "certifications": "certificazioni",
+            "contacts": "contatti",
+        }.get(section_key, fallback)
+
+    def _display_section_from_key(self, section_key: str, fallback: str = "") -> str:
+        return {
+            "profile": "PROFILO",
+            "experience": "ESPERIENZE PROFESSIONALI",
+            "education": "FORMAZIONE",
+            "hard_skills": "COMPETENZE TECNICHE",
+            "soft_skills": "SOFT SKILLS",
+            "languages": "LINGUE",
+            "projects": "PROGETTI",
+            "certifications": "CERTIFICAZIONI",
+            "contacts": "CONTATTI",
+        }.get(section_key, fallback)
 
     def _user_note_texts(self, user_data: Dict[str, Any]) -> List[str]:
         notes: List[str] = []
@@ -1067,12 +1123,57 @@ Dati aggiuntivi utente:
         seen = set()
         for raw_line in re.split(r"\n+|(?<=[.!?])\s+", text or ""):
             line = re.sub(r"\s+", " ", raw_line).strip(" -")
+            line = self._normalize_certification_line(line)
             key = normalize_text(line)
             if not line or not key or key in seen:
                 continue
             seen.add(key)
             rows.append(line.rstrip("."))
         return "\n".join(rows)
+
+    def _normalize_certification_line(self, line: str) -> str:
+        cleaned = line or ""
+        language_typos = {
+            r"\bfrance[sc]e\b": "Francese",
+            r"\bfrancesce\b": "Francese",
+            r"\bfrancesee\b": "Francese",
+            r"\bingles[eai]\b": "Inglese",
+            r"\bspagnollo\b": "Spagnolo",
+            r"\btedescoo\b": "Tedesco",
+        }
+        for pattern, replacement in language_typos.items():
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        plain = normalize_text(cleaned)
+        level_match = re.search(r"\b([abc][12])\b", plain)
+        provider_aliases = {
+            "cambridge": "Cambridge",
+            "ielts": "IELTS",
+            "toefl": "TOEFL",
+            "dele": "DELE",
+            "delf": "DELF",
+            "dalf": "DALF",
+            "goethe": "Goethe",
+        }
+        provider = next((label for marker, label in provider_aliases.items() if marker in plain), "")
+        if level_match and provider:
+            language = next(
+                (
+                    label
+                    for marker, label in {
+                        "francese": "Francese",
+                        "inglese": "Inglese",
+                        "spagnolo": "Spagnolo",
+                        "tedesco": "Tedesco",
+                        "italiano": "Italiano",
+                    }.items()
+                    if marker in plain
+                ),
+                "linguistica",
+            )
+            return f"Certificazione {language} {level_match.group(1).upper()} {provider}"
+        if level_match and "certific" in plain:
+            return f"Certificazione linguistica {level_match.group(1).upper()}"
+        return cleaned
 
     def _format_prose_lines(self, text: str) -> str:
         rows: List[str] = []
@@ -1151,7 +1252,7 @@ Dati aggiuntivi utente:
             return ""
         if len(lines) == 1:
             single = lines[0].rstrip(".")
-            return f"Progetto personale\n{single[:1].upper() + single[1:]}."
+            return f"{self._project_title_from_text(single)}\n{single[:1].upper() + single[1:]}."
 
         rows: List[str] = []
         index = 0
@@ -1160,7 +1261,7 @@ Dati aggiuntivi utente:
             plain = normalize_text(title)
             if not plain.startswith(("progetto ", "project ", "tesi ")):
                 if len(plain.split()) <= 7 and len(title) <= 70:
-                    rows.append(f"Progetto personale\n{title[:1].upper() + title[1:].rstrip('.')}." )
+                    rows.append(f"{self._project_title_from_text(title)}\n{title[:1].upper() + title[1:].rstrip('.')}." )
                 index += 1
                 continue
             if index + 1 >= len(lines):
@@ -1176,6 +1277,17 @@ Dati aggiuntivi utente:
             rows.extend([title, description.rstrip(".") + "."])
             index += 2
         return "\n".join(rows).strip()
+
+    def _project_title_from_text(self, text: str) -> str:
+        cleaned = re.sub(
+            r"(?i)^\s*(progetto|project)\s+(personale|accademico|universitario|professionale)?\s*[:/-]?\s*",
+            "",
+            text or "",
+        ).strip()
+        cleaned = re.sub(r"(?i)^\s*sviluppo\s+di\s+", "", cleaned).strip()
+        words = cleaned.split()
+        title = " ".join(words[:5]).strip(" .,:;-") or "Progetto"
+        return title[:1].upper() + title[1:]
 
     def _fix_common_grammar(self, text: str) -> str:
         text = self._repair_mojibake(text)
@@ -1988,7 +2100,8 @@ Dati aggiuntivi utente:
             new_p = OxmlElement("w:p")
             anchor_paragraph._p.addprevious(new_p)
             paragraph = Paragraph(new_p, anchor_paragraph._parent)
-            paragraph.text = text
+            self._copy_paragraph_format(anchor_paragraph, paragraph)
+            self._replace_paragraph_preserving_style(paragraph, text)
             elements.append(paragraph)
         if not elements:
             return
@@ -1998,18 +2111,8 @@ Dati aggiuntivi utente:
             self._style_section_line(paragraph, section_name, index)
 
     def _style_section_line(self, paragraph, section_name: str, line_index: int) -> None:
-        if canonical_section(section_name) != "progetti":
-            return
-        from docx.shared import Pt
-
-        is_title = line_index % 2 == 0
-        if not paragraph.runs:
-            paragraph.add_run("")
-        for run in paragraph.runs:
-            run.bold = is_title
-        paragraph.paragraph_format.keep_with_next = is_title
-        paragraph.paragraph_format.space_before = Pt(5 if is_title else 0)
-        paragraph.paragraph_format.space_after = Pt(2 if is_title else 5)
+        if canonical_section(section_name) == "progetti" and line_index % 2 == 0:
+            paragraph.paragraph_format.keep_with_next = True
 
     def _find_best_section_anchor(self, document, target: str, sections_detected: List[str]):
         contexts = self._paragraph_contexts(document)
@@ -2115,11 +2218,7 @@ Dati aggiuntivi utente:
     def _make_heading_like(self, paragraph) -> None:
         if not paragraph.runs:
             paragraph.add_run("")
-        for run in paragraph.runs:
-            try:
-                run.bold = True
-            except Exception:
-                pass
+        paragraph.paragraph_format.keep_with_next = True
 
     def _replace_paragraph_preserving_style(self, paragraph, replacement: str) -> None:
         # Gestione hyperlink: se il replacement contiene il testo gia' presente
@@ -2260,8 +2359,14 @@ Dati aggiuntivi utente:
         return re.sub(r"\s+", " ", " ".join(kept)).strip()
 
     def _unexpected_sections(self, original_text: str, final_text: str) -> List[str]:
-        original_sections = set(self.parser.section_text_map(original_text).keys())
-        final_sections = set(self.parser.section_text_map(final_text).keys())
+        original_sections = {
+            canonical_section(section)
+            for section in self.parser.section_text_map(original_text).keys()
+        }
+        final_sections = {
+            canonical_section(section)
+            for section in self.parser.section_text_map(final_text).keys()
+        }
         return sorted(section for section in final_sections - original_sections if section not in {"intestazione", "contenuto"})
 
     def _insert_paragraph_after(self, paragraph, text: str, source_format=None):
@@ -2270,11 +2375,11 @@ Dati aggiuntivi utente:
         new_p = OxmlElement("w:p")
         paragraph._p.addnext(new_p)
         new_paragraph = Paragraph(new_p, paragraph._parent)
-        new_paragraph.text = text
         if source_format is None:
             source_format = paragraph
         if source_format is not None:
             self._copy_paragraph_format(source_format, new_paragraph)
+        self._replace_paragraph_preserving_style(new_paragraph, text)
         return new_paragraph
 
     def _extract_docx_text_bytes(self, file_bytes: bytes) -> str:

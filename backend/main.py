@@ -49,6 +49,7 @@ from services.cv_optimizer import (
 )
 from services.cv_optimizer.section_catalog import (
     SECTION_ALIASES as SHARED_CV_SECTION_ALIASES,
+    additional_field_section_key,
     canonical_section_key,
     normalize_section_title,
 )
@@ -6551,11 +6552,8 @@ Schema:
             ))
             seen_fragments.add(("LINGUE", normalize_plain_text(cleaned_fragment)))
             return
-        section, category = infer_extra_content_section(cleaned_fragment)
-        print(
-            f"[EXTRA-INFO] fragment='{cleaned_fragment[:120]}' "
-            f"-> inferita section={section!r}, category={category!r}, hint={category_hint!r}"
-        )
+        inferred_section, inferred_category = infer_extra_content_section(cleaned_fragment)
+        section, category = inferred_section, inferred_category
         if normalized_hint in {"technical skills", "technical_skills", "tools"}:
             section, category = "COMPETENZE TECNICHE", "skill"
         elif normalized_hint in {"soft skills", "soft_skills"}:
@@ -6566,17 +6564,21 @@ Schema:
             section, category = "LINGUE", "languages"
         elif normalized_hint in {"company role notes", "company_role_notes"}:
             section, category = "PROFILO", "profile"
-        elif normalized_hint in {"experiences", "esperienze"}:
-            if any(term in fragment_plain for term in [
-                "azienda", "cliente", "lavoro", "lavorato", "ho lavorato",
-                "tirocinio", "stage", "impiego", "presso", "ruolo",
-            ]):
-                section, category = "ESPERIENZE PROFESSIONALI", "experience"
-            elif any(term in fragment_plain for term in ["progetto", "project", "tesi"]):
-                section, category = "PROGETTI", "project"
-            else:
-                section, category = "ATTIVITA RILEVANTI", "extra_page"
-        elif normalized_hint in {"measurable results", "measurable_results"}:
+        else:
+            mapped_section_key = additional_field_section_key(category_hint)
+            mapped_sections = {
+                "experience": ("ESPERIENZE PROFESSIONALI", "experience"),
+                "projects": ("PROGETTI", "project"),
+                "certifications": ("CERTIFICAZIONI", "certification"),
+                "languages": ("LINGUE", "languages"),
+                "education": ("FORMAZIONE", "education"),
+                "hard_skills": ("COMPETENZE TECNICHE", "skill"),
+                "soft_skills": ("SOFT SKILLS", "soft_skill"),
+                "profile": ("PROFILO", "profile"),
+            }
+            if mapped_section_key in mapped_sections:
+                section, category = mapped_sections[mapped_section_key]
+        if normalized_hint in {"measurable results", "measurable_results"}:
             has_project_context = bool(str(
                 (user_additional_data or {}).get("projects") or ""
             ).strip()) or any(term in fragment_plain for term in [
@@ -6650,12 +6652,24 @@ Schema:
                 return
         elif category in {"education", "certification", "languages"}:
             professional_text = professionalize_user_fact(cleaned_fragment)
+            if category == "certification":
+                professional_text = re.sub(r"\bFrancece\b", "Francese", professional_text, flags=re.IGNORECASE)
+                cert_plain = normalize_plain_text(professional_text)
+                level_match = re.search(r"\b([abc][12])\b", cert_plain)
+                if level_match and "cambridge" in cert_plain:
+                    language = "Francese" if "francese" in cert_plain else "linguistica"
+                    professional_text = f"Certificazione {language} {level_match.group(1).upper()} Cambridge."
             if not professional_text:
                 return
         else:
             professional_text = build_professional_extra_text({"additional_notes": cleaned_fragment}, role)
             if not professional_text:
                 return
+        print(
+            f"[EXTRA-INFO] source_field={category_hint or '-'} "
+            f"inferred_section={inferred_section!r}, final_section={section!r}, "
+            f"category={category!r}, fragment='{cleaned_fragment[:120]}'"
+        )
         key = (section, normalize_plain_text(cleaned_fragment))
         if key in seen_fragments:
             return
@@ -6682,22 +6696,20 @@ Schema:
             if not fragments:
                 fragments = [answer]
             for fragment_index, fragment in enumerate(fragments):
+                safe_category_hint = re.sub(r"[^a-z0-9_]+", "_", normalize_plain_text(category_hint)).strip("_")
                 add_fragment(
                     fragment,
-                    f"user_additional_answer_{index}_{fragment_index}",
+                    f"user_additional_answer_{index}_{fragment_index}_{safe_category_hint or 'additional_notes'}",
                     "Risposta aggiuntiva confermata dall'utente trasformata in contenuto CV.",
                     category_hint,
                 )
 
-    box_fields = {
-        "experiences": "experiences",
-        "projects": "projects",
-        "measurable_results": "measurable_results",
-        "certifications": "certifications",
-        "company_role_notes": "company_role_notes",
-        "additional_notes": "",
-    }
-    for field_name, category_hint in box_fields.items():
+    for field_name, raw_value in (user_additional_data or {}).items():
+        if field_name in {"adaptation_answers", "confirmed_skills"}:
+            continue
+        if not isinstance(raw_value, str):
+            continue
+        category_hint = field_name if additional_field_section_key(field_name) else ""
         value = str((user_additional_data or {}).get(field_name) or "").strip()
         if not value:
             continue
@@ -6951,6 +6963,8 @@ def build_confirmed_skill_rewrite_instructions(
             name = str(item or "").strip()
             detail = ""
             category = "hard_skill"
+        if category == "keyword":
+            category = "hard skill"
         if category not in {"hard skill", "soft skill", "tool", "language"}:
             continue
         if (
@@ -7893,8 +7907,6 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
     for key, value in (data or {}).items():
         if key in {"adaptation_answers", "confirmed_skills"}:
             continue
-        if key in {"technical_skills", "soft_skills", "tools"}:
-            continue
         if not isinstance(value, str) or not value.strip():
             continue
         cleaned = value.strip()
@@ -7946,6 +7958,8 @@ def sanitize_cv_additional_data(data: Optional[Dict[str, Any]]) -> tuple[Dict[st
             continue
         if not name:
             continue
+        if category == "keyword":
+            category = "hard_skill"
         if item_type != "skillConfirmation" or category not in {
             "hard_skill", "soft_skill", "tool", "language",
         }:
@@ -9011,6 +9025,43 @@ KNOWN_COMPANIES = {
     "lamborghini", "barilla", "luxottica", "gucci", "prada"
 }
 
+KNOWN_COMPANY_DISPLAY_NAMES = {
+    "google": "Google",
+    "amazon": "Amazon",
+    "microsoft": "Microsoft",
+    "apple": "Apple",
+    "meta": "Meta",
+    "facebook": "Facebook",
+    "netflix": "Netflix",
+    "tesla": "Tesla",
+    "ibm": "IBM",
+    "oracle": "Oracle",
+    "accenture": "Accenture",
+    "deloitte": "Deloitte",
+    "pwc": "PwC",
+    "kpmg": "KPMG",
+    "ey": "EY",
+    "linkedin": "LinkedIn",
+    "spotify": "Spotify",
+    "salesforce": "Salesforce",
+    "adobe": "Adobe",
+    "sap": "SAP",
+    "siemens": "Siemens",
+    "enel": "Enel",
+    "eni": "Eni",
+    "intesa sanpaolo": "Intesa Sanpaolo",
+    "unicredit": "UniCredit",
+    "poste italiane": "Poste Italiane",
+    "telecom": "Telecom",
+    "tim": "TIM",
+    "ferrari": "Ferrari",
+    "lamborghini": "Lamborghini",
+    "barilla": "Barilla",
+    "luxottica": "Luxottica",
+    "gucci": "Gucci",
+    "prada": "Prada",
+}
+
 COMPANY_SECTOR_HINTS = {
     "technology": {
         "google", "amazon", "microsoft", "apple", "meta", "facebook",
@@ -9073,6 +9124,26 @@ def normalize_plain_text(value: Optional[str]) -> str:
     value = re.sub(r"https?://\S+", " ", value)
     value = re.sub(r"[^a-z0-9\s&.+#/-]", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def canonical_known_company_name(company: Optional[str]) -> str:
+    cleaned = normalize_plain_text(company)
+    if not cleaned:
+        return ""
+    if cleaned in KNOWN_COMPANY_DISPLAY_NAMES:
+        return KNOWN_COMPANY_DISPLAY_NAMES[cleaned]
+
+    compact = re.sub(r"[^a-z0-9]", "", cleaned)
+    matches = [
+        canonical
+        for canonical in KNOWN_COMPANY_DISPLAY_NAMES
+        if len(compact) >= 4
+        and re.sub(r"[^a-z0-9]", "", canonical).startswith(compact)
+    ]
+    if len(matches) == 1:
+        return KNOWN_COMPANY_DISPLAY_NAMES[matches[0]]
+
+    return str(company or "").strip()
 
 
 def clean_job_role_title(value: Optional[str]) -> str:
@@ -9375,11 +9446,13 @@ def validate_job_link(link: Optional[str], company: str, role: str) -> Dict:
 
 def verify_company_exists(company: str) -> Dict:
     cleaned = normalize_plain_text(company)
+    canonical_name = canonical_known_company_name(company)
     if is_low_quality_text(cleaned, min_chars=3, min_words=1):
         return {
             "exists": False,
             "confidence": 0,
             "sources": [],
+            "normalized_name": "",
             "message": "Non sono riuscito a verificare l'esistenza dell'azienda inserita. Controlla che il nome sia corretto.",
         }
 
@@ -9400,6 +9473,7 @@ def verify_company_exists(company: str) -> Dict:
             "exists": plausible,
             "confidence": 55 if plausible else 20,
             "sources": [],
+            "normalized_name": canonical_name if plausible else "",
             "message": (
                 "Azienda plausibile in base ai controlli locali. Configura TAVILY_API_KEY per la verifica web."
                 if plausible
@@ -9429,6 +9503,7 @@ def verify_company_exists(company: str) -> Dict:
             "exists": cleaned in KNOWN_COMPANIES or len(cleaned) >= 3,
             "confidence": 45,
             "sources": [],
+            "normalized_name": canonical_name,
             "message": "Verifica web non disponibile al momento; ho applicato un controllo locale di plausibilita.",
         }
 
@@ -9453,6 +9528,7 @@ def verify_company_exists(company: str) -> Dict:
         "exists": exists,
         "confidence": clamp_score(score),
         "sources": sources[:4],
+        "normalized_name": canonical_name if exists else "",
         "message": (
             "Azienda verificata con fonti web coerenti."
             if exists
@@ -9521,6 +9597,7 @@ def validate_job_input(
         "exists": False,
         "confidence": 0,
         "sources": [],
+        "normalized_name": "",
     }
     if effective_company:
         if is_low_quality_text(effective_company, min_chars=3, min_words=1):
@@ -9560,6 +9637,8 @@ def validate_job_input(
     else:
         warnings.extend(coherence_warnings)
 
+    normalized_company = company_check.get("normalized_name") or effective_company
+
     is_valid = not errors
     return {
         "is_valid": is_valid,
@@ -9573,7 +9652,7 @@ def validate_job_input(
         "normalized_link": link_validation.get("normalized_link", ""),
         "required_skills": normalized_skills,
         "normalized_role": effective_role,
-        "normalized_company": effective_company,
+        "normalized_company": normalized_company,
         "quick_method_used": bool(description and quick_context["is_valid"]),
         "message": "I dati inseriti sono validi." if is_valid else "Correggi i campi evidenziati prima di continuare.",
     }
@@ -10513,7 +10592,13 @@ ROLE_KEYWORD_GROUPS.update({
         ("KPI", ["kpi"]),
         ("dbt", ["dbt"]),
     ],
-});
+})
+
+for role_family in list(ROLE_SKILL_LIBRARY):
+    spaced_role_family = role_family.replace("_", " ")
+    if "_" in role_family and spaced_role_family in ROLE_KEYWORD_GROUPS:
+        ROLE_KEYWORD_GROUPS[role_family] = ROLE_KEYWORD_GROUPS[spaced_role_family]
+        ROLE_KEYWORD_GROUPS.pop(spaced_role_family, None)
 
 # --- SEZIONE 5 ---
 CLOUD_ENGINEER_KEYWORDS_TO_CONFIRM = ["Kubernetes", "Terraform", "Docker", "AWS", "Azure", "Google Cloud", "Prometheus", "Grafana"]
@@ -10579,6 +10664,18 @@ def is_cv_noise_keyword(value: str) -> bool:
 
 def infer_role_family(role: str, description: str = "", required_skills: str = "") -> str:
     target_plain = normalize_plain_text(f"{role} {description} {required_skills}")
+    for family in ROLE_SKILL_LIBRARY:
+        family_plain = normalize_plain_text(family)
+        family_spaced_plain = normalize_plain_text(family.replace("_", " "))
+        if target_plain in {family_plain, family_spaced_plain}:
+            return family
+    for family in ROLE_SKILL_LIBRARY:
+        family_plain = normalize_plain_text(family)
+        family_spaced_plain = normalize_plain_text(family.replace("_", " "))
+        if family_plain and family_plain in target_plain:
+            return family
+        if family_spaced_plain and family_spaced_plain in target_plain:
+            return family
     if any(term in target_plain for term in ["game design", "game designer", "level design", "unity", "unreal"]):
         return "game design"
     if any(term in target_plain for term in ["project manager", "project management", "gestione progetti", "pm"]):
@@ -10589,10 +10686,6 @@ def infer_role_family(role: str, description: str = "", required_skills: str = "
         return "data scientist"
     if any(term in target_plain for term in ["data analyst", "analista dati", "analisi dati", "data analysis", "business intelligence"]):
         return "data analyst"
-    for family in ROLE_SKILL_LIBRARY:
-        family_plain = normalize_plain_text(family)
-        if family_plain and family_plain in target_plain:
-            return family
     if any(term in target_plain for term in ["software engineer", "software developer", "sviluppatore"]):
         return "software engineer"
     if any(term in target_plain for term in ["frontend", "ui", "ux", "designer"]):
@@ -10874,7 +10967,7 @@ def filter_confirmed_skill_suggestions(
         for item in allowed_skill_suggestions
         if isinstance(item, dict)
         and item.get("type") == "skillConfirmation"
-        and item.get("category") in {"hard_skill", "soft_skill", "tool", "language"}
+        and item.get("category") in {"hard_skill", "soft_skill", "tool", "language", "keyword"}
     }
     filtered = []
     for item in confirmed_skills:
@@ -10886,7 +10979,10 @@ def filter_confirmed_skill_suggestions(
         if (
             allowed
             and str(item.get("id") or "").strip() == allowed["id"]
-            and str(item.get("category") or "").strip() == allowed["category"]
+            and (
+                str(item.get("category") or "").strip() == allowed["category"]
+                or {str(item.get("category") or "").strip(), allowed["category"]} == {"keyword", "hard_skill"}
+            )
             and str(item.get("status") or "").strip().lower() in {"accepted", "confirmed"}
             and not skill_semantically_present(cv_text, name)
         ):
@@ -13278,8 +13374,11 @@ def optimize_user_cv(
     )
     if confirmed_from_suggestions:
         user_additional_data["confirmed_skills"] = confirmed_from_suggestions
-    else:
-        user_additional_data.pop("confirmed_skills", None)
+    elif user_additional_data.get("confirmed_skills"):
+        print(
+            "[CV-OPT DEBUG] confirmed_skills kept after sanitize: "
+            "nessun match esatto con le suggestion correnti, uso payload confermato dall'utente."
+        )
 
     # === DEBUG cv-optimize: risultati sanitize ===
     try:
@@ -13444,8 +13543,11 @@ def optimize_user_cv(
             for i, instruction in enumerate(structured_instructions[:5]):
                 print(
                     f"DEBUG DOCX instruction {i}: suggestion_id={instruction.suggestion_id}, "
-                    f"target_section={instruction.target_section}, action={instruction.action}, "
-                    f"old_text_hint={(instruction.old_text_hint or '')[:100]}"
+                    f"source_field={getattr(instruction, 'source_field', '') or '-'}, "
+                    f"target_section={instruction.target_section}, "
+                    f"llm_target={getattr(instruction, 'llm_target_section', '') or '-'}, "
+                    f"override_reason={getattr(instruction, 'section_override_reason', '') or '-'}, "
+                    f"action={instruction.action}, old_text_hint={(instruction.old_text_hint or '')[:100]}"
                 )
 
             apply_result = docx_pipeline.apply_instructions_to_docx(original_file_bytes, structured_instructions)

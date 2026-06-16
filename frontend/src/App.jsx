@@ -3317,7 +3317,7 @@ function App() {
     ...optimizedCvsList.map((item) => item.target_company),
   ]
     .map((item) => String(item || "").trim())
-    .filter((item) => item && item.toLowerCase() !== "Azienda Generica")
+    .filter((item) => item && item.toLowerCase() !== "azienda generica")
     .filter((item, index, list) =>
       list.findIndex((candidate) => candidate.toLowerCase() === item.toLowerCase()) === index
     );
