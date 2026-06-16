@@ -1,27 +1,9 @@
+import { useEffect, useMemo, useState } from "react";
+
 import "./App.css";
-
-function isPlausibleRole(value) {
-  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
-  const words = normalized.match(/[a-zà-ÿ0-9+#.-]+/gi) || [];
-  const genericValues = new Set([
-    "lavoro",
-    "ruolo",
-    "impiego",
-    "posto",
-    "qualsiasi lavoro",
-    "lavoro qualunque",
-    "da definire",
-  ]);
-  const sentenceTerms = /\b(voglio|vorrei|prepararmi|colloquio|intervista|candidarmi|cerco|azienda|presso)\b/i;
-
-  return (
-    normalized.length >= 4
-    && words.length >= 1
-    && words.length <= 6
-    && !genericValues.has(normalized)
-    && !sentenceTerms.test(normalized)
-  );
-}
+import { VALID_COMPANIES } from "./data/companies";
+import { matchCompany } from "./utils/companyValidation";
+import { VALID_ROLES, matchRole } from "./utils/roleValidation";
 
 function BuildingIcon() {
   return (
@@ -43,6 +25,14 @@ function BriefcaseIcon() {
   );
 }
 
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
 export default function PersonalizeExperience({
   company,
   onBack,
@@ -53,36 +43,89 @@ export default function PersonalizeExperience({
   isValidating = false,
   submitLabel = "Continua",
 }) {
+  const [roleInput, setRoleInput] = useState(role || "");
+  const [roleSelected, setRoleSelected] = useState(Boolean(role));
+  const [isRoleFocused, setIsRoleFocused] = useState(false);
+  const [roleTouched, setRoleTouched] = useState(false);
+  const [isCompanyFocused, setIsCompanyFocused] = useState(false);
+
+  useEffect(() => {
+    setRoleInput(role || "");
+    setRoleSelected(Boolean(role));
+  }, [role]);
+
   const normalizedCompany = company.trim();
-  const normalizedRole = role.trim();
-  const hasPlausibleRole = isPlausibleRole(normalizedRole);
+  const normalizedRole = roleInput.trim();
+  const roleMatch = useMemo(() => matchRole(roleInput, VALID_ROLES), [roleInput]);
+  const companyMatch = useMemo(() => matchCompany(company, VALID_COMPANIES), [company]);
+  const showRoleSuggestions = isRoleFocused && roleMatch.minLengthReached && roleMatch.suggestions.length > 0;
+  const showCompanySuggestions = isCompanyFocused && companyMatch.minLengthReached && companyMatch.suggestions.length > 0;
 
   const localErrors = {
-    description: hasPlausibleRole
-      ? ""
-      : "Inserisci almeno un ruolo target.",
-    company: !normalizedCompany || normalizedCompany.length > 2 ? "" : "Inserisci un nome azienda valido.",
-    role: (!normalizedRole || hasPlausibleRole)
-      ? ""
-      : "Inserisci solo il titolo del ruolo, non una frase sul colloquio.",
+    description: "",
+    role: "",
+    company: "",
   };
+
+  if (!roleSelected) {
+    if (roleTouched && normalizedRole) {
+      localErrors.role = "Seleziona un ruolo dalla lista";
+    } else if (roleTouched) {
+      localErrors.role = "Inserisci e seleziona un ruolo dalla lista";
+    } else {
+      localErrors.description = "Seleziona un ruolo dalla lista e inserisci un'azienda reale.";
+    }
+  }
+
+  if (!normalizedCompany) {
+    localErrors.company = "Inserisci il nome di un'azienda reale";
+  } else if (companyMatch.minLengthReached && !companyMatch.isValid) {
+    localErrors.company = "Inserisci il nome di un'azienda reale";
+  }
 
   const fieldErrors = {
     ...Object.fromEntries(Object.entries(localErrors).filter(([, value]) => value)),
     ...(validation.errors || {}),
   };
 
-  const hasRequiredContext = hasPlausibleRole;
-  const hasLocalValidFields = hasRequiredContext && !localErrors.company && !localErrors.role;
+  const hasLocalValidFields = roleSelected && companyMatch.isValid && !localErrors.role && !localErrors.company;
   const canSubmit = hasLocalValidFields && !isValidating;
 
   const handleSubmit = (event) => {
     if (!canSubmit) {
       event.preventDefault();
+      setRoleTouched(true);
       return;
     }
 
     onSubmit(event);
+  };
+
+  const handleRoleInput = (event) => {
+    const value = event.target.value;
+    setRoleInput(value);
+    setRoleSelected(false);
+    onChange("role", "");
+  };
+
+  const handleRoleSelect = (selectedRole) => {
+    setRoleInput(selectedRole);
+    setRoleSelected(true);
+    setRoleTouched(false);
+    setIsRoleFocused(false);
+    onChange("role", selectedRole);
+  };
+
+  const handleRoleBlur = () => {
+    window.setTimeout(() => {
+      setIsRoleFocused(false);
+      setRoleTouched(true);
+    }, 120);
+  };
+
+  const handleCompanySuggestionClick = (selectedCompany) => {
+    onChange("company", selectedCompany);
+    setIsCompanyFocused(false);
   };
 
   return (
@@ -97,21 +140,42 @@ export default function PersonalizeExperience({
           <div className="personalize-divider details-section-label">Dettagli specifici</div>
 
           {fieldErrors.description && <p className="field-error">{fieldErrors.description}</p>}
-          {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
           <p className="field-hint">
-            Puoi cercare anche solo per ruolo. Se inserisci anche un'azienda, controlleremo che sia valida.
+            Seleziona un ruolo dalla lista e inserisci un'azienda riconoscibile per procedere.
           </p>
 
           <label htmlFor="personalize-role">Ruolo</label>
-          <div className={`personalize-field ${fieldErrors.role || fieldErrors.coherence ? "input-error" : ""}`}>
+          <div className={`personalize-field personalize-select-field ${fieldErrors.role ? "input-error" : ""}`}>
             <BriefcaseIcon />
             <input
               id="personalize-role"
-              value={role}
-              onChange={(event) => onChange("role", event.target.value)}
+              value={roleInput}
+              onBlur={handleRoleBlur}
+              onChange={handleRoleInput}
+              onFocus={() => setIsRoleFocused(true)}
               placeholder="Es. UX Designer, Data Analyst, Software Engineer"
+              autoComplete="off"
             />
+            <span className="personalize-field-caret" aria-hidden="true">
+              <ChevronDownIcon />
+            </span>
+            {showRoleSuggestions && (
+              <div className="personalize-role-suggestions" role="listbox" aria-label="Suggerimenti ruolo">
+                {roleMatch.suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    className="personalize-role-suggestion"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => handleRoleSelect(suggestion)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
+          {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
 
           <label htmlFor="personalize-company">Azienda</label>
           <div className={`personalize-field ${fieldErrors.company ? "input-error" : ""}`}>
@@ -119,12 +183,30 @@ export default function PersonalizeExperience({
             <input
               id="personalize-company"
               value={company}
+              onBlur={() => window.setTimeout(() => setIsCompanyFocused(false), 120)}
               onChange={(event) => onChange("company", event.target.value)}
+              onFocus={() => setIsCompanyFocused(true)}
               placeholder="es. Google, TechFlow"
+              autoComplete="off"
             />
+            {showCompanySuggestions && (
+              <div className="personalize-role-suggestions" role="listbox" aria-label="Suggerimenti azienda">
+                {companyMatch.suggestions.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    className="personalize-role-suggestion"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => handleCompanySuggestionClick(suggestion)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-          
-          {fieldErrors.role && <p className="field-error">{fieldErrors.role}</p>}
+          {fieldErrors.company && <p className="field-error">{fieldErrors.company}</p>}
+
           {validation.message && (
             <p className={`job-validation-message ${validation.status}`}>
               {validation.message}
@@ -151,10 +233,10 @@ export default function PersonalizeExperience({
         <aside className="personalize-sidebar">
           <div className="personalize-sidebar-card">
             <span className="personalize-sidebar-kicker">Come funziona</span>
-            <h3>Più dettagli, migliore sarà il risultato</h3>
+            <h3>Piu dettagli, migliore sara il risultato</h3>
             <ul>
-              <li>Indica un ruolo professionale specifico.</li>
-              <li>Aggiungi l'azienda per rendere l'analisi più mirata.</li>
+              <li>Seleziona un ruolo professionale dalla lista suggerita.</li>
+              <li>Inserisci il nome di un'azienda reale per attivare la simulazione.</li>
             </ul>
           </div>
 
@@ -171,7 +253,7 @@ export default function PersonalizeExperience({
               <BuildingIcon />
               <span>
                 <small>Azienda</small>
-                <strong>{normalizedCompany || "Opzionale"}</strong>
+                <strong>{normalizedCompany || "Da definire"}</strong>
               </span>
             </div>
           </div>

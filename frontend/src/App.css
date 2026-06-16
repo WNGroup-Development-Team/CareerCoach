@@ -4107,6 +4107,63 @@ textarea {
   margin-bottom: 20px;
 }
 
+.personalize-role-suggestions {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #dce7f2;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 16px 34px rgba(15, 76, 129, 0.12);
+}
+
+.personalize-role-suggestion {
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: #f7fbff;
+  color: #35506a;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.personalize-role-suggestion:hover {
+  background: #ebf6ff;
+  color: #0f76a8;
+}
+
+.personalize-select-field input {
+  padding-right: 46px;
+}
+
+.personalize-field-caret {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 18px;
+  height: 18px;
+  transform: translateY(-50%);
+  color: #8da1b5;
+  pointer-events: none;
+}
+
+.personalize-field-caret svg {
+  position: static;
+  width: 18px;
+  height: 18px;
+  transform: none;
+  stroke: currentColor;
+}
+
 .personalize-field svg {
   position: absolute;
   top: 50%;
