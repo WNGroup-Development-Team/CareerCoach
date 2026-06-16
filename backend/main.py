@@ -871,9 +871,7 @@ def fetch_oauth_profile(provider: str, code: str) -> Dict:
         )
 
     token_data = token_response.json()
-
-    tokendata = token_response.json()
-    accesstoken = tokendata.get("access_token")
+    accesstoken = token_data.get("access_token")
     if not accesstoken:
         raise HTTPException(status_code=400, detail=f"Token OAuth non ricevuto dal provider.")
 
@@ -903,8 +901,8 @@ def fetch_oauth_profile(provider: str, code: str) -> Dict:
             "picture": profile.get("picture"),
             "locale": profile.get("locale"),
             "email_verified": bool(profile.get("email_verified")),
-      },
-    }
+    },
+}
 
 def find_or_create_oauth_user(cursor, provider: str, profile: Dict) -> int:
     oauth_profile_json = json.dumps(profile.get("oauth_profile") or {}, ensure_ascii=False)
