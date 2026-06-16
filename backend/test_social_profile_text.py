@@ -91,6 +91,22 @@ class SocialProfileTextTests(unittest.TestCase):
         self.assertEqual(result["failed_count"], 1)
         self.assertEqual(result["extracted_text"], "")
 
+    def test_ocr_failure_does_not_call_visual_fallbacks(self):
+        with (
+            patch.object(
+                main,
+                "extract_social_text_with_rapidocr",
+                side_effect=RuntimeError("rapidocr unavailable"),
+            ),
+            patch.object(main, "extract_social_text_with_ollama") as ollama_ocr,
+            patch.object(main, "extract_social_text_with_openai") as openai_ocr,
+        ):
+            result = main.extract_social_screenshot_texts([{"image_url": {"url": "data:image/png;base64,AA=="}}])
+
+        self.assertEqual(result["status"], "failed")
+        ollama_ocr.assert_not_called()
+        openai_ocr.assert_not_called()
+
     def test_classifies_cv_like_screenshot_as_invalid(self):
         result = main.classify_social_screenshot_text(
             "Curriculum Vitae\nEsperienze professionali\nFormazione\nCompetenze tecniche\nEmail"

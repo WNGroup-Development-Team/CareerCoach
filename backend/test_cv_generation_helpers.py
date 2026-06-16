@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from main import (
+    build_docx_rewrite_payloads,
     build_additional_rewrite_instructions,
     build_confirmed_skill_rewrite_instructions,
     call_rewrite_llm,
@@ -13,6 +14,24 @@ from services.cv_optimizer import RewriteInstruction
 
 
 class CvGenerationHelperTests(unittest.TestCase):
+    def test_build_docx_rewrite_payloads_keeps_skill_rewrites(self):
+        payloads = build_docx_rewrite_payloads([
+            RewriteInstruction(
+                section="HARD SKILLS",
+                original="Python, SQL",
+                replacement="Python, SQL, Power BI",
+                reason="Skill rilevante da evidenziare.",
+                category="skills",
+                source_id="accepted-skill-rewrite",
+            )
+        ])
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["target_section"], "HARD SKILLS")
+        self.assertEqual(payloads[0]["action"], "replace")
+        self.assertEqual(payloads[0]["old_text_hint"], "Python, SQL")
+        self.assertIn("Power BI", payloads[0]["new_text"])
+
     @patch("main.call_ollama")
     @patch("main.call_gemini")
     def test_rewrite_uses_gemini_then_falls_back_to_ollama(self, call_gemini, call_ollama):

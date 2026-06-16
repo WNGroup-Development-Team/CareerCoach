@@ -147,6 +147,14 @@ def create_docx_with_textbox(name, email):
 
 
 class CvValidationTests(unittest.TestCase):
+    def test_graduation_photo_description_is_not_blocked_as_ambiguous(self):
+        result = main.classify_cv_image_description(
+            "The image shows a person holding a diploma from Roma Tre University, wearing a laurel wreath."
+        )
+
+        self.assertFalse(result["blocked"])
+        self.assertEqual(result["categories"], [])
+
     def test_role_without_company_is_valid(self):
         result = main.validate_job_input(
             description="",

@@ -835,6 +835,40 @@ class ResumeDocxOptimizationPipeline(DocxPreserver):
                 "source_field": source_field,
             })
 
+        confirmed_skill_groups: Dict[str, List[str]] = {}
+        existing_skill_text = normalize_text(
+            " ".join(str(item.get("new_text") or "") for item in normalized_suggestions)
+        )
+        confirmed_skills = (user_additional_data or {}).get("confirmed_skills") or []
+        if isinstance(confirmed_skills, list):
+            for item in confirmed_skills:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("skill") or "").strip()
+                    category = normalize_text(str(item.get("category") or "hard_skill"))
+                else:
+                    name = str(item or "").strip()
+                    category = "hard_skill"
+                if not name:
+                    continue
+                if normalize_text(name) in existing_skill_text:
+                    continue
+                target_section = "SOFT SKILLS" if category in {"soft_skill", "soft skill"} else "COMPETENZE TECNICHE"
+                group = confirmed_skill_groups.setdefault(target_section, [])
+                if normalize_text(name) not in {normalize_text(existing) for existing in group}:
+                    group.append(name)
+
+        for target_section, skill_names in confirmed_skill_groups.items():
+            normalized_suggestions.append({
+                "suggestion_id": f"confirmed_{normalize_text(target_section).replace(' ', '_')}",
+                "target_section": target_section,
+                "action": "append",
+                "old_text_hint": "",
+                "new_text": " | ".join(skill_names),
+                "items": list(skill_names),
+                "reason": "Skill confermate dall'utente integrate nella sezione corretta.",
+                "source_field": "confirmed_skills",
+            })
+
         prompt = f"""
 Restituisci SOLO JSON valido con una chiave `instructions` che contenga una lista di istruzioni operative.
 Ogni istruzione deve avere: suggestion_id, target_section, action, old_text_hint, new_text, items.

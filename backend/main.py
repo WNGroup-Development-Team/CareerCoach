@@ -104,8 +104,6 @@ DEBUG_MODE = os.getenv("DEBUG", "false").strip().lower() in {"1", "true", "yes",
 # Default: the CV pipeline is deterministic/local, inspired by Resume Matcher/OpenResume.
 # Set these flags to true only if you explicitly want to use an external/local LLM
 # for the corresponding CV step. This prevents Groq/Ollama timeouts from blocking CV analysis.
-# When the chosen provider is Ollama local, enable the CV LLM flow by default unless
-# the user explicitly disabled it.
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -116,6 +114,7 @@ CV_LLM_ENABLED = _env_bool("CV_LLM_ENABLED", default=True)
 CV_EVALUATION_LLM_ENABLED = _env_bool("CV_EVALUATION_LLM_ENABLED", default=False)
 CV_REWRITE_LLM_ENABLED = _env_bool("CV_REWRITE_LLM_ENABLED", default=True)
 CV_QUALITY_LLM_ENABLED = _env_bool("CV_QUALITY_LLM_ENABLED", default=False)
+OLLAMA_TEXT_ENABLED = _env_bool("OLLAMA_TEXT_ENABLED", default=False)
 OAUTH_REDIRECT_BASE_URL = os.getenv("OAUTH_REDIRECT_BASE_URL", "http://localhost:8000")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -1230,14 +1229,20 @@ def call_groq(
     json_mode: bool = False,
 ) -> str:
     if LLM_PROVIDER == "ollama":
+        if not OLLAMA_TEXT_ENABLED:
+            print("LLM_PROVIDER=ollama ignorato per il testo: OLLAMA_TEXT_ENABLED=false, uso Groq.")
+            return _call_groq_impl(prompt, temperature, max_tokens, timeout, json_mode)
         return call_ollama(prompt, temperature, max_tokens, timeout, json_mode)
 
     if LLM_PROVIDER == "auto":
         try:
             return _call_groq_impl(prompt, temperature, max_tokens, timeout, json_mode)
         except GroqRateLimitError:
-            print("Groq non disponibile, uso Ollama locale come fallback.")
-            return call_ollama(prompt, temperature, max_tokens, timeout, json_mode)
+            if OLLAMA_TEXT_ENABLED:
+                print("Groq non disponibile, uso Ollama locale come fallback.")
+                return call_ollama(prompt, temperature, max_tokens, timeout, json_mode)
+            print("Groq non disponibile e fallback testuale Ollama disabilitato.")
+            raise
 
     return _call_groq_impl(prompt, temperature, max_tokens, timeout, json_mode)
 
@@ -1259,7 +1264,7 @@ def call_structured_llm(
     order = [
         item
         for item in (preferred_order or ["groq", "ollama"])
-        if item in {"gemini", "groq", "ollama"}
+        if item in {"gemini", "groq", "ollama"} and (item != "ollama" or OLLAMA_TEXT_ENABLED)
     ]
     attempts = []
     for source in order:
@@ -3475,7 +3480,10 @@ def classify_cv_image_description(description: str) -> Dict[str, Any]:
     allowed_markers = (
         "portrait", "headshot", "professional photo", "person", "man", "woman",
         "logo", "icon", "graphic", "chart", "diagram", "ritratto", "persona",
-        "uomo", "donna", "grafico", "diagramma",
+        "uomo", "donna", "grafico", "diagramma", "graduation", "graduate",
+        "graduation photo", "graduation portrait", "academic portrait", "diploma",
+        "degree", "cap and gown", "laurel wreath", "ceremony", "laurea",
+        "corona d'alloro", "tocco", "cerimonia",
     )
     if not categories and not any(marker in normalized for marker in allowed_markers):
         categories.append("contenuto ambiguo")
@@ -3503,8 +3511,9 @@ def analyze_cv_image_with_ollama(image_input: Dict[str, Any]) -> Dict[str, Any]:
             "sangue o ferite, armi, droghe, immagine non pertinente, contenuto ambiguo. "
             "Block animals including dogs and cats; nudity or sexual content; violence, gore, "
             "weapons or drugs; unrelated photos such as food, landscapes, vehicles or holidays; "
-            "and anything ambiguous. Allow only a normal professional portrait of the candidate "
-            "or harmless resume graphics such as logos, icons, charts and diagrams."
+            "and anything ambiguous. Allow a normal professional portrait of the candidate, "
+            "a relevant graduation or academic ceremony photo of the candidate, or harmless "
+            "resume graphics such as logos, icons, charts and diagrams."
         )
     )
     payload = {
@@ -3565,8 +3574,9 @@ def analyze_cv_image_with_openai(image_input: Dict[str, Any]) -> Dict[str, Any]:
                         "Categorie consentite: animale, nudita, contenuto sessuale, violenza, "
                         "sangue o ferite, armi, droghe, immagine non pertinente, contenuto ambiguo. "
                         "Blocca cani, gatti e altri animali, immagini sensibili, immagini estranee "
-                        "al CV e casi ambigui. Consenti soltanto un normale ritratto professionale "
-                        "del candidato oppure loghi, icone, grafici e diagrammi innocui."
+                        "al CV e casi ambigui. Consenti un normale ritratto professionale del "
+                        "candidato, una foto pertinente di laurea o cerimonia accademica del "
+                        "candidato, oppure loghi, icone, grafici e diagrammi innocui."
                     ),
                 },
                 {"type": "image_url", "image_url": image_input.get("image_url", {})},
@@ -3841,27 +3851,15 @@ def extract_social_screenshot_texts(image_inputs: List[Dict]) -> Dict:
             if text:
                 extracted.append(text)
         except Exception as exc:
-            print(f"RapidOCR non riuscito, provo fallback visuale: {exc}")
-            try:
-                if VISION_PROVIDER == "ollama":
-                    text = extract_social_text_with_ollama(image_input)
-                elif VISION_PROVIDER == "openai":
-                    text = extract_social_text_with_openai(image_input)
-                else:
-                    raise RuntimeError("Provider OCR di fallback non configurato.")
-                if text:
-                    extracted.append(text)
-            except Exception as fallback_exc:
-                failed_count += 1
-                last_error = str(fallback_exc)
-                print(f"OCR screenshot social non riuscito: {fallback_exc}")
+            failed_count += 1
+            last_error = str(exc)
+            print(f"OCR screenshot social non riuscito con RapidOCR: {exc}")
 
     combined = clean_social_ocr_text("\n".join(extracted))
     status = "completed" if combined else ("failed" if failed_count else "no_text_found")
     return {
         "status": status,
         "provider": "rapidocr",
-        "fallback_provider": VISION_PROVIDER,
         "screenshots_checked": min(len(image_inputs), 8),
         "screenshots_with_text": len(extracted),
         "failed_count": failed_count,
@@ -6362,6 +6360,22 @@ def build_resume_rewrite_result(
         accepted_suggestions=accepted_suggestions,
         user_additional_data=user_additional_data,
     )
+
+
+def build_docx_rewrite_payloads(rewrite_instructions: List[RewriteInstruction]) -> List[Dict[str, str]]:
+    payloads: List[Dict[str, str]] = []
+    for index, instruction in enumerate(rewrite_instructions or []):
+        if not instruction.replacement or not instruction.section:
+            continue
+        payloads.append({
+            "suggestion_id": instruction.source_id or f"rewrite-instruction-{index + 1}",
+            "target_section": instruction.section,
+            "action": "append" if not str(instruction.original or "").strip() else "replace",
+            "old_text_hint": str(instruction.original or ""),
+            "new_text": instruction.replacement,
+            "reason": instruction.reason,
+        })
+    return payloads
 
 
 def extract_docx_text_bytes(file_bytes: bytes) -> str:
@@ -14061,22 +14075,7 @@ def optimize_user_cv(
             docx_pipeline = ResumeDocxOptimizationPipeline()
             rewrite_instructions = rewrite_result.get("instructions") or []
 
-            docx_suggestions = [
-                {
-                    "suggestion_id": instruction.source_id or f"rewrite-instruction-{index + 1}",
-                    "target_section": instruction.section,
-                    "action": "append",
-                    "old_text_hint": "",
-                    "new_text": instruction.replacement,
-                    "reason": instruction.reason,
-                }
-                for index, instruction in enumerate(rewrite_instructions)
-                if (
-                    instruction.replacement
-                    and instruction.section
-                    and is_additive_user_rewrite_source(instruction.source_id)
-                )
-            ]
+            docx_suggestions = build_docx_rewrite_payloads(rewrite_instructions)
             structured_instructions = docx_pipeline.generate_structured_instructions(
                 cv_text=cv_text,
                 role=role_context,
@@ -15102,10 +15101,36 @@ def update_digital_presence(
     public_user["portfolio_url"] = (data.portfolio_url or "").strip()
     instagram_handle = normalize_instagram_handle(data.instagram_handle)
     public_user["instagram_handle"] = f"@{instagram_handle}" if instagram_handle else ""
-    public_user["visual_media_analysis"] = analyze_public_social_media(public_user)
+    analysis_warnings = []
+    try:
+        public_user["visual_media_analysis"] = analyze_public_social_media(public_user)
+    except Exception as exc:
+        print(f"Analisi media pubblici non riuscita: {exc}")
+        public_user["visual_media_analysis"] = {
+            "status": "analysis_failed",
+            "source": "public_links",
+            "message": "Analisi automatica dei media pubblici non disponibile al momento.",
+            "error": str(exc),
+            "analyzed_count": 0,
+            "analyzed_content_count": 0,
+            "analyzed_preview_count": 0,
+            "flagged_count": 0,
+            "sensitive_flagged_count": 0,
+        }
+        analysis_warnings.append("Analisi media pubblici non disponibile al momento.")
 
-    sources = search_public_profile_signals(public_user, data)
+    try:
+        sources = search_public_profile_signals(public_user, data)
+    except Exception as exc:
+        print(f"Ricerca segnali pubblici non riuscita: {exc}")
+        sources = []
+        analysis_warnings.append("Ricerca dei segnali pubblici dai link non disponibile al momento.")
     digital_analysis = analyze_digital_profile(public_user, sources)
+    if analysis_warnings:
+        digital_analysis["warnings"] = [
+            *[str(item) for item in (digital_analysis.get("warnings") or []) if str(item).strip()],
+            *analysis_warnings,
+        ]
     previous_analysis = json.loads(existing_user[19]) if existing_user[19] else {}
     previous_evidence = previous_analysis.get("analysis_evidence", {})
     previous_profile_analyses = dict(previous_evidence.get("visual_media_analyses", {}))

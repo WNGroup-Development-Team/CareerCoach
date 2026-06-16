@@ -27,7 +27,7 @@ from main import (
     clean_job_role_title,
     skill_semantically_present,
 )
-from services.cv_optimizer import RewriteInstruction
+from services.cv_optimizer import ResumeDocxOptimizationPipeline, RewriteInstruction
 from services.cv_optimizer.skill_suggestions import build_skill_mini_shot_suggestions
 from services.cv_optimizer.suggestions import refine_cv_job_suggestions
 from services.cv_optimizer.structured_cv_engine import build_optimized_cv_text
@@ -500,6 +500,34 @@ class TestSuggestionGeneration(unittest.TestCase):
 
         self.assertEqual(len(sanitized["confirmed_skills"]), 1)
         self.assertEqual(rejected, [])
+
+    def test_docx_pipeline_keeps_confirmed_hard_skills_without_coach_suggestions(self):
+        pipeline = ResumeDocxOptimizationPipeline()
+
+        instructions = pipeline.generate_structured_instructions(
+            cv_text="PROFILO\nStudentessa di Informatica.\nHARD SKILLS\nPython | SQL",
+            role="Data Analyst",
+            company="Google",
+            goal="Dashboard e reporting",
+            accepted_suggestions=[],
+            user_additional_data={
+                "confirmed_skills": [{
+                    "id": "power-bi",
+                    "name": "Power BI",
+                    "category": "hard_skill",
+                    "target_section": "HARD SKILLS",
+                    "type": "skillConfirmation",
+                }]
+            },
+            use_llm=False,
+        )
+
+        self.assertTrue(any(
+            instruction.action == "append"
+            and instruction.target_section == "COMPETENZE TECNICHE"
+            and "Power BI" in instruction.new_text
+            for instruction in instructions
+        ))
 
     def test_adaptation_answer_removes_repeated_markdown_question(self):
         question = "Hai usato Python, SQL o strumenti simili?"

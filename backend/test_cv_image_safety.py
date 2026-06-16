@@ -2,23 +2,48 @@ import io
 import unittest
 import zipfile
 
+from PIL import Image
+
 from services.cv_image_safety import extract_cv_images, validate_cv_images
 
 
 class CvImageSafetyTests(unittest.TestCase):
-    def _docx_with_image(self) -> bytes:
+    def _png_bytes(self, width: int, height: int) -> bytes:
+        output = io.BytesIO()
+        Image.new("RGB", (width, height), color=(32, 64, 128)).save(output, format="PNG")
+        return output.getvalue()
+
+    def _docx_with_images(self, media_files) -> bytes:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w") as archive:
             archive.writestr("[Content_Types].xml", "<Types />")
             archive.writestr("word/document.xml", "<document />")
-            archive.writestr("word/media/image1.png", b"\x89PNG\r\n" + b"x" * 3000)
+            for name, data in media_files:
+                archive.writestr(name, data)
         return output.getvalue()
+
+    def _docx_with_image(self) -> bytes:
+        return self._docx_with_images([
+            ("word/media/image1.png", self._png_bytes(200, 200)),
+        ])
 
     def test_extracts_embedded_docx_images(self):
         images = extract_cv_images("curriculum.docx", self._docx_with_image())
 
         self.assertEqual(len(images), 1)
         self.assertTrue(images[0]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_ignores_small_docx_images(self):
+        images = extract_cv_images(
+            "curriculum.docx",
+            self._docx_with_images([
+                ("word/media/icon.png", self._png_bytes(48, 48)),
+                ("word/media/photo.png", self._png_bytes(160, 160)),
+            ]),
+        )
+
+        self.assertEqual(len(images), 1)
+        self.assertIn("photo.png", images[0]["label"])
 
     def test_blocks_cv_when_analyzer_detects_animal(self):
         result = validate_cv_images(
