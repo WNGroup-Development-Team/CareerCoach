@@ -17,19 +17,24 @@ import {
 } from "./digital-icons";
 
 
-const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const IS_DEV = import.meta.env.DEV;
+const API_URL = import.meta.env.VITE_API_URL || (IS_DEV ? "http://127.0.0.1:8000" : "/api");
 const API_URL_FALLBACKS = (() => {
-  const localOrigins = [
-    "/api",
-    API_URL,
-    API_URL.includes("127.0.0.1") ? API_URL.replace("127.0.0.1", "localhost") : API_URL,
-  ];
+  const localOrigins = [API_URL];
 
-  if (typeof window !== "undefined" && window.location?.hostname) {
+  if (IS_DEV) {
+    localOrigins.push(
+      "/api",
+      API_URL.includes("127.0.0.1") ? API_URL.replace("127.0.0.1", "localhost") : API_URL,
+      "http://localhost:8000",
+      "http://127.0.0.1:8000"
+    );
+  }
+
+  if (IS_DEV && typeof window !== "undefined" && window.location?.hostname) {
     localOrigins.push(`http://${window.location.hostname}:8000`);
   }
 
-  localOrigins.push("http://localhost:8000", "http://127.0.0.1:8000");
   return [...new Set(localOrigins)];
 })();
 const AUTH_TOKEN_KEY = "careercoach_auth_token";
