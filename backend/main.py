@@ -7868,6 +7868,11 @@ Regole:
 - Mantieni lingua, tono, lunghezza, forma dei bullet e livello di sintesi osservati nel CV originale.
 - Puoi migliorare grammatica e chiarezza senza cambiare il significato.
 - Ogni testo deve essere breve e direttamente utilizzabile nel CV, senza note, spiegazioni o titoli interni.
+- Non copiare mai identicamente il testo scritto dall'utente.
+- Riformula sempre il contenuto in stile CV, mantenendo gli stessi fatti.
+- Trasforma la prima persona in forma professionale e impersonale.
+- Se il testo contiene già il nome della skill, non ripeterlo in modo meccanico: usalo come focus e riscrivi la frase.
+- Evita frasi che iniziano con "Ho sviluppato", "Ho preparato", "Ho usato", "Ho realizzato".
 """
     try:
         result = call_rewrite_llm(prompt, context="skill_detail_rewrite", temperature=0.1, max_tokens=700, timeout=30)
