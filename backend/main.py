@@ -12175,6 +12175,16 @@ def check_cv_identity(cv_text: str, user_first_name: str, user_last_name: str) -
     }
 
 
+def identity_check_requires_confirmation(identity_check: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(identity_check, dict):
+        return False
+    if identity_check.get("matches_user") is False:
+        return True
+    detected_name = str(identity_check.get("detected_name") or "").strip()
+    confidence = float(identity_check.get("confidence") or 0)
+    return identity_check.get("matches_user") is None and bool(detected_name) and confidence >= 0.5
+
+
 COACH_SUGGESTION_CATEGORY_LABELS = {
     "profile": "Profilo professionale",
     "experience": "Esperienze da riscrivere meglio",
@@ -13714,7 +13724,7 @@ async def analyze_cv_for_job_endpoint(
         )
 
     identity_check = check_cv_identity(cv_text, user_first_name, user_last_name)
-    if identity_check["matches_user"] is False:
+    if identity_check_requires_confirmation(identity_check):
         raise HTTPException(status_code=400, detail=identity_check["message"])
 
     job_validation = validate_job_input(description, company, role, link, sector, required_skills)
@@ -14674,7 +14684,12 @@ def is_gibberish_cv_text(text: str) -> bool:
     weird_ratio = weird_words / total_words
     return weird_ratio >= 0.4
 
-def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional[str] = None) -> Dict:
+def validate_cv_content(
+    filename: str,
+    file_bytes: bytes,
+    content_type: Optional[str] = None,
+    include_visual_validation: bool = True,
+) -> Dict:
     filename = filename.strip()
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     allowed_extensions = {"pdf", "docx"}
@@ -14813,26 +14828,35 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
         "blocked": False,
     }
     visual_warning = None
-    try:
-        visual_validation = validate_cv_images(
-            filename,
-            file_bytes,
-            analyze_embedded_cv_image,
-        )
-    except Exception as exc:
-        print(
-            f"Controllo immagini non completato perché il servizio visuale non e disponibile: {exc}"
-        )
+    if include_visual_validation:
+        try:
+            visual_validation = validate_cv_images(
+                filename,
+                file_bytes,
+                analyze_embedded_cv_image,
+            )
+        except Exception as exc:
+            print(
+                f"Controllo immagini non completato perché il servizio visuale non e disponibile: {exc}"
+            )
+            visual_validation = {
+                "status": "analysis_failed",
+                "image_count": 0,
+                "analyzed_count": 0,
+                "blocked": False,
+                "message": "Controllo immagini non completato perché il servizio visuale non e disponibile.",
+            }
+            visual_warning = (
+                "Il CV e stato letto correttamente. Il controllo automatico delle immagini non e disponibile al momento, ma il caricamento puo proseguire."
+            )
+    else:
         visual_validation = {
-            "status": "analysis_failed",
+            "status": "skipped_precheck",
             "image_count": 0,
             "analyzed_count": 0,
             "blocked": False,
-            "message": "Controllo immagini non completato perché il servizio visuale non e disponibile.",
+            "message": "Controllo immagini rimandato al caricamento finale del CV.",
         }
-        visual_warning = (
-            "Il CV e stato letto correttamente. Il controllo automatico delle immagini non e disponibile al momento, ma il caricamento puo proseguire."
-        )
 
     if visual_validation.get("blocked"):
         categories = ", ".join(visual_validation.get("blocked_categories") or [])
@@ -14862,7 +14886,56 @@ def validate_cv_content(filename: str, file_bytes: bytes, content_type: Optional
 @app.post("/validate-cv-file")
 async def validate_cv_file(file: UploadFile = File(...)):
     file_bytes = await file.read()
-    return validate_cv_content(file.filename or "", file_bytes, file.content_type)
+    return validate_cv_content(
+        file.filename or "",
+        file_bytes,
+        file.content_type,
+        include_visual_validation=False,
+    )
+
+
+@app.post("/users/{user_id}/cv/precheck")
+async def precheck_user_cv(
+    user_id: int,
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(default=None),
+):
+    require_user_session(user_id, authorization)
+    file_bytes = await file.read()
+    validation = validate_cv_content(
+        file.filename or "",
+        file_bytes,
+        file.content_type,
+        include_visual_validation=False,
+    )
+    if not validation["is_cv"]:
+        return validation
+
+    extracted_text, _extraction_method = extract_text_from_file_bytes(file_bytes, file.filename or "")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    existing_user = fetch_user_by_id(cursor, user_id)
+    conn.close()
+    if not existing_user:
+        raise HTTPException(status_code=404, detail="Utente non trovato.")
+
+    profile_name_parts = (existing_user[1] or "").split()
+    first_name = profile_name_parts[0] if profile_name_parts else ""
+    last_name = " ".join(profile_name_parts[1:]) if len(profile_name_parts) > 1 else ""
+    identity_check = check_cv_identity(extracted_text, first_name, last_name)
+    if identity_check_requires_confirmation(identity_check):
+        return {
+            **validation,
+            "is_cv": False,
+            "reason": identity_check["message"],
+            "identity_check": identity_check,
+        }
+
+    return {
+        **validation,
+        "identity_check": identity_check,
+    }
 
 
 @app.post("/users/{user_id}/cv")
@@ -14913,7 +14986,7 @@ def upload_user_cv(
     first_name = profile_name_parts[0] if profile_name_parts else ""
     last_name = " ".join(profile_name_parts[1:]) if len(profile_name_parts) > 1 else ""
     identity_check = check_cv_identity(extracted_text, first_name, last_name)
-    if identity_check["matches_user"] is False:
+    if identity_check_requires_confirmation(identity_check):
         conn.close()
         raise HTTPException(status_code=400, detail=identity_check["message"])
 
@@ -14986,7 +15059,7 @@ async def upload_linkedin_profile(
     allowed_extensions = {"pdf", "docx"}
 
     if not filename or extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail="Carica l'esportazione LinkedIn in formato PDF o DOCX.")
+        raise HTTPException(status_code=400, detail="Carica l'esportazione LinkedIn in formato PDF.")
 
     file_bytes = await file.read()
     if not file_bytes:

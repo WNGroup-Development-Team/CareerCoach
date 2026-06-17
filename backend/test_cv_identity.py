@@ -19,6 +19,7 @@ class CvIdentityTests(unittest.TestCase):
 
         self.assertIsNone(result["matches_user"])
         self.assertGreaterEqual(result["confidence"], 0.3)
+        self.assertTrue(main.identity_check_requires_confirmation(result))
 
     def test_matches_user_when_full_name_is_present_anywhere_in_cv(self):
         cv_text = (
@@ -32,6 +33,7 @@ class CvIdentityTests(unittest.TestCase):
 
         self.assertTrue(result["matches_user"])
         self.assertEqual(result["confidence"], 1.0)
+        self.assertFalse(main.identity_check_requires_confirmation(result))
 
 
 if __name__ == "__main__":

@@ -5,9 +5,6 @@ import io
 import zipfile
 from typing import Any, Callable, Dict, List
 
-from PIL import Image
-
-
 MIN_IMAGE_SIDE = 72
 MIN_IMAGE_AREA = 8_000
 MAX_IMAGES = 12
@@ -94,12 +91,7 @@ def _extract_docx_images(file_bytes: bytes) -> List[Dict[str, Any]]:
                 if not content_type:
                     continue
                 data = archive.read(name)
-                try:
-                    with Image.open(io.BytesIO(data)) as image:
-                        width, height = image.size
-                except Exception:
-                    continue
-                if min(width, height) < MIN_IMAGE_SIDE or width * height < MIN_IMAGE_AREA:
+                if len(data) < 2_000:
                     continue
                 images.append(_image_input(data, content_type, name))
                 if len(images) >= MAX_IMAGES:

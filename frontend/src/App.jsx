@@ -1893,7 +1893,7 @@ function App() {
       }
 
       if (!data.is_cv) {
-        const detail = data.reason || "Carica un CV valido in formato PDF o DOCX.";
+        const detail = data.reason || "Carica un CV valido in formato DOCX.";
         setCvValidation({
           status: "invalid",
           message: `Il file caricato non sembra leggibile o non sembra essere un CV. Dettaglio: ${detail}`,
@@ -1917,7 +1917,10 @@ function App() {
       setExpandedCoachSuggestionText({});
       setCvValidation({
         status: "valid",
-        message: "CV riconosciuto correttamente.",
+        message:
+          data.visual_validation?.status === "skipped_precheck"
+            ? "CV riconosciuto correttamente. Il controllo completo delle immagini verra eseguito al caricamento finale."
+            : "CV riconosciuto correttamente.",
         confidence: data.confidence || 0,
         detectedSections: data.detected_sections || [],
       });
@@ -1925,7 +1928,7 @@ function App() {
       console.error(err);
       setCvValidation({
         status: "invalid",
-        message: "Non siamo riusciti a verificare il contenuto del file. Riprova con un CV valido in formato PDF o DOCX.",
+        message: "Non siamo riusciti a verificare il contenuto del file. Riprova con un CV valido in formato DOCX.",
         confidence: 0,
         detectedSections: [],
       });
@@ -2018,7 +2021,7 @@ function App() {
 
     const extension = file.name.split(".").pop()?.toLowerCase();
     if (!["pdf", "docx"].includes(extension)) {
-      setError("Carica l'esportazione LinkedIn in formato PDF o DOCX.");
+      setError("Carica l'esportazione LinkedIn in formato PDF.");
       return;
     }
 
