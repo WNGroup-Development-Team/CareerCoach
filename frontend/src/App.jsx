@@ -485,6 +485,36 @@ async function fetchWithApiFallbacks(path, options = {}, timeout = 30000) {
   throw lastError || new Error("Impossibile contattare il backend.");
 }
 
+async function readApiResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  const text = await response.text();
+  return text ? { detail: text } : {};
+}
+
+function getApiErrorMessage(data, fallback) {
+  if (typeof data?.detail === "string") {
+    return data.detail;
+  }
+
+  if (Array.isArray(data?.detail) && data.detail.length > 0) {
+    return data.detail
+      .map((item) => item?.msg || item?.message || "")
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  if (typeof data?.message === "string") {
+    return data.message;
+  }
+
+  return fallback;
+}
+
 function analyzeSpeech(text, durationSeconds) {
   const cleanText = text.toLowerCase();
   const words = cleanText.split(/\s+/).filter(Boolean);
@@ -1974,12 +2004,12 @@ function App() {
           text,
           file_base64: fileBase64
         })
-      }, 15000);
+      }, 45000);
 
-      const data = await response.json();
+      const data = await readApiResponse(response);
 
       if (!response.ok) {
-        setError(typeof data.detail === "string" ? data.detail : "Errore nel caricamento del CV.");
+        setError(getApiErrorMessage(data, "Errore nel caricamento del CV."));
         return;
       }
 
@@ -1999,7 +2029,11 @@ function App() {
       transitionToStep("cv-digital");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      setError(
+        err?.name === "AbortError"
+          ? "Il caricamento del CV sta richiedendo troppo tempo. Riprova tra poco."
+          : "Errore di connessione al backend. Controlla che FastAPI sia avviato."
+      );
     } finally {
       setLoading(false);
     }

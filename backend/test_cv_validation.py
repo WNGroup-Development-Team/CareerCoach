@@ -1,4 +1,5 @@
 import io
+import base64
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -480,6 +481,80 @@ class CvValidationTests(unittest.TestCase):
 
         self.assertTrue(result["is_cv"])
         self.assertFalse(result["visual_validation"]["blocked"])
+
+    def test_upload_user_cv_skips_visual_validation(self):
+        docx_bytes = create_docx_with_image([
+            "Silvia Mucci",
+            "Email: silvia.mucci@example.com",
+            "Esperienze professionali",
+            "Formazione",
+            "Competenze",
+        ])
+        user_row = (
+            49,
+            "Silvia Mucci",
+            "silvia@example.com",
+            "Da CV caricato",
+            "Da definire",
+            "Da definire",
+            "Junior",
+            "Italiano",
+            "",
+            1,
+            "CV_MUCCI_SILVIA.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            len(docx_bytes),
+            "Silvia Mucci\nEsperienze professionali",
+            base64.b64encode(docx_bytes).decode("ascii"),
+            "2026-06-17 10:00:00",
+            "",
+            "",
+            "",
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+        )
+
+        class FakeCursor:
+            def execute(self, *_args, **_kwargs):
+                return None
+
+            def fetchone(self):
+                return user_row
+
+        class FakeConnection:
+            def __init__(self):
+                self.cursor_instance = FakeCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        upload = main.UserCvUpload(
+            filename="CV_MUCCI_SILVIA.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=len(docx_bytes),
+            text="",
+            file_base64=base64.b64encode(docx_bytes).decode("ascii"),
+        )
+
+        with (
+            patch("main.require_user_session", return_value=None),
+            patch("main.get_connection", return_value=FakeConnection()),
+            patch("main.validate_cv_images", side_effect=AssertionError("visual validation should be skipped")),
+        ):
+            result = main.upload_user_cv(49, upload, authorization="Bearer test")
+
+        self.assertEqual(result["message"], "CV salvato nel profilo.")
+        self.assertTrue(result["user"]["cv_uploaded"])
 
     def test_quality_review_treats_semantically_present_replacement_as_kept(self):
         final_text = "Profilo aggiornato con orientamento analitico.\nHARD SKILLS\nPython, SQL, data analysis\n"

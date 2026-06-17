@@ -7549,18 +7549,15 @@ def build_confirmed_skill_rewrite_instructions(
             category = "hard skill"
         if category not in {"hard skill", "soft skill", "tool", "language"}:
             continue
-        if (
-            not name
-            or is_role_like_confirmation(name, role)
-            or skill_semantically_present(cv_text, name)
-        ):
+        if not name or is_role_like_confirmation(name, role):
             continue
+        already_present = skill_semantically_present(cv_text, name)
         section = "SOFT SKILLS" if category == "soft skill" else "HARD SKILLS"
         existing_normalized = {
             canonical_skill_identity(existing)
             for existing in skill_names_by_section.get(section, [])
         }
-        if canonical_skill_identity(name) not in existing_normalized:
+        if not already_present and canonical_skill_identity(name) not in existing_normalized:
             skill_names_by_section.setdefault(section, []).append(name)
         if detail:
             detailed_skills.append({
@@ -8024,29 +8021,44 @@ def build_discursive_skill_evidence(skill_name: str, detail: str) -> str:
         clean_detail,
         flags=re.IGNORECASE,
     ).strip()
+    clean_detail = re.sub(
+        rf"^(?:ho\s+)?(?:sviluppato|rafforzato|maturato|applicato)\s+(?:il|lo|la|l'|un|una)?\s*{re.escape(skill_name)}\s+",
+        "",
+        clean_detail,
+        flags=re.IGNORECASE,
+    ).strip(" .,:;-")
+    clean_detail = re.sub(
+        r"\bmi\s+ha\s+aiutat[oa]\s+a\b",
+        "con contributo a",
+        clean_detail,
+        flags=re.IGNORECASE,
+    )
 
     starters = {
-        "pensiero analitico": "Approccio analitico applicato",
-        "problem solving": "Capacita di problem solving applicata",
-        "collaborazione": "Collaborazione con il team dimostrata",
-        "team working": "Lavoro in team svolto",
-        "comunicazione": "Comunicazione efficace utilizzata",
-        "comunicazione dei risultati": "Comunicazione dei risultati curata",
-        "attenzione ai dettagli": "Attenzione ai dettagli mantenuta",
-        "organizzazione": "Capacita organizzativa applicata",
-        "precisione": "Precisione applicata",
-        "leadership": "Leadership esercitata",
-        "gestione requisiti": "Gestione dei requisiti svolta",
+        "pensiero analitico": "Pensiero analitico sviluppato",
+        "problem solving": "Problem solving sviluppato",
+        "collaborazione": "Collaborazione sviluppata",
+        "team working": "Team working sviluppato",
+        "comunicazione": "Comunicazione efficace sviluppata",
+        "comunicazione dei risultati": "Comunicazione dei risultati sviluppata",
+        "attenzione ai dettagli": "Attenzione ai dettagli sviluppata",
+        "organizzazione": "Capacita organizzativa sviluppata",
+        "precisione": "Precisione sviluppata",
+        "leadership": "Leadership sviluppata",
+        "gestione requisiti": "Gestione dei requisiti sviluppata",
     }
-    starter = starters.get(skill_plain, f"Competenza di {skill_name.lower()} applicata")
+    starter = starters.get(skill_plain, f"Competenza di {skill_name.lower()} sviluppata")
     detail_plain = normalize_plain_text(clean_detail)
     if detail_plain.startswith("progetto "):
         clean_detail = f"un {clean_detail}"
         detail_plain = normalize_plain_text(clean_detail)
-    if detail_plain.startswith(("a ", "al ", "alla ", "alle ", "ai ", "allo ", "per ", "durante ", "nella ", "nel ")):
+    if detail_plain.startswith("durante "):
+        clean_detail = re.sub(r"^durante\s+", "attraverso ", clean_detail, flags=re.IGNORECASE)
+        sentence = f"{starter} {clean_detail}"
+    elif detail_plain.startswith(("a ", "al ", "alla ", "alle ", "ai ", "allo ", "per ", "attraverso ", "nella ", "nel ", "con ")):
         sentence = f"{starter} {clean_detail}"
     else:
-        sentence = f"{starter} durante {clean_detail[:1].lower() + clean_detail[1:]}"
+        sentence = f"{starter} attraverso {clean_detail[:1].lower() + clean_detail[1:]}"
     return sentence.rstrip(".") + "."
 
 
@@ -8054,6 +8066,47 @@ def build_deterministic_skill_evidence(skill_name: str, detail: str) -> str:
     clean_detail = re.sub(r"\s+", " ", detail or "").strip(" .,:;-")
     if not clean_detail:
         return skill_name
+    clean_detail = re.sub(
+        rf"^(?:l[' ]?ho|ho)\s+(?:usato|utilizzato|applicato)\s+{re.escape(skill_name)}\s+",
+        "",
+        clean_detail,
+        flags=re.IGNORECASE,
+    ).strip(" .,:;-")
+    clean_detail = re.sub(
+        rf"^(?:utilizzo|applicazione)\s+(?:di|del|della)?\s*{re.escape(skill_name)}\s+",
+        "",
+        clean_detail,
+        flags=re.IGNORECASE,
+    ).strip(" .,:;-")
+    clean_detail = re.sub(
+        r"\bper\s+monitorare\b",
+        "per il monitoraggio di",
+        clean_detail,
+        flags=re.IGNORECASE,
+    )
+    clean_detail = re.sub(r"\bdi\s+l[’']\s*", "dell'", clean_detail, flags=re.IGNORECASE)
+    clean_detail = re.sub(
+        r"\banalizzare\s+risultati\b",
+        "l'analisi dei risultati",
+        clean_detail,
+        flags=re.IGNORECASE,
+    )
+    clean_detail = re.sub(
+        r"\bvalutare\s+il\s+raggiungimento\b",
+        "la valutazione del raggiungimento",
+        clean_detail,
+        flags=re.IGNORECASE,
+    )
+    clean_detail = re.sub(r",\s*e\s+", " e ", clean_detail)
+    leading_context = re.match(
+        r"^(?:in|durante)\s+(.+?)\s+per\s+(.+)$",
+        clean_detail,
+        flags=re.IGNORECASE,
+    )
+    if leading_context:
+        context = leading_context.group(1).strip(" ,;:-")
+        action = leading_context.group(2).strip(" ,;:-")
+        return f"Utilizzo di {skill_name} per {action} in {context}"
     if normalize_plain_text(skill_name) in normalize_plain_text(clean_detail):
         return clean_detail[:1].upper() + clean_detail[1:]
     without_lead = re.sub(
@@ -15001,7 +15054,12 @@ def upload_user_cv(
     if len(file_bytes) != data.size:
         raise HTTPException(status_code=400, detail="Il file ricevuto non corrisponde al CV selezionato.")
 
-    validation = validate_cv_content(filename, file_bytes, data.content_type)
+    validation = validate_cv_content(
+        filename,
+        file_bytes,
+        data.content_type,
+        include_visual_validation=False,
+    )
     if not validation["is_cv"]:
         raise HTTPException(
             status_code=400,

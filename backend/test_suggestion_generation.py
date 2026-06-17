@@ -8,7 +8,9 @@ sys.path.insert(0, '.')
 
 from main import (
     build_coach_suggestions_from_evaluation,
+    build_confirmed_skill_rewrite_instructions,
     build_cv_job_suggestions,
+    build_discursive_skill_evidence,
     build_generic_rewrite_fallbacks,
     canonical_skill_identity,
     build_role_skill_suggestions,
@@ -51,6 +53,75 @@ class TestSuggestionGeneration(unittest.TestCase):
         self.assertTrue(
             skill_semantically_present("Team working", "Collaborazione in team")
         )
+
+    def test_soft_skill_user_detail_is_rewritten_as_cv_sentence(self):
+        detail = (
+            "Ho sviluppato il pensiero analitico durante progetti universitari e applicativi, "
+            "analizzando dati, problemi e risultati in modo strutturato. "
+            "Mi ha aiutata a individuare criticita, confrontare alternative e proporre "
+            "soluzioni basate su evidenze concrete."
+        )
+
+        result = build_discursive_skill_evidence("Pensiero analitico", detail)
+        normalized = result.lower()
+
+        self.assertIn("Pensiero analitico sviluppato attraverso progetti universitari", result)
+        self.assertIn("analizzando dati, problemi e risultati", result)
+        self.assertIn("soluzioni basate su evidenze concrete", result)
+        self.assertNotIn("applicato durante ho sviluppato", normalized)
+        self.assertNotIn("durante ho sviluppato", normalized)
+        self.assertNotIn("mi ha aiutata", normalized)
+
+    def test_confirmed_hard_skill_box_detail_is_used_professionally(self):
+        instructions = build_confirmed_skill_rewrite_instructions(
+            "PROFILO\nStudentessa magistrale.\nHARD SKILLS\nPython | KPI",
+            {
+                "confirmed_skills": [{
+                    "name": "KPI",
+                    "category": "hard_skill",
+                    "user_example": (
+                        "Ho utilizzato KPI in progetti universitari e applicativi per monitorare "
+                        "l'andamento delle attivita, analizzare risultati e valutare il "
+                        "raggiungimento degli obiettivi."
+                    ),
+                }]
+            },
+            role="Data Analyst",
+        )
+
+        detail = next(item for item in instructions if item.source_id.startswith("confirmed_skill_detail"))
+        normalized = detail.replacement.lower()
+
+        self.assertIn("Utilizzo di KPI per il monitoraggio dell'andamento delle attivita", detail.replacement)
+        self.assertIn("l'analisi dei risultati", detail.replacement)
+        self.assertIn("la valutazione del raggiungimento degli obiettivi", detail.replacement)
+        self.assertNotIn("Ho utilizzato", detail.replacement)
+        self.assertNotIn("Utilizzo di KPI: ho", detail.replacement)
+        self.assertNotIn("kpi | kpi", normalized)
+
+    def test_confirmed_soft_skill_box_detail_is_used_even_if_skill_exists(self):
+        instructions = build_confirmed_skill_rewrite_instructions(
+            "PROFILO\nStudentessa magistrale.\nSOFT SKILLS\nPensiero analitico",
+            {
+                "confirmed_skills": [{
+                    "name": "Pensiero analitico",
+                    "category": "soft_skill",
+                    "user_example": (
+                        "Ho sviluppato il pensiero analitico durante progetti universitari "
+                        "e applicativi, analizzando dati, problemi e risultati in modo strutturato."
+                    ),
+                }]
+            },
+            role="Data Analyst",
+        )
+
+        detail = next(item for item in instructions if item.source_id.startswith("confirmed_skill_detail"))
+        normalized = detail.replacement.lower()
+
+        self.assertIn("Pensiero analitico sviluppato attraverso progetti universitari", detail.replacement)
+        self.assertIn("analizzando dati, problemi e risultati", detail.replacement)
+        self.assertNotIn("applicato durante ho sviluppato", normalized)
+        self.assertNotIn("durante ho sviluppato", normalized)
 
     def test_translated_and_similar_skills_are_semantic_duplicates(self):
         self.assertTrue(
