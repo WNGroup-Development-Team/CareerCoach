@@ -1950,7 +1950,7 @@ function App() {
         status: "valid",
         message:
           data.visual_validation?.status === "skipped_precheck"
-            ? "CV riconosciuto correttamente. Il controllo completo delle immagini verra eseguito al caricamento finale."
+            ? "CV riconosciuto correttamente. Il controllo completo delle immagini verrà eseguito al caricamento finale."
             : "CV riconosciuto correttamente.",
         confidence: data.confidence || 0,
         detectedSections: data.detected_sections || [],
@@ -4198,7 +4198,7 @@ function App() {
             <div className="digital-card digital-card--screens">
               <h3 className="digital-card-title">Screenshot del profilo</h3>
               <p className="digital-card-subtitle">
-                Fino a 2 immagini · controlliamo solo la presenza di contenuti sensibili e non le salviamo
+                Fino a 2 immagini, controlliamo solo la presenza di contenuti sensibili e non le salviamo
               </p>
 
               <div
