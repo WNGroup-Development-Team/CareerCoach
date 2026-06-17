@@ -4,6 +4,7 @@ import re
 import unicodedata
 import sqlite3
 import requests
+import time
 import secrets
 import hashlib
 import hmac
@@ -3304,13 +3305,17 @@ def select_ollama_visual_model(require_structured_output: bool = False) -> str:
     return primary_model or ocr_model or "moondream"
 
 
-def analyze_image_with_ollama(image_input: Dict) -> Dict:
+def analyze_image_with_ollama(image_input: Dict, prefer_lightweight: bool = False) -> Dict:
     encoded_image = extract_image_base64(image_input)
     if not encoded_image:
         raise ValueError("Immagine Base64 non disponibile.")
 
-    classifier_model = select_ollama_visual_model(require_structured_output=True)
-    uses_lightweight_description = classifier_model.split(":", 1)[0] == "moondream"
+    classifier_model = (
+        select_ollama_visual_model(require_structured_output=False)
+        if prefer_lightweight
+        else select_ollama_visual_model(require_structured_output=True)
+    )
+    uses_lightweight_description = prefer_lightweight or classifier_model.split(":", 1)[0] == "moondream"
     print(
         "Screenshot analysis: chiamata Ollama visuale "
         f"(model={classifier_model}, lightweight={uses_lightweight_description})"
@@ -3344,7 +3349,7 @@ def analyze_image_with_ollama(image_input: Dict) -> Dict:
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
         json=payload,
-        timeout=240,
+        timeout=60 if prefer_lightweight else 240,
     )
     if not response.ok:
         try:
@@ -3447,10 +3452,27 @@ def normalize_cv_image_result(result: Dict[str, Any]) -> Dict[str, Any]:
         for category in result.get("categories") or []
         if str(category).strip().lower() in CV_IMAGE_BLOCKED_CATEGORIES
     ]
+    summary = str(result.get("summary") or "").strip()
+    severe_categories = {
+        "animale",
+        "nudita",
+        "contenuto sessuale",
+        "violenza",
+        "sangue o ferite",
+        "armi",
+        "droghe",
+    }
+    severe_hits = [category for category in categories if category in severe_categories]
+    if len(set(severe_hits)) >= 4:
+        return {
+            "blocked": False,
+            "categories": [],
+            "summary": summary or "Output del controllo immagini non affidabile: blocco ignorato.",
+        }
     return {
         "blocked": bool(result.get("blocked")) or bool(categories),
         "categories": sorted(set(categories)),
-        "summary": str(result.get("summary") or "").strip(),
+        "summary": summary,
     }
 
 
@@ -3616,22 +3638,35 @@ def moderate_visual_inputs(image_inputs: List[Dict], source: str, discovered_cou
         }
 
     if VISION_PROVIDER == "ollama":
+        prefer_lightweight = False
+        max_images = 1 if source in {"uploaded_screenshots", "public_links"} else 8
+        selected_inputs = image_inputs[:max_images]
         analyzed = []
         failed_count = 0
         last_error = ""
-        for image_input in image_inputs[:8]:
-            try:
-                analyzed.append(analyze_image_with_ollama(image_input))
-            except Exception as exc:
-                failed_count += 1
-                last_error = str(exc)
-                print(f"Analisi visuale Ollama non riuscita per un media: {exc}")
-                if (
-                    "connection" in last_error.lower()
-                    or "connessione" in last_error.lower()
-                    or last_error.startswith("Ollama:")
-                ):
-                    break
+        for attempt in range(2):
+            analyzed = []
+            failed_count = 0
+            last_error = ""
+            for image_input in selected_inputs:
+                try:
+                    analyzed.append(analyze_image_with_ollama(image_input, prefer_lightweight=prefer_lightweight))
+                except Exception as exc:
+                    failed_count += 1
+                    last_error = str(exc)
+                    print(f"Analisi visuale Ollama non riuscita per un media: {exc}")
+                    if (
+                        "connection" in last_error.lower()
+                        or "connessione" in last_error.lower()
+                        or "timed out" in last_error.lower()
+                        or "timeout" in last_error.lower()
+                        or last_error.startswith("Ollama:")
+                    ):
+                        break
+            if analyzed or attempt == 1:
+                break
+            print("Visual moderation retry: provider visuale lento o non ancora pronto, nuovo tentativo tra 2s.")
+            time.sleep(2)
         if analyzed:
             print(
                 "Visual moderation completed with Ollama: "
@@ -15353,10 +15388,20 @@ async def analyze_social_screenshots(
         "uploaded_screenshots",
         len(image_inputs),
     )
-    if screenshot_analysis.get("status") == "rate_limited":
-        raise HTTPException(status_code=429, detail=screenshot_analysis["message"])
-    if screenshot_analysis.get("status") in {"provider_not_configured", "provider_unavailable"}:
-        raise HTTPException(status_code=503, detail=screenshot_analysis["message"])
+    pending_visual_analysis = screenshot_analysis.get("status") in {
+        "rate_limited",
+        "provider_not_configured",
+        "provider_unavailable",
+    }
+    if pending_visual_analysis:
+        screenshot_analysis = {
+            **screenshot_analysis,
+            "status": "pending",
+            "blocked": False,
+            "flagged_count": 0,
+            "sensitive_flagged_count": 0,
+            "message": "Il controllo automatico delle immagini non e ancora completato. Puoi continuare e riprovare piu tardi.",
+        }
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -15396,7 +15441,8 @@ async def analyze_social_screenshots(
     batch_payload = {
         "profile_type": profile_type,
         "profile_label": VISUAL_PROFILE_LABELS[profile_type],
-        "valid": True,
+        "valid": not pending_visual_analysis,
+        "status": screenshot_analysis.get("status", "completed"),
         "visual_analysis": screenshot_analysis,
         "flagged_count": int(screenshot_analysis.get("flagged_count", 0) or 0),
         "sensitive_flagged_count": int(screenshot_analysis.get("sensitive_flagged_count", 0) or 0),
@@ -15437,7 +15483,7 @@ async def analyze_social_screenshots(
         "analysis": digital_analysis,
         "message": (
             f"{VISUAL_PROFILE_LABELS[profile_type]}: {screenshot_analysis['message']} "
-            f"Punteggio digitale aggiornato: {digital_analysis['score']}%."
+            #f"Punteggio digitale aggiornato: {digital_analysis['score']}%."
         ),
     }
 

@@ -891,6 +891,7 @@ function App() {
   const screenshotQueueGenerationRef = useRef(0);
   const screenshotFileInputRef = useRef(null);
   const selectedScreenshotFilesRef = useRef([]);
+  const lastScreenshotBatchRef = useRef({});
   const [linkedinUploadMessage, setLinkedinUploadMessage] = useState("");
   const [socialScreenshotMessages, setSocialScreenshotMessages] = useState({});
   const [selectedScreenshotFiles, setSelectedScreenshotFiles] = useState([]);
@@ -2122,7 +2123,11 @@ function App() {
       transitionToStep("cv-analysis");
     } catch (err) {
       console.error(err);
-      setError("Errore di connessione al backend. Controlla che FastAPI sia avviato.");
+      setError(
+        err?.name === "AbortError"
+          ? "L'analisi della presenza digitale sta richiedendo piu tempo del previsto. I dati inseriti restano disponibili: riprova tra poco."
+          : "Non siamo riusciti a completare l'analisi della presenza digitale in questo momento. Riprova tra poco."
+      );
     } finally {
       setLoading(false);
     }
@@ -2167,7 +2172,11 @@ function App() {
           continue;
         }
         if (!response.ok) {
-          setError(typeof data.detail === "string" ? data.detail : "Errore nell'analisi degli screenshot.");
+          setError(
+            typeof data.detail === "string"
+              ? data.detail
+              : "Non siamo riusciti a completare il controllo automatico delle immagini. Puoi continuare e riprovare tra poco."
+          );
           continue;
         }
 
@@ -2184,8 +2193,8 @@ function App() {
         console.error(err);
         setError(
           err?.name === "AbortError"
-            ? "L'analisi locale degli screenshot sta richiedendo troppo tempo. Prova con meno immagini."
-            : "Errore di connessione durante l'analisi degli screenshot. Controlla che FastAPI e Ollama siano avviati."
+            ? "Il controllo delle immagini sta richiedendo piu tempo del previsto. Puoi continuare e riprovare tra poco."
+            : "Non siamo riusciti a completare il controllo automatico delle immagini. Puoi continuare e riprovare tra poco."
         );
       }
     }
@@ -2211,6 +2220,11 @@ function App() {
       return;
     }
 
+    lastScreenshotBatchRef.current[profileType] = {
+      files: selectedFiles,
+      instagramHandle: digitalPresence.instagram_handle.trim(),
+    };
+
     screenshotAnalysisQueueRef.current.push({
       profileType,
       files: selectedFiles,
@@ -2235,6 +2249,15 @@ function App() {
         : "",
     }));
     processSocialScreenshotQueue();
+  };
+
+  const retrySocialScreenshots = (profileType) => {
+    const lastBatch = lastScreenshotBatchRef.current[profileType];
+    if (!lastBatch?.files?.length || screenshotAnalysisProgress.active) {
+      return;
+    }
+
+    analyzeSocialScreenshots(profileType, lastBatch.files);
   };
 
   const addSelectedScreenshotFiles = (files) => {
@@ -4141,7 +4164,7 @@ function App() {
             <div className="digital-card digital-card--screens">
               <h3 className="digital-card-title">Screenshot del profilo</h3>
               <p className="digital-card-subtitle">
-                Fino a 8 immagini · controlliamo solo la presenza di contenuti sensibili e non le salviamo
+                Fino a 2 immagini · controlliamo solo la presenza di contenuti sensibili e non le salviamo
               </p>
 
               <div
@@ -4265,7 +4288,18 @@ function App() {
                   )}
 
                   {socialScreenshotMessages.instagram && (
-                    <p className="linkedin-upload-message">{socialScreenshotMessages.instagram}</p>
+                    <>
+                      <p className="linkedin-upload-message">{socialScreenshotMessages.instagram}</p>
+                      {lastScreenshotBatchRef.current.instagram?.files?.length > 0 && !screenshotAnalysisProgress.active && (
+                        <button
+                          className="digital-analyze-screenshots-button"
+                          type="button"
+                          onClick={() => retrySocialScreenshots("instagram")}
+                        >
+                          Riprova controllo screenshot
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
